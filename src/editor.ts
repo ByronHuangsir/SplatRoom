@@ -1,0 +1,1479 @@
+import { MemoryFileSystem } from '@playcanvas/splat-transform';
+import { Color, GSplatData, Mat4, path, Quat, Texture, Vec3, Vec4 } from 'playcanvas';
+
+import { EditHistory } from './edit-history';
+import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp } from './edit-ops';
+import { Element, ElementType } from './element';
+import { Events } from './events';
+import { healInpaint, getSelectedIndices, HealParams } from './heal-inpaint';
+import type { GridPlane } from './infinite-grid';
+import { MappedReadFileSystem } from './io';
+import { Scene } from './scene';
+import { Splat } from './splat';
+import { State } from './splat-state';
+import { writeSplatFile } from './splat-serialize';
+import { serializeGrade, deserializeGrade } from './color-grade-file';
+
+const removeExtension = (filename: string) => {
+    return filename.substring(0, filename.length - path.getExtension(filename).length);
+};
+
+// register for editor and scene events
+const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: Scene) => {
+    const vec = new Vec3();
+    const vec2 = new Vec3();
+    const vec4 = new Vec4();
+    const mat = new Mat4();
+    const SH_C0 = 0.28209479177387814;
+
+    const decodeColorChannel = (value: number) => {
+        return Math.min(1, Math.max(0, 0.5 + value * SH_C0));
+    };
+
+    // get the list of selected splats (supports multi-select via Ctrl+Click in scene panel)
+    const selectedSplats = () => {
+        return (events.invoke('selection.all') as Splat[]) ?? [];
+    };
+
+    let lastExportCursor = 0;
+
+    // add unsaved changes warning message.
+    window.addEventListener('beforeunload', (e) => {
+        if (!events.invoke('scene.dirty')) {
+            // if the undo cursor matches last export, then we have no unsaved changes
+            return undefined;
+        }
+
+        const msg = 'You have unsaved changes. Are you sure you want to leave?';
+        e.returnValue = msg;
+        return msg;
+    });
+
+    events.function('targetSize', () => {
+        return scene.targetSize;
+    });
+
+    events.on('scene.clear', () => {
+        scene.clear();
+        editHistory.clear();
+        lastExportCursor = 0;
+    });
+
+    // When a splat is removed from the scene, remove all edit operations that reference it
+    events.on('scene.elementRemoved', (element: Element) => {
+        if (element.type === ElementType.splat) {
+            editHistory.removeForSplat(element as Splat);
+        }
+    });
+
+    // When a splat is first added, focus the camera on its dense region.
+    // Skip if there were already other splats in the scene (undo/redo, merge).
+    events.on('scene.elementAdded', (element: Element) => {
+        if (element.type === ElementType.splat) {
+            const splatCount = scene.getElementsByType(ElementType.splat).length;
+            if (splatCount <= 1) {
+                scene.camera.focus();
+            }
+        }
+    });
+
+    events.function('scene.dirty', () => {
+        return editHistory.cursor !== lastExportCursor;
+    });
+
+    events.on('doc.saved', () => {
+        lastExportCursor = editHistory.cursor;
+    });
+
+    // force render on some events
+
+    [
+        'camera.mode', 'camera.overlay', 'camera.splatSize', 'view.outlineSelection',
+        'view.centersUseGaussianColor', 'view.bands', 'camera.bound', 'camera.boundDimensions', 'camera.showPoses',
+        'camera.showInfo', 'selection.changed', 'tool.coordSpace'
+    ].forEach((eventName) => {
+        events.on(eventName, () => {
+            scene.forceRender = true;
+        });
+    });
+
+    // grid.visible
+
+    const setGridVisible = (visible: boolean) => {
+        if (visible !== scene.grid.visible) {
+            scene.grid.visible = visible;
+            events.fire('grid.visible', visible);
+        }
+    };
+
+    events.function('grid.visible', () => {
+        return scene.grid.visible;
+    });
+
+    events.on('grid.setVisible', (visible: boolean) => {
+        setGridVisible(visible);
+    });
+
+    events.on('grid.toggleVisible', () => {
+        setGridVisible(!scene.grid.visible);
+    });
+
+    setGridVisible(scene.config.show.grid);
+
+    // grid.plane
+
+    const setGridPlane = (plane: GridPlane) => {
+        if (plane !== scene.grid.plane) {
+            scene.grid.plane = plane;
+            events.fire('grid.plane', plane);
+        }
+    };
+
+    events.function('grid.plane', () => {
+        return scene.grid.plane;
+    });
+
+    events.on('grid.setPlane', (plane: GridPlane) => {
+        setGridPlane(plane);
+    });
+
+    // camera.fovDolly
+
+    let fovDolly = false;
+
+    const setFovDolly = (value: boolean) => {
+        if (value !== fovDolly) {
+            fovDolly = value;
+            events.fire('camera.fovDolly', fovDolly);
+        }
+    };
+
+    events.function('camera.fovDolly', () => {
+        return fovDolly;
+    });
+
+    events.on('camera.setFovDolly', (value: boolean) => {
+        setFovDolly(value);
+    });
+
+    // camera.fov
+
+    const setCameraFov = (fov: number) => {
+        const { camera } = scene;
+        if (fov !== camera.fov) {
+            const oldFovFactor = camera.fovFactor;
+            camera.fov = fov;
+
+            // by default a fov change acts like a lens zoom: scale distance so
+            // the camera's world-space offset from the focal point (distance *
+            // sceneRadius / fovFactor) is unchanged. with auto-dolly enabled
+            // the camera moves instead, preserving the subject's framing.
+            if (!fovDolly) {
+                const { controls } = scene.config;
+                const k = camera.fovFactor / oldFovFactor;
+                const t = camera.distanceTween;
+                for (const s of [t.value, t.source, t.target]) {
+                    s.distance = Math.max(controls.minZoom, Math.min(controls.maxZoom, s.distance * k));
+                }
+            }
+
+            events.fire('camera.fov', camera.fov);
+        }
+    };
+
+    events.function('camera.fov', () => {
+        return scene.camera.fov;
+    });
+
+    events.on('camera.setFov', (fov: number) => {
+        setCameraFov(fov);
+    });
+
+    // camera.tonemapping
+
+    events.function('camera.tonemapping', () => {
+        return scene.camera.tonemapping;
+    });
+
+    events.on('camera.setTonemapping', (value: string) => {
+        scene.camera.tonemapping = value;
+    });
+
+    // camera.bound
+
+    let bound = scene.config.show.bound;
+
+    const setBoundVisible = (visible: boolean) => {
+        if (visible !== bound) {
+            bound = visible;
+            events.fire('camera.bound', bound);
+        }
+    };
+
+    events.function('camera.bound', () => {
+        return bound;
+    });
+
+    events.on('camera.setBound', (value: boolean) => {
+        setBoundVisible(value);
+    });
+
+    events.on('camera.toggleBound', () => {
+        setBoundVisible(!events.invoke('camera.bound'));
+    });
+
+    // camera.boundDimensions
+
+    let boundDimensions = scene.config.show.boundDimensions;
+
+    const setBoundDimensionsVisible = (visible: boolean) => {
+        if (visible !== boundDimensions) {
+            boundDimensions = visible;
+            events.fire('camera.boundDimensions', boundDimensions);
+        }
+    };
+
+    events.function('camera.boundDimensions', () => {
+        return boundDimensions;
+    });
+
+    events.on('camera.setBoundDimensions', (value: boolean) => {
+        setBoundDimensionsVisible(value);
+    });
+
+    events.on('camera.toggleBoundDimensions', () => {
+        setBoundDimensionsVisible(!events.invoke('camera.boundDimensions'));
+    });
+
+    // camera.showPoses
+
+    let showPoses = scene.config.show.cameraPoses;
+
+    const setShowPoses = (visible: boolean) => {
+        if (visible !== showPoses) {
+            showPoses = visible;
+            events.fire('camera.showPoses', showPoses);
+        }
+    };
+
+    events.function('camera.showPoses', () => {
+        return showPoses;
+    });
+
+    events.on('camera.setShowPoses', (value: boolean) => {
+        setShowPoses(value);
+    });
+
+    events.on('camera.toggleShowPoses', () => {
+        setShowPoses(!events.invoke('camera.showPoses'));
+    });
+
+    // camera.showInfo
+
+    let showInfo = scene.config.show.cameraInfo;
+
+    const setShowInfo = (visible: boolean) => {
+        if (visible !== showInfo) {
+            showInfo = visible;
+            events.fire('camera.showInfo', showInfo);
+        }
+    };
+
+    events.function('camera.showInfo', () => {
+        return showInfo;
+    });
+
+    events.on('camera.setShowInfo', (value: boolean) => {
+        setShowInfo(value);
+    });
+
+    events.on('camera.toggleShowInfo', () => {
+        setShowInfo(!events.invoke('camera.showInfo'));
+    });
+
+    // camera.focus
+
+    events.on('camera.focus', () => {
+        const splats = selectedSplats();
+        if (splats.length === 0) {
+            scene.camera.focus();
+            return;
+        }
+        const splat = splats[0];
+
+        // if selected splats are in a group, use the group's combined center
+        const group = scene.groupManager.getForSplat(splat);
+        if (group && group.size > 1) {
+            const fp = group.focalPoint;
+            const br = group.radius;
+            scene.camera.focus({
+                focalPoint: fp,
+                radius: br,
+                speed: 1
+            });
+            return;
+        }
+
+        // Focal point = density-weighted center, radius = full bounding box.
+        const boundR = splat.worldBound.halfExtents.length();
+        scene.camera.focus({
+            focalPoint: splat.focalPoint(),
+            radius: boundR,
+            speed: 1
+        });
+    });
+
+    events.on('camera.reset', () => {
+        const camera = scene.camera;
+
+        if (camera.controlMode === 'fly' && camera.flyEntryPose) {
+            // Fly mode: restore the snapshot captured when entering fly mode
+            const pose = camera.flyEntryPose;
+            camera.setFocalPoint(pose.focalPoint, 1);
+            camera.setAzimElev(pose.azim, pose.elev, 1);
+            camera.setDistance(pose.distance, 1);
+        } else {
+            // Orbit mode (or no snapshot yet): reset to front-facing view
+            const { initialZoom } = scene.config.controls;
+            camera.setFocalPoint(new Vec3(0, 0, 0), 1);
+            camera.setAzimElev(0, 0, 1);
+            camera.setDistance(initialZoom, 1);
+        }
+    });
+
+    // handle camera align events
+    events.on('camera.align', (axis: string) => {
+        switch (axis) {
+            case 'px': scene.camera.setAzimElev(90, 0); break;
+            case 'py': scene.camera.setAzimElev(0, -90); break;
+            case 'pz': scene.camera.setAzimElev(0, 0); break;
+            case 'nx': scene.camera.setAzimElev(270, 0); break;
+            case 'ny': scene.camera.setAzimElev(0, 90); break;
+            case 'nz': scene.camera.setAzimElev(180, 0); break;
+        }
+
+        // switch to ortho mode
+        scene.camera.ortho = true;
+    });
+
+    // returns true if the selected splat has selected gaussians
+    events.function('selection.splats', () => {
+        const splat = events.invoke('selection') as Splat;
+        return splat?.numSelected > 0;
+    });
+
+    // check if the selected splat has any gaussians that are both selected AND deleted
+    events.function('selection.hasDeletedSelected', () => {
+        const splat = events.invoke('selection') as Splat;
+        if (!splat) return false;
+        const state = splat.splatData.getProp('state') as Uint8Array;
+        for (let i = 0; i < state.length; i++) {
+            if (state[i] === (State.selected | State.deleted)) return true;
+        }
+        return false;
+    });
+
+    // returns true if multiple splats are selected (for group operations)
+    events.function('selection.hasMultiple', () => {
+        const sel = events.invoke('selection.all') as Splat[];
+        return sel.length > 1;
+    });
+
+    // returns true if any selected splat is already in a group
+    events.function('group.hasActive', () => {
+        const sel = events.invoke('selection.all') as Splat[];
+        if (sel.length === 0) return false;
+        for (const s of sel) {
+            if (scene.groupManager.getForSplat(s)) return true;
+        }
+        return false;
+    });
+
+    // returns true if GroupRenderer is currently active (rendering a merged entity)
+    events.function('groupRenderer.isActive', () => {
+        return scene.groupRenderer.isActive;
+    });
+
+    // toggle group: create or remove group for selected splats
+    events.on('scene.group.toggle', () => {
+        const sel = events.invoke('selection.all') as Splat[];
+        if (sel.length === 0) return;
+
+        // check if these exact splats already form a group (for unbind)
+        const exactGroup = scene.groupManager.getForSplats(sel);
+        if (exactGroup) {
+            scene.groupRenderer.setGroup(null);
+            scene.groupManager.remove(exactGroup);
+            scene.forceRender = true;
+            return;
+        }
+
+        // if only one splat selected and it's part of a group, unbind that group
+        if (sel.length === 1) {
+            const singleGroup = scene.groupManager.getForSplat(sel[0]);
+            if (singleGroup) {
+                scene.groupRenderer.setGroup(null);
+                scene.groupManager.remove(singleGroup);
+                scene.forceRender = true;
+                return;
+            }
+        }
+
+        // need at least 2 splats to create a group
+        if (sel.length < 2) return;
+
+        // remove any splats that are already in other groups
+        for (const s of sel) {
+            scene.groupManager.removeSplatFromAll(s);
+        }
+        scene.groupRenderer.setGroup(null); // clear old group first
+        const newGroup = scene.groupManager.create(sel);
+        scene.groupRenderer.setGroup(newGroup);
+        scene.forceRender = true;
+
+        // Update camera focal point to group's joint center so orbit
+        // rotates around the unified center, not individual splat centers.
+        const fp = newGroup.focalPoint;
+        const r = newGroup.radius;
+        scene.camera.focus({
+            focalPoint: fp,
+            radius: r,
+            speed: 1
+        });
+    });
+
+    // when a group is removed by the manager (e.g. element removed), clean up renderer
+    events.on('group.removed', () => {
+        scene.groupRenderer.setGroup(null);
+    });
+
+    // merge selected splats into a single new model
+    events.on('scene.group.merge', async () => {
+        const sel = events.invoke('selection.all') as Splat[];
+        if (sel.length < 2) return;
+
+        // 0. Unbind any active group that contains these splats first.
+        // The merged entity replaces the group; leaving stale group state
+        // would cause rendering/selection issues.
+        const existingGroup = scene.groupManager.getForSplats(sel);
+        if (existingGroup) {
+            scene.groupRenderer.setGroup(null);
+            scene.groupManager.remove(existingGroup);
+        } else {
+            // Also check each splat individually for partial group membership
+            for (const s of sel) {
+                const g = scene.groupManager.getForSplat(s);
+                if (g) {
+                    scene.groupRenderer.setGroup(null);
+                    scene.groupManager.remove(g);
+                }
+            }
+        }
+
+        events.fire('startSpinner');
+        try {
+            // 1. Build merged GSplatData with world-space positions from GroupRenderer
+            const gsplatData = scene.groupRenderer.buildMergedGSplatData(sel);
+
+            // 2. Create a new Splat from the merged data
+            const asset = scene.assetLoader.createGSplatAsset(gsplatData, 'merged.ply');
+            const newSplat = new Splat(asset, new Quat());
+
+            // Transform is identity — positions are already in world space
+            newSplat.entity.setLocalPosition(0, 0, 0);
+            newSplat.entity.setLocalRotation(0, 0, 0, 1);
+            newSplat.entity.setLocalScale(1, 1, 1);
+
+            // 3. Add new splat to scene
+            await scene.add(newSplat);
+
+            // 4. Hide the original splats
+            for (const s of sel) {
+                s.visible = false;
+            }
+
+            // 5. Select the new merged splat
+            events.fire('selection.set', newSplat);
+
+            // 6. Focus camera on the merged model
+            const bound = newSplat.worldBound;
+            if (bound) {
+                const center = bound.center.clone();
+                const radius = bound.halfExtents.length();
+                scene.camera.focus({ focalPoint: center, radius, speed: 1 });
+            }
+        } finally {
+            events.fire('stopSpinner');
+        }
+    });
+
+    events.on('select.all', () => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new SelectAllOp(splat));
+        });
+    });
+
+    events.on('select.none', () => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new SelectNoneOp(splat));
+        });
+    });
+
+    events.on('select.invert', () => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new SelectInvertOp(splat));
+        });
+    });
+
+    events.on('select.mask', (op: 'add'|'remove'|'set'|'intersect', mask: Uint8Array | Uint32Array) => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new SelectOp(splat, op, mask));
+        });
+    });
+
+    // run the GPU intersect + the resulting SelectOp inside one queued task so the
+    // gpu readback is ordered relative to other queued history ops (rapid drag +
+    // undo, drag-while-camera-settling, etc).
+    const runSelectIntersect = (splat: Splat, op: 'add'|'remove'|'set'|'intersect', options: any) => {
+        return scene.commandQueue.enqueue(async () => {
+            const data = await scene.dataProcessor.intersect(options, splat);
+            // SelectOp consumes `data` synchronously in its constructor
+            // (IndexRanges.fromPredicate iterates immediately), so we can
+            // return the buffer to the pool as soon as the op is constructed.
+            events.fire('edit.add', new SelectOp(splat, op, data));
+            scene.dataProcessor.releaseMask(data);
+        });
+    };
+
+    // transform maps the unit sphere (diameter 1) to world space
+    events.on('select.bySphere', async (op: 'add'|'remove'|'set'|'intersect', transform: Mat4) => {
+        for (const splat of selectedSplats()) {
+            await runSelectIntersect(splat, op, {
+                sphere: { transform }
+            });
+        }
+    });
+
+    // transform maps the unit cube (side 1) to world space
+    events.on('select.byBox', async (op: 'add'|'remove'|'set'|'intersect', transform: Mat4) => {
+        for (const splat of selectedSplats()) {
+            await runSelectIntersect(splat, op, {
+                box: { transform }
+            });
+        }
+    });
+
+    events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: any) => {
+        const mode = events.invoke('camera.mode');
+
+        for (const splat of selectedSplats()) {
+            if (mode === 'centers') {
+                await runSelectIntersect(splat, op, {
+                    rect: { x1: rect.start.x, y1: rect.start.y, x2: rect.end.x, y2: rect.end.y }
+                });
+            } else if (mode === 'rings') {
+                scene.camera.pickPrep(splat, op);
+                const pick = await scene.camera.pickRect(
+                    rect.start.x,
+                    rect.start.y,
+                    rect.end.x - rect.start.x,
+                    rect.end.y - rect.start.y
+                );
+
+                const sortedIds = new Uint32Array(new Set(pick)).sort();
+                events.fire('edit.add', new SelectOp(splat, op, sortedIds));
+            }
+        }
+    });
+
+    let maskTexture: Texture = null;
+
+    events.function('select.byMask', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
+        const mode = events.invoke('camera.mode');
+
+        for (const splat of selectedSplats()) {
+            if (mode === 'centers') {
+                // create mask texture
+                if (!maskTexture || maskTexture.width !== canvas.width || maskTexture.height !== canvas.height) {
+                    if (maskTexture) {
+                        maskTexture.destroy();
+                    }
+                    maskTexture = new Texture(scene.graphicsDevice);
+                }
+                maskTexture.setSource(canvas);
+
+                await runSelectIntersect(splat, op, {
+                    mask: maskTexture
+                });
+            } else if (mode === 'rings') {
+                const mask = context.getImageData(0, 0, canvas.width, canvas.height);
+
+                // calculate mask bound so we limit pixel operations
+                let mx0 = mask.width - 1;
+                let my0 = mask.height - 1;
+                let mx1 = 0;
+                let my1 = 0;
+                for (let y = 0; y < mask.height; ++y) {
+                    for (let x = 0; x < mask.width; ++x) {
+                        if (mask.data[(y * mask.width + x) * 4 + 3] === 255) {
+                            mx0 = Math.min(mx0, x);
+                            my0 = Math.min(my0, y);
+                            mx1 = Math.max(mx1, x);
+                            my1 = Math.max(my1, y);
+                        }
+                    }
+                }
+
+                // Convert mask bounds to normalized coordinates
+                const nx0 = mx0 / mask.width;
+                const ny0 = my0 / mask.height;
+                const nx1 = (mx1 + 1) / mask.width;
+                const ny1 = (my1 + 1) / mask.height;
+                const nw = nx1 - nx0;
+                const nh = ny1 - ny0;
+
+                scene.camera.pickPrep(splat, op);
+                const pick = await scene.camera.pickRect(nx0, ny0, nw, nh);
+
+                // Calculate actual pixel dimensions for iteration
+                const { width, height } = scene.targetSize;
+
+                // Convert normalized coordinates to render target pixels
+                const px = Math.floor(nx0 * width);
+                const py = Math.floor(ny0 * height);
+                const pw = Math.max(1, Math.ceil((nx0 + nw) * width) - px);
+                const ph = Math.max(1, Math.ceil((ny0 + nh) * height) - py);
+
+                const selected = new Set<number>();
+                for (let y = 0; y < ph; ++y) {
+                    for (let x = 0; x < pw; ++x) {
+                        const mx = Math.floor((nx0 + x / width) * mask.width);
+                        const my = Math.floor((ny0 + y / height) * mask.height);
+                        if (mask.data[(my * mask.width + mx) * 4] === 255) {
+                            selected.add(pick[(ph - 1 - y) * pw + x]);
+                        }
+                    }
+                }
+
+                const sortedIds = new Uint32Array(selected).sort();
+                events.fire('edit.add', new SelectOp(splat, op, sortedIds));
+            }
+        }
+    });
+
+    events.function('select.point', async (op: 'add'|'remove'|'set'|'intersect', point: { x: number, y: number }) => {
+        const { width, height } = scene.targetSize;
+        const mode = events.invoke('camera.mode');
+
+        for (const splat of selectedSplats()) {
+            const splatData = splat.splatData;
+
+            if (mode === 'centers') {
+                const x = splatData.getProp('x');
+                const y = splatData.getProp('y');
+                const z = splatData.getProp('z');
+
+                const splatSize = events.invoke('camera.splatSize');
+                const camera = scene.camera.camera;
+                const sx = point.x * width;
+                const sy = point.y * height;
+
+                // calculate final matrix
+                mat.mul2(camera.camera._viewProjMat, splat.worldTransform);
+
+                // materialize hits into an owned mask. SelectOp consumes a
+                // committed snapshot rather than a closure so we never have to
+                // worry about state shifting between capture and apply.
+                const numSplats = splatData.numSplats;
+                const mask = new Uint8Array(numSplats);
+                for (let i = 0; i < numSplats; i++) {
+                    vec4.set(x[i], y[i], z[i], 1.0);
+                    mat.transformVec4(vec4, vec4);
+                    const px = (vec4.x / vec4.w * 0.5 + 0.5) * width;
+                    const py = (-vec4.y / vec4.w * 0.5 + 0.5) * height;
+                    if (Math.abs(px - sx) < splatSize && Math.abs(py - sy) < splatSize) {
+                        mask[i] = 255;
+                    }
+                }
+
+                events.fire('edit.add', new SelectOp(splat, op, mask));
+            } else if (mode === 'rings') {
+                scene.camera.pickPrep(splat, op);
+
+                // Use normalized coordinates with minimal size for single pixel pick
+                const pickResult = await scene.camera.pickRect(
+                    point.x,
+                    point.y,
+                    1 / width,
+                    1 / height
+                );
+                const pickId = pickResult[0];
+                events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId])));
+            }
+        }
+    });
+
+    // Eyedropper selection with SelectOp so undo/redo and selection state updates remain consistent.
+    // Threshold acts as a per-channel absolute difference: 0 only matches identical colors while 1 matches everything.
+    // TO DO:
+    // -  alternative distance metrics such as HSV.
+    // -  alternative UI for threshold, two handles for min/max?
+    events.function('select.colorMatch', async (op: 'add'|'remove'|'set', point: { x: number, y: number }, threshold = 0) => {
+        const splats = selectedSplats();
+        const targetSize = scene.targetSize;
+        if (!splats.length || !targetSize || !point) {
+            return;
+        }
+
+        const { width, height } = targetSize;
+        if (!width || !height) {
+            return;
+        }
+
+        // Clamp normalized coordinates to valid range
+        const nx = Math.max(0, Math.min(1, point.x));
+        const ny = Math.max(0, Math.min(1, point.y));
+        const colorThreshold = Math.min(1, Math.max(0, Number.isFinite(threshold) ? threshold : 0));
+
+        for (const splat of splats) {
+            scene.camera.pickPrep(splat, 'set');
+            // Use normalized coordinates with minimal size for single pixel pick
+            const pickBuffer = await scene.camera.pickRect(nx, ny, 1 / width, 1 / height);
+            const pickId = pickBuffer?.[0];
+            if (pickId === undefined || pickId === 0xffffffff) {
+                continue;
+            }
+
+            const reds = splat.splatData.getProp('f_dc_0') as Float32Array;
+            const greens = splat.splatData.getProp('f_dc_1') as Float32Array;
+            const blues = splat.splatData.getProp('f_dc_2') as Float32Array;
+            // validate pickId and color channels exist
+            if (!reds || !greens || !blues || pickId < 0 || pickId >= reds.length) {
+                continue;
+            }
+            // decode color channels for the reference pixel
+            const refR = decodeColorChannel(reds[pickId]);
+            const refG = decodeColorChannel(greens[pickId]);
+            const refB = decodeColorChannel(blues[pickId]);
+
+            // materialize hits into an owned mask up front; SelectOp consumes
+            // a committed snapshot.
+            const numSplats = splat.splatData.numSplats;
+            const mask = new Uint8Array(numSplats);
+            for (let i = 0; i < numSplats; i++) {
+                if (Math.abs(decodeColorChannel(reds[i]) - refR) <= colorThreshold &&
+                    Math.abs(decodeColorChannel(greens[i]) - refG) <= colorThreshold &&
+                    Math.abs(decodeColorChannel(blues[i]) - refB) <= colorThreshold) {
+                    mask[i] = 255;
+                }
+            }
+
+            events.fire('edit.add', new SelectOp(splat, op, mask));
+        }
+    });
+
+    events.on('select.hide', () => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new HideSelectionOp(splat));
+        });
+    });
+
+    events.on('select.unhide', () => {
+        const ops = (scene.getElementsByType(ElementType.splat) as Splat[])
+        .map(splat => new UnhideAllOp(splat))
+        .filter(op => !op.ranges.empty);
+
+        if (ops.length > 0) {
+            events.fire('edit.add', ops.length === 1 ? ops[0] : new MultiOp(ops));
+        }
+    });
+
+    events.on('select.delete', () => {
+        // Don't delete gaussians when a point-placing tool is active (backspace deletes its points instead)
+        if (['measure', 'orient'].includes(events.invoke('tool.active'))) {
+            return;
+        }
+        // Don't delete gaussians while a polygon selection is in progress (backspace removes the last point instead)
+        if (events.invoke('polygonSelection.removeLastPoint')) {
+            return;
+        }
+        selectedSplats().forEach((splat) => {
+            editHistory.add(new DeleteSelectionOp(splat));
+        });
+    });
+
+    // restore (undelete) selected+deleted gaussians
+    events.on('edit.undelete', () => {
+        selectedSplats().forEach((splat) => {
+            editHistory.add(new UndeleteSelectionOp(splat));
+        });
+    });
+
+    const performSelectionFunc = async (func: 'duplicate' | 'separate') => {
+        const splats = selectedSplats();
+
+        const memFs = new MemoryFileSystem();
+
+        await writeSplatFile(splats, {
+            maxSHBands: 3,
+            selected: true
+        }, 'ply', 'output.ply', {}, memFs);
+
+        const data = memFs.results.get('output.ply');
+
+        if (data) {
+            const splat = splats[0];
+
+            // wrap PLY in a blob and load it. pass the view rather than the
+            // underlying buffer, which is the writer's oversized scratch allocation
+            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+            const filename = `${removeExtension(splat.filename)}.ply`;
+            const fileSystem = new MappedReadFileSystem();
+            fileSystem.addFile(filename, blob);
+            const copy = await scene.assetLoader.load(filename, fileSystem);
+
+            if (func === 'separate') {
+                editHistory.add(new MultiOp([
+                    new DeleteSelectionOp(splat),
+                    new AddSplatOp(scene, copy)
+                ]));
+            } else {
+                editHistory.add(new AddSplatOp(scene, copy));
+            }
+        }
+    };
+
+    // duplicate the current selection
+    events.on('edit.duplicate', async () => {
+        await performSelectionFunc('duplicate');
+    });
+
+    events.on('edit.separate', async () => {
+        await performSelectionFunc('separate');
+    });
+
+    // ------- clipboard (copy / cut / paste) -------
+    // in-memory clipboard stores serialized PLY blob of selected gaussians
+    let clipboard: { blob: Blob, filename: string } | null = null;
+
+    // returns true if clipboard has data ready to paste
+    events.function('clipboard.has', () => clipboard !== null);
+
+    // copy selected gaussians to in-memory clipboard
+    events.on('edit.copy', async () => {
+        const splats = selectedSplats();
+        if (splats.length === 0) return;
+
+        const splat = splats[0];
+        const memFs = new MemoryFileSystem();
+        await writeSplatFile(splats, {
+            maxSHBands: 3,
+            selected: true
+        }, 'ply', 'output.ply', {}, memFs);
+
+        const data = memFs.results.get('output.ply');
+        if (data) {
+            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+            clipboard = {
+                blob,
+                filename: `${removeExtension(splat.filename)}_copy.ply`
+            };
+        }
+    });
+
+    // cut: copy to clipboard then delete selection
+    events.on('edit.cut', async () => {
+        const splats = selectedSplats();
+        if (splats.length === 0) return;
+
+        // copy first
+        const splat = splats[0];
+        const memFs = new MemoryFileSystem();
+        await writeSplatFile(splats, {
+            maxSHBands: 3,
+            selected: true
+        }, 'ply', 'output.ply', {}, memFs);
+
+        const data = memFs.results.get('output.ply');
+        if (data) {
+            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+            clipboard = {
+                blob,
+                filename: `${removeExtension(splat.filename)}_copy.ply`
+            };
+            // now delete the selection
+            editHistory.add(new DeleteSelectionOp(splat));
+        }
+    });
+
+    // paste: load from clipboard and add to current scene
+    events.on('edit.paste', async () => {
+        if (!clipboard) return;
+        const fileSystem = new MappedReadFileSystem();
+        fileSystem.addFile(clipboard.filename, clipboard.blob);
+        const copy = await scene.assetLoader.load(clipboard.filename, fileSystem);
+        editHistory.add(new AddSplatOp(scene, copy));
+    });
+
+    // paste as new scene: create empty scene then paste
+    events.on('edit.pasteAsNewScene', async () => {
+        if (!clipboard) return;
+        // create new empty scene (may prompt for unsaved changes confirmation)
+        const result = await events.invoke('doc.new');
+        // doc.new returns false if user cancelled the confirmation dialog
+        if (result === false) return;
+        const fileSystem = new MappedReadFileSystem();
+        fileSystem.addFile(clipboard.filename, clipboard.blob);
+        const copy = await scene.assetLoader.load(clipboard.filename, fileSystem);
+        editHistory.add(new AddSplatOp(scene, copy));
+    });
+
+    events.on('scene.reset', () => {
+        selectedSplats().forEach((splat) => {
+            editHistory.add(new ResetOp(splat));
+        });
+    });
+
+    // floater removal: select the mask then delete in one undoable operation
+    events.on('floater.apply', (data: { mask: Uint8Array, count: number }) => {
+        selectedSplats().forEach((splat) => {
+            events.fire('edit.add', new MultiOp([
+                new SelectNoneOp(splat),
+                new SelectOp(splat, 'add', data.mask),
+                new DeleteSelectionOp(splat)
+            ]));
+        });
+    });
+
+    // ---- heal tool: depth-limited lasso selection ----
+    // Uses ID picking (frontmost splats only) to avoid selecting far-away points
+    events.function('heal.select', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
+        const depthThreshold = events.invoke('heal.depthThreshold') ?? 0.15;
+
+        for (const splat of selectedSplats()) {
+            const mask = context.getImageData(0, 0, canvas.width, canvas.height);
+
+            // calculate mask bounds
+            let mx0 = mask.width - 1;
+            let my0 = mask.height - 1;
+            let mx1 = 0;
+            let my1 = 0;
+            for (let y = 0; y < mask.height; ++y) {
+                for (let x = 0; x < mask.width; ++x) {
+                    if (mask.data[(y * mask.width + x) * 4 + 3] === 255) {
+                        mx0 = Math.min(mx0, x);
+                        my0 = Math.min(my0, y);
+                        mx1 = Math.max(mx1, x);
+                        my1 = Math.max(my1, y);
+                    }
+                }
+            }
+
+            if (mx1 < mx0 || my1 < my0) continue;
+
+            // Convert mask bounds to normalized coordinates
+            const nx0 = mx0 / mask.width;
+            const ny0 = my0 / mask.height;
+            const nx1 = (mx1 + 1) / mask.width;
+            const ny1 = (my1 + 1) / mask.height;
+            const nw = nx1 - nx0;
+            const nh = ny1 - ny0;
+
+            // Step 1: ID picking for front-most splat depth reference
+            scene.camera.pickPrep(splat, 'set');
+            const pick = await scene.camera.pickRect(nx0, ny0, nw, nh);
+
+            const { width, height } = scene.targetSize;
+            const px = Math.floor(nx0 * width);
+            const py = Math.floor(ny0 * height);
+            const pw = Math.max(1, Math.ceil((nx0 + nw) * width) - px);
+            const ph = Math.max(1, Math.ceil((ny0 + nh) * height) - py);
+
+            // Step 2: Get splat data and camera matrix
+            const splatData = splat.splatData;
+            const xs = splatData.getProp('x');
+            const ys = splatData.getProp('y');
+            const zs = splatData.getProp('z');
+            const numSplats = splatData.numSplats;
+            const stateData = splat.state.data;
+
+            const camEntity = scene.camera.camera;
+            mat.mul2(camEntity.camera._viewProjMat, splat.worldTransform);
+
+            // Step 3: Build depth reference map from front-most splats
+            // clip.w = -viewSpaceZ = distance along camera forward axis (linear, world units)
+            const depthMap = new Float32Array(pw * ph);
+            depthMap.fill(Infinity);
+            const selected = new Set<number>();
+
+            for (let y = 0; y < ph; ++y) {
+                for (let x = 0; x < pw; ++x) {
+                    const mx = Math.floor((nx0 + x / width) * mask.width);
+                    const my = Math.floor((ny0 + y / height) * mask.height);
+                    if (mask.data[(my * mask.width + mx) * 4] === 255) {
+                        const id = pick[(ph - 1 - y) * pw + x];
+                        if (id !== 0xffffffff && id < numSplats) {
+                            selected.add(id);
+                            // Compute view-space depth from clip.w
+                            vec4.set(xs[id], ys[id], zs[id], 1.0);
+                            mat.transformVec4(vec4, vec4);
+                            depthMap[y * pw + x] = vec4.w > 0 ? vec4.w : Infinity;
+                        }
+                    }
+                }
+            }
+
+            // Step 4: Project ALL non-deleted splats to screen space
+            // Select those within the mask AND within depth threshold of front-most
+            for (let i = 0; i < numSplats; i++) {
+                if (selected.has(i)) continue;
+                if ((stateData[i] & 4) !== 0) continue; // skip deleted
+
+                vec4.set(xs[i], ys[i], zs[i], 1.0);
+                mat.transformVec4(vec4, vec4);
+
+                if (vec4.w <= 0) continue; // behind camera
+
+                // Screen-space position
+                const sx = (vec4.x / vec4.w * 0.5 + 0.5) * width;
+                const sy = (-vec4.y / vec4.w * 0.5 + 0.5) * height;
+
+                // Check if within pick rect
+                const pickX = Math.floor(sx - px);
+                const pickY = Math.floor(sy - py);
+                if (pickX < 0 || pickX >= pw || pickY < 0 || pickY >= ph) continue;
+
+                // Check if within mask
+                const mx = Math.floor(sx / width * mask.width);
+                const my = Math.floor(sy / height * mask.height);
+                if (mx < 0 || mx >= mask.width || my < 0 || my >= mask.height) continue;
+                if (mask.data[(my * mask.width + mx) * 4] !== 255) continue;
+
+                // Depth check: view-space distance from camera
+                const splatDepth = vec4.w;
+                const frontDepth = depthMap[pickY * pw + pickX];
+
+                if (frontDepth !== Infinity && (splatDepth - frontDepth) <= depthThreshold) {
+                    selected.add(i);
+                }
+            }
+
+            const sortedIds = new Uint32Array(selected).sort();
+            if (sortedIds.length > 0) {
+                events.fire('edit.add', new SelectOp(splat, op, sortedIds));
+            }
+        }
+    });
+
+    // ---- heal tool: apply inpainting ----
+    events.on('heal.apply', (params: HealParams) => {
+        try {
+            const splats = selectedSplats();
+            if (splats.length === 0) return;
+
+            for (const splat of splats) {
+                const selectedIndices = getSelectedIndices(splat);
+                if (selectedIndices.length === 0) continue;
+
+                // Generate new splat data via inpainting
+                const result = healInpaint(splat, selectedIndices, params);
+                if (result.count === 0) continue;
+
+                // Build new GSplatData
+                const gsplatData = new GSplatData(result.elements);
+                const asset = scene.assetLoader.createGSplatAsset(gsplatData, 'heal-patch.ply');
+                const newSplat = new Splat(asset, new Quat());
+
+                // Copy entity transform from source so positions align
+                newSplat.entity.setLocalPosition(splat.entity.getLocalPosition());
+                newSplat.entity.setLocalRotation(splat.entity.getLocalRotation());
+                newSplat.entity.setLocalScale(splat.entity.getLocalScale());
+
+                // Delete selected splats + add new patch splat as single undoable op.
+                // The SelectSplatOp at the end re-selects the source splat after
+                // AddSplatOp.do() triggers scene.elementAdded (which would otherwise
+                // change selection to the patch). It also re-selects the source on
+                // undo, after AddSplatOp.undo() removes the patch and the
+                // scene.elementRemoved handler may set selection to null.
+                const sourceSplat = splat;
+                events.fire('edit.add', new MultiOp([
+                    new DeleteSelectionOp(sourceSplat),
+                    new AddSplatOp(scene, newSplat),
+                    {
+                        name: 'reselectSource',
+                        do: () => { events.fire('selection', sourceSplat); },
+                        undo: () => { events.fire('selection', sourceSplat); },
+                        destroy: () => {}
+                    } as any
+                ]));
+            }
+        } catch (err) {
+            console.error('[heal.apply] ERROR:', err);
+        }
+    });
+
+    // camera mode (visual: centers/rings)
+
+    let activeMode = 'centers';
+
+    const setCameraMode = (mode: string) => {
+        if (mode !== activeMode) {
+            activeMode = mode;
+            events.fire('camera.mode', activeMode);
+        }
+    };
+
+    events.function('camera.mode', () => {
+        return activeMode;
+    });
+
+    events.on('camera.setMode', (mode: string) => {
+        setCameraMode(mode);
+    });
+
+    events.on('camera.toggleMode', () => {
+        setCameraMode(events.invoke('camera.mode') === 'centers' ? 'rings' : 'centers');
+    });
+
+    // camera control mode (orbit/fly)
+
+    let controlMode: 'orbit' | 'fly' = 'orbit';
+
+    const setControlMode = (mode: 'orbit' | 'fly') => {
+        if (mode !== controlMode) {
+            // when switching to fly mode, snapshot the current orbit view as the
+            // "fly entry pose" so reset-camera can restore it later
+            if (mode === 'fly') {
+                const cam = scene.camera;
+                cam.flyEntryPose = {
+                    azim: cam.azim,
+                    elev: cam.elevation,
+                    focalPoint: cam.focalPoint.clone(),
+                    distance: cam.distance
+                };
+            } else {
+                // switching back to orbit: discard any frozen camera position
+                // left over from fly-mode look() or auto-rotate, so the camera
+                // resumes rotating around the focal point.
+                scene.camera.lookCameraPos = null;
+            }
+            controlMode = mode;
+            scene.camera.controlMode = mode;
+            events.fire('camera.controlMode', controlMode);
+        }
+    };
+
+    events.function('camera.controlMode', () => {
+        return controlMode;
+    });
+
+    events.on('camera.setControlMode', (mode: 'orbit' | 'fly') => {
+        setControlMode(mode);
+    });
+
+    events.on('camera.toggleControlMode', () => {
+        setControlMode(controlMode === 'orbit' ? 'fly' : 'orbit');
+    });
+
+    // camera preset views
+    events.on('camera.viewFront', () => scene.camera.viewFront());
+    events.on('camera.viewBack', () => scene.camera.viewBack());
+    events.on('camera.viewLeft', () => scene.camera.viewLeft());
+    events.on('camera.viewRight', () => scene.camera.viewRight());
+    events.on('camera.viewTop', () => scene.camera.viewTop());
+    events.on('camera.viewBottom', () => scene.camera.viewBottom());
+
+    // ---- camera axis step via shortcuts (NumPad) ----
+    events.on('camera.headingDecrease', () => scene.camera.adjustHeading(-15));
+    events.on('camera.headingIncrease', () => scene.camera.adjustHeading(15));
+    events.on('camera.pitchDecrease', () => scene.camera.adjustPitch(-15));
+    events.on('camera.pitchIncrease', () => scene.camera.adjustPitch(15));
+
+    // NumPad 5 → reset camera (in addition to Shift+F)
+    events.on('camera.resetNumpad', () => events.fire('camera.reset'));
+
+    // ---- camera axis adjustments (heading / pitch) ----
+    events.on('camera.adjustHeading', (delta: number) => {
+        scene.camera.adjustHeading(delta);
+    });
+
+    events.on('camera.adjustPitch', (delta: number) => {
+        scene.camera.adjustPitch(delta);
+    });
+
+    events.function('camera.getAzimElev', () => {
+        const camera = scene.camera;
+        return { azim: camera.azim, elev: camera.elevation };
+    });
+
+    // camera overlay
+
+    let cameraOverlay = scene.config.camera.overlay;
+
+    const setCameraOverlay = (enabled: boolean) => {
+        if (enabled !== cameraOverlay) {
+            cameraOverlay = enabled;
+            events.fire('camera.overlay', cameraOverlay);
+        }
+    };
+
+    events.function('camera.overlay', () => {
+        return cameraOverlay;
+    });
+
+    events.on('camera.setOverlay', (value: boolean) => {
+        setCameraOverlay(value);
+    });
+
+    events.on('camera.toggleOverlay', () => {
+        setCameraOverlay(!events.invoke('camera.overlay'));
+    });
+
+    // splat size
+
+    let splatSize = 2;
+
+    const setSplatSize = (value: number) => {
+        if (value !== splatSize) {
+            splatSize = value;
+            events.fire('camera.splatSize', splatSize);
+        }
+    };
+
+    events.function('camera.splatSize', () => {
+        return splatSize;
+    });
+
+    events.on('camera.setSplatSize', (value: number) => {
+        setSplatSize(value);
+    });
+
+    // camera fly speed
+
+    const setFlySpeed = (value: number) => {
+        if (value !== scene.camera.flySpeed) {
+            scene.camera.flySpeed = value;
+            events.fire('camera.flySpeed', value);
+        }
+    };
+
+    events.function('camera.flySpeed', () => {
+        return scene.camera.flySpeed;
+    });
+
+    events.on('camera.setFlySpeed', (value: number) => {
+        setFlySpeed(value);
+    });
+
+    // outline selection
+
+    let outlineSelection = false;
+
+    const setOutlineSelection = (value: boolean) => {
+        if (value !== outlineSelection) {
+            outlineSelection = value;
+            events.fire('view.outlineSelection', outlineSelection);
+        }
+    };
+
+    events.function('view.outlineSelection', () => {
+        return outlineSelection;
+    });
+
+    events.on('view.setOutlineSelection', (value: boolean) => {
+        setOutlineSelection(value);
+    });
+
+    // view spherical harmonic bands
+
+    let viewBands = scene.config.show.shBands;
+
+    const setViewBands = (value: number) => {
+        if (value !== viewBands) {
+            viewBands = value;
+            events.fire('view.bands', viewBands);
+        }
+    };
+
+    events.function('view.bands', () => {
+        return viewBands;
+    });
+
+    events.on('view.setBands', (value: number) => {
+        setViewBands(value);
+    });
+
+    // centers gaussian color toggle
+    let centersUseGaussianColor = false;
+    events.function('view.centersUseGaussianColor', () => centersUseGaussianColor);
+    events.on('view.setCentersUseGaussianColor', (value: boolean) => {
+        centersUseGaussianColor = value;
+        events.fire('view.centersUseGaussianColor', value);
+    });
+
+    events.function('camera.getPose', () => {
+        const camera = scene.camera;
+        const position = camera.position;
+        const focalPoint = camera.focalPoint;
+        return {
+            position: { x: position.x, y: position.y, z: position.z },
+            target: { x: focalPoint.x, y: focalPoint.y, z: focalPoint.z },
+            fov: camera.fov
+        };
+    });
+
+    events.on('camera.setPose', (pose: { position: Vec3, target: Vec3, fov?: number }, speed = 1) => {
+        // assign fov before setPose so distance is computed using the new fovFactor
+        if (pose.fov !== undefined) {
+            // pose-driven fov (timeline playback, fly-to-pose) is not a user
+            // preference - suspend capture around the notify and the
+            // synchronous ui echo it triggers
+            events.fire('preferences.suspend');
+            try {
+                scene.camera.fov = pose.fov;
+                events.fire('camera.fov', pose.fov);
+            } finally {
+                events.fire('preferences.resume');
+            }
+        }
+        scene.camera.setPose(pose.position, pose.target, speed);
+    });
+
+    // hack: fire events to initialize UI
+    events.fire('camera.fov', scene.camera.fov);
+    events.fire('camera.overlay', cameraOverlay);
+    events.fire('view.bands', viewBands);
+    events.fire('camera.showInfo', showInfo);
+
+    // doc serialization
+    events.function('docSerialize.view', () => {
+        const packC = (c: Color) => [c.r, c.g, c.b, c.a];
+        return {
+            bgColor: packC(events.invoke('bgClr')),
+            selectedColor: packC(events.invoke('selectedClr')),
+            unselectedColor: packC(events.invoke('unselectedClr')),
+            lockedColor: packC(events.invoke('lockedClr')),
+            shBands: events.invoke('view.bands'),
+            centersSize: events.invoke('camera.splatSize'),
+            outlineSelection: events.invoke('view.outlineSelection'),
+            showGrid: events.invoke('grid.visible'),
+            gridPlane: events.invoke('grid.plane'),
+            showBound: events.invoke('camera.bound'),
+            showBoundDimensions: events.invoke('camera.boundDimensions'),
+            showCameraPoses: events.invoke('camera.showPoses'),
+            showCameraInfo: events.invoke('camera.showInfo'),
+            flySpeed: events.invoke('camera.flySpeed'),
+            fovDolly: events.invoke('camera.fovDolly')
+        };
+    });
+
+    events.function('docDeserialize.view', (docView: any) => {
+        events.fire('setBgClr', new Color(docView.bgColor));
+        events.fire('setSelectedClr', new Color(docView.selectedColor));
+        events.fire('setUnselectedClr', new Color(docView.unselectedColor));
+        events.fire('setLockedClr', new Color(docView.lockedColor));
+        events.fire('view.setBands', docView.shBands);
+        events.fire('camera.setSplatSize', docView.centersSize);
+        events.fire('view.setOutlineSelection', docView.outlineSelection);
+        events.fire('grid.setVisible', docView.showGrid);
+        events.fire('grid.setPlane', docView.gridPlane ?? 'xz');
+        events.fire('camera.setBound', docView.showBound);
+        events.fire('camera.setBoundDimensions', docView.showBoundDimensions ?? false);
+        events.fire('camera.setShowPoses', docView.showCameraPoses ?? false);
+        events.fire('camera.setShowInfo', docView.showCameraInfo ?? false);
+        events.fire('camera.setFlySpeed', docView.flySpeed);
+        events.fire('camera.setFovDolly', docView.fovDolly ?? false);
+    });
+
+    // ---- Color Grade Sidecar Save/Load ----
+
+    // save color grade as .sscg sidecar file
+    events.on('grade.save', async () => {
+        const splat = selectedSplats()[0];
+        if (!splat) return;
+
+        const gradeData = serializeGrade(splat);
+        const json = JSON.stringify(gradeData, null, 2);
+        const sidecarName = `${splat.filename}.sscg`;
+        const blob = new Blob([json], { type: 'application/json' });
+
+        if (window.showSaveFilePicker) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: sidecarName,
+                    types: [{
+                        description: 'Color Grade Sidecar',
+                        accept: { 'application/json': ['.sscg'] }
+                    }]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Failed to save color grade:', error);
+                }
+            }
+        } else {
+            // fallback: download
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = sidecarName;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+    });
+
+    // load color grade from .sscg sidecar file
+    events.on('grade.load', async () => {
+        const splat = selectedSplats()[0];
+        if (!splat) return;
+
+        if (window.showOpenFilePicker) {
+            try {
+                const [handle] = await window.showOpenFilePicker({
+                    types: [{
+                        description: 'Color Grade Sidecar',
+                        accept: { 'application/json': ['.sscg'] }
+                    }],
+                    multiple: false
+                });
+                const file = await handle.getFile();
+                const text = await file.text();
+                const gradeData = JSON.parse(text);
+                deserializeGrade(splat, gradeData);
+                events.fire('splat.tintClr', splat);
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Failed to load color grade:', error);
+                }
+            }
+        } else {
+            // fallback: use file input
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.sscg';
+            input.onchange = async () => {
+                const file = input.files?.[0];
+                if (file) {
+                    const text = await file.text();
+                    const gradeData = JSON.parse(text);
+                    deserializeGrade(splat, gradeData);
+                    events.fire('splat.tintClr', splat);
+                }
+            };
+            input.click();
+        }
+    });
+
+    events.function('grade.canSave', () => {
+        return selectedSplats().length > 0;
+    });
+
+    events.function('grade.canLoad', () => {
+        return selectedSplats().length > 0;
+    });
+};
+
+export { registerEditorEvents };

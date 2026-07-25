@@ -1,0 +1,420 @@
+import { logger as splatTransformLogger, type FileSystem, type LogEvent, type Writer } from '@playcanvas/splat-transform';
+
+import { Events } from './events';
+import { GZipWriter } from './io';
+import { writeSplatFile, ExperienceSettings, SerializeSettings } from './splat-serialize';
+import { i18n } from './ui/localization';
+
+/**
+ * Simple FileSystem wrapper around a single Writer.
+ * Used for cases like GZip compression where we need FileSystem semantics
+ * but only have a single Writer to wrap.
+ * The wrapper makes close() a no-op since the caller manages the writer lifecycle.
+ */
+class WriterFileSystem implements FileSystem {
+    private writer: Writer;
+
+    constructor(writer: Writer) {
+        this.writer = writer;
+    }
+
+    createWriter(_filename: string): Writer {
+        // Return a wrapper that delegates write but makes close a no-op
+        // The caller is responsible for closing the underlying writer
+        const inner = this.writer;
+        return {
+            get bytesWritten() {
+                return inner.bytesWritten;
+            },
+            write: (data: Uint8Array) => inner.write(data),
+            close: () => Promise.resolve(),
+            abort: () => Promise.resolve()
+        };
+    }
+
+    mkdir(_path: string): Promise<void> {
+        return Promise.resolve();
+    }
+}
+
+type User = {
+    id: string;
+    username: string;
+    token: string;
+    apiServer: string;
+};
+
+type Scene = {
+    hash: string;
+    title: string;
+    description: string;
+    format: string;
+};
+
+type UserStatus = {
+    user: User;
+    scenes: Scene[];
+};
+
+type PublishSettings = {
+    user: User;
+    title: string;
+    description: string;
+    listed: boolean;
+    serializeSettings: SerializeSettings;
+    experienceSettings: ExperienceSettings;
+    overwriteHash?: string;
+    overrideModel?: boolean;
+    overrideAnimation?: boolean;
+    generateLods: boolean;
+};
+
+const origin = location.origin;
+
+// check whether user is logged in
+const fetchUser = async () => {
+    try {
+        const urlResponse = await fetch(`${origin}/api/id`);
+        return urlResponse.ok && (await urlResponse.json() as User);
+    } catch (e) {
+        return null;
+    }
+};
+
+const fetchSceneList = async (user: User) => {
+    const response = await fetch(`${user.apiServer}/splats?limit=128`, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${user.token}`
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`failed to get scene list (${response.statusText})`);
+    }
+
+    return (await response.json()).result as Scene[];
+};
+
+const fetchSceneSettings = async (user: User, sceneHash: string): Promise<ExperienceSettings> => {
+    const response = await fetch(`${user.apiServer}/splats/${sceneHash}/settings`, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${user.token}`
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`failed to fetch scene settings (${response.statusText})`);
+    }
+    return await response.json() as ExperienceSettings;
+};
+
+const updateSceneSettings = async (user: User, sceneHash: string, settings: ExperienceSettings) => {
+    const response = await fetch(`${user.apiServer}/splats/${sceneHash}/settings`, {
+        method: 'PUT',
+        body: JSON.stringify(settings),
+        headers: {
+            'Authorization': `Bearer ${user.token}`,
+            'Content-Type': 'application/json'
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`failed to update scene settings (${response.statusText})`);
+    }
+    return response;
+};
+
+class PublishWriter implements Writer {
+    write: (data: Uint8Array) => void;
+    close: () => Promise<any>;
+    abort: () => Promise<void> = () => Promise.resolve();
+
+    private cursor = 0;
+
+    get bytesWritten(): number {
+        return this.cursor;
+    }
+
+    static async create(publishSettings: PublishSettings) {
+        const { user } = publishSettings;
+
+        const filename = 'scene.ply';
+
+        // start upload
+        const startResponse = await fetch(`${user.apiServer}/upload/start-upload`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${user.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fileName: filename })
+        });
+
+        const startJson = await startResponse.json();
+
+        const result = new PublishWriter();
+
+        const uploadBuf = new Uint8Array(10 * 1024 * 1024); // 10MB buffer
+        const parts: { PartNumber: number, ETag: string }[] = [];
+        let partNumber = 1;
+        let cursor = 0;
+
+        const upload = async () => {
+            if (cursor === 0) return;
+
+            // get signed url for this part
+            const urlResponse = await fetch(`${user.apiServer}/upload/signed-urls`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${user.token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    uploadId: startJson.uploadId,
+                    key: startJson.key,
+                    parts: 1,
+                    partBase: partNumber
+                })
+            });
+
+            if (!urlResponse.ok) {
+                throw new Error(`failed to get signed url (${urlResponse.statusText})`);
+            }
+
+            const urlJson = await urlResponse.json();
+
+            const uploadResponse = await fetch(urlJson.signedUrls[0], {
+                method: 'PUT',
+                body: uploadBuf.slice(0, cursor),
+                headers: {
+                    'Content-Type': 'application/octet-stream'
+                }
+            });
+
+            if (!uploadResponse.ok) {
+                throw new Error(`failed to upload data (${uploadResponse.statusText})`);
+            }
+
+            parts.push({
+                PartNumber: partNumber,
+                ETag: uploadResponse.headers.get('etag').replace(/^"|"$/g, '')
+            });
+
+            cursor = 0;
+            partNumber++;
+        };
+
+        result.write = async (data: Uint8Array) => {
+            let readcursor = 0;
+
+            while (data.byteLength - readcursor > 0) {
+                const readSize = data.byteLength - readcursor;
+                const writeSize = uploadBuf.byteLength - cursor;
+                const copySize = Math.min(readSize, writeSize);
+
+                uploadBuf.set(data.subarray(readcursor, readcursor + copySize), cursor);
+
+                readcursor += copySize;
+                cursor += copySize;
+
+                if (cursor === uploadBuf.byteLength) {
+                    await upload();
+                }
+            }
+            result.cursor += data.byteLength;
+        };
+
+        result.close = async () => {
+            // final upload
+            await upload();
+
+            // complete the multipart upload
+            const completeResult = await fetch(`${user.apiServer}/upload/complete-upload`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${user.token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    uploadId: startJson.uploadId,
+                    key: startJson.key,
+                    parts
+                })
+            });
+
+            if (!completeResult.ok) {
+                throw new Error(`failed to complete upload (${completeResult.statusText})`);
+            }
+
+            const completeJson = await completeResult.json();
+
+            const publishFormat = publishSettings.generateLods ? 'ssog' : 'sog';
+
+            const doPublish = () => fetch(`${user.apiServer}/splats/publish`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    s3Key: startJson.key,
+                    title: publishSettings.title,
+                    description: publishSettings.description,
+                    listed: publishSettings.listed,
+                    settings: publishSettings.experienceSettings,
+                    sourceFormat: 'ply',
+                    publishFormat
+                }),
+                headers: {
+                    'Authorization': `Bearer ${user.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const doRepublish = () => fetch(`${user.apiServer}/splats/${publishSettings.overwriteHash}/republish`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                    s3Key: startJson.key,
+                    settings: publishSettings.experienceSettings,
+                    sourceFormat: 'ply',
+                    publishFormat
+                }),
+                headers: {
+                    'Authorization': `Bearer ${user.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const publishResponse = await (publishSettings.overwriteHash ? doRepublish() : doPublish());
+
+            if (!publishResponse.ok) {
+                let msg;
+                try {
+                    const err = await publishResponse.json();
+                    msg = err.error ?? msg;
+                } catch (e) {
+                    msg = 'Failed to publish';
+                }
+
+                throw new Error(msg);
+            }
+
+            return await publishResponse.json();
+        };
+
+        return result;
+    }
+}
+
+const registerPublishEvents = (events: Events) => {
+
+    events.function('publish.userStatus', async () => {
+        const user = await fetchUser();
+        if (!user || !user.username) {
+            return null;
+        }
+        const scenes = await fetchSceneList(user);
+        return { user, scenes };
+    });
+
+    events.function('scene.publish', async (publishSettings: PublishSettings) => {
+        try {
+            events.fire('progressStart', 'Publishing...');
+            events.fire('progressUpdate', {
+                text: i18n.t('popup.publish.converting', { ellipsis: true }),
+                progress: 0
+            });
+
+            // delay to allow spinner to show (hopefully 10ms is enough)
+            await new Promise((resolve) => {
+                setTimeout(resolve, 10);
+            });
+
+            const { overwriteHash, overrideAnimation } = publishSettings;
+            const overrideModel = publishSettings.overrideModel ?? true;
+
+            const mergeAnimation = (target: ExperienceSettings, source: ExperienceSettings) => {
+                target.animTracks = source.animTracks;
+                target.startMode = source.startMode;
+            };
+
+            if (overwriteHash && !overrideModel) {
+                if (!overrideAnimation) {
+                    throw new Error('No overrides selected');
+                }
+
+                // animation-only update: fetch existing settings, merge animation, PUT settings
+                const existingSettings = await fetchSceneSettings(publishSettings.user, overwriteHash);
+                mergeAnimation(existingSettings, publishSettings.experienceSettings);
+                await updateSceneSettings(publishSettings.user, overwriteHash, existingSettings);
+
+                await events.invoke('showPopup', {
+                    type: 'info',
+                    header: i18n.t('popup.publish.succeeded'),
+                    message: i18n.t('popup.publish.message'),
+                    link: `${origin}/scene/${overwriteHash}/edit`
+                });
+            } else {
+                // new scene or model override: upload PLY and publish/republish
+                if (overwriteHash) {
+                    // republishing with model override: merge with existing settings
+                    const existingSettings = await fetchSceneSettings(publishSettings.user, overwriteHash);
+                    if (overrideAnimation) {
+                        mergeAnimation(existingSettings, publishSettings.experienceSettings);
+                    }
+                    publishSettings.experienceSettings = existingSettings;
+                }
+
+                const progressFunc = (loaded: number, total: number) => {
+                    events.fire('progressUpdate', {
+                        text: i18n.t('popup.publish.uploading', { ellipsis: true }),
+                        progress: 100 * loaded / total
+                    });
+                };
+
+                // bridge splat-transform's write progress bar to the publish UI
+                splatTransformLogger.setRenderer({
+                    handle: (event: LogEvent) => {
+                        if (event.kind === 'barTick') {
+                            progressFunc(event.current, event.total);
+                        }
+                    }
+                });
+
+                // create the writer chain: gzip->stream->upload
+                const publishWriter = await PublishWriter.create(publishSettings);
+                const gzipWriter = new GZipWriter(publishWriter);
+
+                const splats = events.invoke('scene.splats');
+
+                // serialize using WriterFileSystem wrapper (close is managed by caller)
+                const fs = new WriterFileSystem(gzipWriter);
+                await writeSplatFile(splats, publishSettings.serializeSettings, 'ply', 'output.ply', {}, fs);
+
+                await gzipWriter.close();
+                const response = await publishWriter.close();
+
+                if (!response) {
+                    await events.invoke('showPopup', {
+                        type: 'error',
+                        header: i18n.t('popup.publish.failed'),
+                        message: i18n.t('popup.publish.please-try-again')
+                    });
+                } else {
+                    await events.invoke('showPopup', {
+                        type: 'info',
+                        header: i18n.t('popup.publish.succeeded'),
+                        message: i18n.t('popup.publish.message'),
+                        link: `${origin}/scene/${response.hash}/edit`
+                    });
+                }
+            }
+        } catch (error) {
+            await events.invoke('showPopup', {
+                type: 'error',
+                header: i18n.t('popup.publish.failed'),
+                message: `'${error.message ?? error}'`
+            });
+        } finally {
+            events.fire('progressEnd');
+        }
+    });
+};
+
+export { PublishSettings, UserStatus, registerPublishEvents };

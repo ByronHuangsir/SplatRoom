@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>SplatRoom</title>
+        <meta charset="utf-8" />
+        <base href="__BASE_HREF__">
+        <link rel="manifest" href="./manifest.json">
+        <link rel="stylesheet" href="./index.css">
+        <link rel="shortcut icon" href="#">
+        <meta name="description" content="SplatRoom - 基于 3D 高斯泼溅的调色与后期工作流编辑器" />
+        <meta name="viewport" content="width=device-width, user-scalable=no" />
+
+        <!-- Service worker (disabled on localhost for development) -->
+        <script>
+            if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+                const sw = navigator.serviceWorker;
+                if (sw) {
+                    sw.register('./sw.js')
+                        .then(reg => console.log('service worker registered', reg))
+                        .catch(err => console.log('failed to register service worker', err));
+                }
+            } else {
+                // dev mode: unregister any existing service worker to avoid stale cache
+                if (navigator.serviceWorker) {
+                    navigator.serviceWorker.getRegistrations().then(regs => {
+                        regs.forEach(r => r.unregister());
+                    });
+                }
+            }
+        </script>
+    </head>
+
+    <body>
+        <script type="module" src="./index.js"></script>
+    </body>
+</html>

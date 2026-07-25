@@ -1,0 +1,128 @@
+@use 'colors.scss' as *;
+
+#transform {
+    display: flex;
+    flex-direction: column;
+
+    background-color: $bcg-primary;
+
+    padding: 6px;
+}
+
+.transform-row {
+    height: 32px;
+    line-height: 32px;
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    flex-grow: 1;
+    align-items: center;
+}
+
+.transform-label {
+    width: 70px;
+    flex-shrink: 0;
+    flex-grow: 0;
+    margin: 0px;
+}
+
+.transform-expand {
+    flex-grow: 1;
+}
+
+$height: 22px;
+
+#transform > div > div.pcui-vector-input {
+    margin: 0px;
+    gap: 10px;
+    height: $height;
+}
+
+#transform > div > div.pcui-numeric-input {
+    margin: 0px;
+    height: $height;
+    line-height: $height;
+
+    & > input {
+        padding: 0px;
+        margin: 0px 0px 0px 4px;
+        height: $height;
+    }
+}
+
+#transform > div > div > div.pcui-numeric-input {
+    margin: 0px;
+    height: $height;
+    line-height: $height;
+
+    & > input {
+        padding: 0px;
+        margin: 0px 0px 0px 4px;
+        height: $height;
+    }
+}
+
+// ---- rotation container: allow variable height ----
+.transform-row:has(.transform-rotation-axes) {
+    height: auto;
+    align-items: flex-start;
+}
+
+// ---- rotation per-axis quick-rotate buttons ----
+
+.transform-rotation-axes {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.transform-rotation-axis-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 1px;
+    height: 22px;
+}
+
+.transform-rotation-axis-label {
+    width: 10px;
+    flex-shrink: 0;
+    font-size: 10px;
+    color: $text-secondary;
+    text-align: center;
+}
+
+.transform-rotation-btn {
+    width: 18px;
+    height: 22px;
+    padding: 0;
+    font-size: 8px;
+    border-radius: 3px;
+    background-color: $bcg-dark;
+    color: $text-secondary;
+    border: none;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+        background-color: $clr-hilight;
+        color: $clr-active;
+    }
+
+    &:active {
+        background-color: $clr-hilight;
+        color: $clr-active;
+    }
+}
+
+.transform-rotation-input {
+    flex: 1;
+    min-width: 0;
+
+    & > input {
+        text-align: center;
+    }
+}

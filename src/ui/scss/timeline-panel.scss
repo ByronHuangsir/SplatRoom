@@ -1,0 +1,176 @@
+@use 'colors.scss' as *;
+
+#timeline-panel {
+    flex-direction: column;
+    border-top: none;
+
+    &:not(.pcui-hidden) {
+        display: flex;
+    }
+
+    > #controls-wrap {
+        display: flex;
+        flex-direction: row;
+        background-color: $bcg-primary;
+        justify-content: center;
+        padding: 1px;
+
+        > #button-controls {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+
+            > .button {
+                font-family: pc-icon;
+                font-weight: bold;
+                font-size: 13px;
+
+                width: 36px;
+                height: 24px;
+                margin: 1px;
+                padding: 0;
+                flex-grow: 0;
+                flex-shrink: 0;
+
+                border-radius: 4px;
+
+                text-align: center;
+                line-height: 24px;
+
+                &:hover {
+                    color: #ff9900;
+                    cursor: pointer;
+                    box-shadow: none;
+                    border-color: #ff990088;
+                }
+            }
+        }
+
+        > .spacer {
+            display: flex;
+            flex-grow: 1;
+            flex-basis: 0;
+            justify-content: flex-end;
+
+            > #settings-controls {
+                display: flex;
+                align-items: center;
+                gap: 1px;
+                margin-right: 1px;
+
+                > #speed {
+                    margin: 0;
+                    width: 80px;
+                }
+
+                > #totalFrames {
+                    margin: 0;
+                    width: 80px;
+                }
+
+                > #smoothness {
+                    margin: 0;
+                    width: 60px;
+                }
+
+                > #loop {
+                    font-family: pc-icon;
+                    font-weight: bold;
+                    font-size: 13px;
+
+                    width: 36px;
+                    height: 24px;
+                    margin: 0;
+                    padding: 0;
+                    flex-grow: 0;
+                    flex-shrink: 0;
+
+                    border-radius: 4px;
+
+                    text-align: center;
+                    line-height: 24px;
+
+                    &:hover {
+                        color: #ff9900;
+                        cursor: pointer;
+                        box-shadow: none;
+                        border-color: #ff990088;
+                    }
+
+                    &.active {
+                        color: $clr-hilight;
+                    }
+                }
+            }
+        }
+    }
+
+    > #frame-slider {
+        height: 24px;
+        margin: 0px;
+
+        > .pcui-numeric-input {
+            display: none;
+            flex-grow: 0;
+            margin: 0;
+            > input {
+                width: 40px;
+            }
+        }
+    }
+
+    > #timeline-lanes {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background-color: $bcg-darkest;
+        overflow: hidden;
+        min-height: 100px;
+
+        > #ticks-ruler {
+            position: relative;
+            flex-shrink: 0;
+            height: 22px;
+            border-bottom: 1px solid #444;
+
+            > .time-label {
+                position: absolute;
+                font-size: 9px;
+                color: #888;
+                pointer-events: none;
+            }
+
+            > .time-tick {
+                position: absolute;
+                pointer-events: none;
+            }
+        }
+
+        > #lanes-body {
+            position: relative;
+            flex: 1;
+            overflow-y: auto;
+
+            > #timeline-cursor-line {
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                width: 1px;
+                background: #ff6600;
+                pointer-events: none;
+                z-index: 10;
+            }
+
+            > .track-lane {
+                position: relative;
+                height: 28px;
+                flex-shrink: 0;
+                transition: background 0.1s;
+
+                &:hover {
+                    background: #2a2a35 !important;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,125 @@
+@use 'colors.scss' as *;
+
+#floater-panel {
+    & > .panel-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .floater-panel-collapse-arrow {
+        font-size: 10px;
+        color: $text-secondary;
+        margin-right: 2px;
+        width: 14px;
+        text-align: center;
+        flex-shrink: 0;
+        transition: transform 0.15s ease;
+    }
+
+    .floater-panel-header-toggle {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+    }
+
+    .floater-panel-content {
+        padding: 4px 6px;
+    }
+
+    .floater-panel-row {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        margin-bottom: 6px;
+        min-height: 26px;
+
+        &.dimmed {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+    }
+
+    .floater-panel-label {
+        width: 72px;
+        flex-shrink: 0;
+        color: $text-secondary;
+        font-size: 11px;
+    }
+
+    // ---- mode toggle buttons ----
+    .floater-panel-mode-buttons {
+        display: flex;
+        flex-direction: row;
+        flex-grow: 1;
+        gap: 2px;
+    }
+
+    .floater-panel-mode-btn {
+        flex: 1;
+        height: 24px;
+        padding: 0 4px;
+        font-size: 11px;
+        border-radius: 4px;
+        background-color: $bcg-dark;
+        color: $text-secondary;
+        border: none;
+        cursor: pointer;
+        text-align: center;
+
+        &:hover {
+            background-color: $bcg-lighter;
+        }
+
+        &.active {
+            background-color: $clr-hilight;
+            color: $clr-active;
+        }
+    }
+
+    // ---- sliders ----
+    .floater-panel-slider {
+        flex-grow: 1;
+        background-color: $bcg-dark;
+    }
+
+    // ---- result display ----
+    .floater-panel-result {
+        flex-grow: 1;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: monospace;
+        color: $clr-active;
+        background-color: $bcg-dark;
+        border-radius: 4px;
+        padding: 4px 8px;
+        min-height: 24px;
+        line-height: 24px;
+    }
+
+    // ---- remove button ----
+    .floater-panel-remove-btn {
+        width: 100%;
+        height: 28px;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 4px;
+        background-color: #1a4a1a;
+        color: #55cc55;
+        border: none;
+        cursor: pointer;
+        text-align: center;
+        transition: background-color 0.1s ease, color 0.1s ease;
+
+        &:hover {
+            background-color: #226622;
+            color: #77ee77;
+        }
+
+        &:active {
+            background-color: #338833;
+            color: #ffffff;
+        }
+    }
+}
