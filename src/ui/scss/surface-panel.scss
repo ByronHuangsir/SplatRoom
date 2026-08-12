@@ -1,0 +1,68 @@
+@use 'colors.scss' as *;
+
+#surface-panel {
+    top: 50%;
+    transform: translate(0, -50%);
+    right: 102px;
+    width: 320px;
+    flex-direction: column;
+
+    &:not(.pcui-hidden) {
+        display: flex;
+    }
+
+    .surface-panel-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        background-color: $bcg-dark;
+        border-bottom: 1px solid $bcg-lighter;
+        margin-bottom: 2px;
+
+        .surface-panel-title {
+            color: $text-primary;
+            font-weight: bold;
+            font-size: 12px;
+        }
+    }
+
+    .surface-panel-row {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 6px 10px;
+
+        .surface-panel-label {
+            color: $text-secondary;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .pcui-slider-input {
+            flex: 1;
+        }
+    }
+
+    .surface-panel-result {
+        color: $clr-hilight;
+        font-size: 11px;
+        text-align: center;
+        padding: 3px 10px;
+        min-height: 16px;
+    }
+
+    .surface-panel-btn {
+        margin: 6px 10px;
+        width: calc(100% - 20px);
+    }
+}
+
+// Level-2 refine UI is hidden by design (algorithm + event handler remain
+// fully wired). Remove this rule to bring the section back.
+.surface-panel-l2 {
+    display: none;
+}

@@ -1,0 +1,171 @@
+@use 'colors.scss' as *;
+
+#planarfix-panel {
+    top: 50%;
+    transform: translate(0, -50%);
+    right: 102px;
+    width: 320px;
+    flex-direction: column;
+
+    &:not(.pcui-hidden) {
+        display: flex;
+    }
+
+    .planarfix-panel-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        background-color: $bcg-dark;
+        border-bottom: 1px solid $bcg-lighter;
+        margin-bottom: 2px;
+
+        .planarfix-panel-title {
+            color: $text-primary;
+            font-weight: bold;
+            font-size: 12px;
+        }
+    }
+
+    .planarfix-panel-row {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 6px 10px;
+
+        .planarfix-panel-label {
+            color: $text-secondary;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .pcui-slider-input {
+            flex: 1;
+        }
+
+        .pcui-booleaninput {
+            flex-shrink: 0;
+        }
+    }
+
+    .planarfix-panel-count {
+        color: $clr-hilight;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: monospace;
+    }
+
+    .planarfix-panel-btn {
+        margin: 6px 10px;
+        width: calc(100% - 20px);
+        padding: 7px;
+        border-radius: 4px;
+        border: 1px solid $bcg-light;
+        background: $bcg-dark;
+        color: $clr-active;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        text-align: center;
+        transition: all 0.15s;
+        min-height: 30px;
+        outline: none;
+
+        &:hover {
+            background: $bcg-light;
+        }
+
+        &:active {
+            transform: scale(0.98);
+        }
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    }
+
+    .planarfix-panel-apply-btn {
+        border-color: $clr-hilight;
+        background: $clr-hilight;
+        color: #fff;
+
+        &:hover {
+            background: $clr-icon-hilight;
+            border-color: $clr-icon-hilight;
+        }
+    }
+
+    .planarfix-step {
+        padding: 8px 10px 2px;
+        border-top: 1px solid $bcg-lighter;
+        margin-top: 4px;
+
+        .planarfix-step-title {
+            color: $clr-hilight;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+    }
+
+    .planarfix-mode-group {
+        display: flex;
+        flex-direction: row;
+        gap: 6px;
+        padding: 4px 10px;
+
+        .planarfix-mode-btn {
+            flex: 1;
+            padding: 6px 4px;
+            border-radius: 4px;
+            border: 1px solid $bcg-light;
+            background: $bcg-dark;
+            color: $text-secondary;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+
+            &:hover {
+                background: $bcg-light;
+                color: $text-primary;
+            }
+
+            &.active {
+                background: $clr-hilight;
+                border-color: $clr-hilight;
+                color: #fff;
+                font-weight: 600;
+            }
+
+            &:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+        }
+    }
+
+    .planarfix-hint {
+        color: $text-secondary;
+        font-size: 10.5px;
+        line-height: 1.4;
+        padding: 2px 10px 6px;
+    }
+
+    .planarfix-status {
+        color: $clr-hilight;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 10px 0;
+    }
+
+    .planarfix-legend {
+        color: $text-secondary;
+        font-size: 10.5px;
+        padding: 2px 10px 8px;
+        opacity: 0.85;
+    }
+}

@@ -1,0 +1,21 @@
+// 手柄浏览模式：隐藏画布容器内除画布本身以外的所有 UI 元素
+#canvas-container.browse-mode > *:not(#canvas):not(#trajectory-canvas):not(#gamepad-browse-hint) {
+    display: none !important;
+}
+
+// 浏览模式提示条
+#gamepad-browse-hint {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 60;
+    padding: 8px 16px;
+    border-radius: 6px;
+    background-color: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+    pointer-events: none;
+    white-space: nowrap;
+}

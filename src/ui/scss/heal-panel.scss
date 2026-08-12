@@ -1,0 +1,159 @@
+@use 'colors.scss';
+
+.heal-panel {
+    position: absolute;
+    bottom: 86px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 200;
+    width: 320px;
+    background: colors.$bcg-darker;
+    border-radius: 8px;
+    border: 1px solid colors.$bcg-light;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: auto;
+
+    &.pcui-hidden {
+        display: none;
+    }
+
+    // Ensure all children can receive pointer events
+    * {
+        pointer-events: auto;
+    }
+}
+
+.heal-panel-header {
+    font-size: 13px;
+    font-weight: 500;
+    color: colors.$clr-active;
+    padding-bottom: 4px;
+    border-bottom: 1px solid colors.$bcg-light;
+    margin-bottom: 4px;
+}
+
+.heal-panel-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.heal-panel-label {
+    font-size: 12px;
+    color: colors.$text-secondary;
+    margin-bottom: 2px;
+}
+
+.heal-panel-strategy-row {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 4px;
+}
+
+.heal-strategy-btn {
+    flex: 1;
+    font-size: 11px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    border: 1px solid colors.$bcg-light;
+    background: colors.$bcg-dark;
+    color: colors.$text-secondary;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+    min-height: 28px;
+    outline: none;
+
+    &:hover {
+        background: colors.$bcg-light;
+        color: colors.$clr-active;
+    }
+
+    &.active {
+        background: colors.$clr-hilight;
+        color: #fff;
+        border-color: colors.$clr-hilight;
+    }
+}
+
+.heal-param-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.heal-panel-slider-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.heal-panel-slider-label {
+    font-size: 11px;
+    color: colors.$text-secondary;
+}
+
+.heal-panel-slider {
+    width: 100%;
+
+    .pcui-slider-input-bar {
+        height: 4px;
+    }
+
+    .pcui-slider-input-handle {
+        width: 12px;
+        height: 12px;
+    }
+}
+
+.heal-panel-preview-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    background: colors.$bcg-dark;
+    border-radius: 4px;
+    margin-top: 4px;
+}
+
+.heal-panel-preview-count {
+    font-size: 13px;
+    font-weight: 500;
+    color: colors.$clr-hilight;
+    font-family: monospace;
+}
+
+.heal-panel-apply-btn {
+    width: 100%;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid colors.$clr-hilight;
+    background: colors.$clr-hilight;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+    margin-top: 4px;
+    min-height: 32px;
+    outline: none;
+
+    &:hover {
+        background: colors.$clr-icon-hilight;
+        border-color: colors.$clr-icon-hilight;
+    }
+
+    &:active {
+        transform: scale(0.98);
+    }
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+}

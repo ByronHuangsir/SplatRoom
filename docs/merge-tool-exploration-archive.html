@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SplatRoom 合并工具探索历程存档</title>
+<style>
+  :root {
+    --ink: #1a2332;
+    --ink-soft: #44506a;
+    --accent: #0f62fe;
+    --accent2: #0e7d8a;
+    --warn: #b42318;
+    --ok: #1e7d44;
+    --line: #d8dee9;
+    --bg-soft: #f4f7fb;
+    --code-bg: #0f172a;
+    --code-fg: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    color: var(--ink);
+    font-size: 10.5pt;
+    line-height: 1.65;
+    background: #fff;
+  }
+  @page { size: A4; margin: 16mm 14mm 18mm 14mm; }
+  .page-break { page-break-before: always; }
+
+  /* ---------- Cover ---------- */
+  .cover {
+    height: 100vh;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 0 8mm;
+    page-break-after: always;
+  }
+  .cover .kicker {
+    font-size: 11pt; letter-spacing: 4px; color: var(--accent);
+    text-transform: uppercase; margin-bottom: 10mm; font-weight: 600;
+  }
+  .cover h1 { font-size: 30pt; line-height: 1.35; margin-bottom: 6mm; font-weight: 800; }
+  .cover h2 { font-size: 14pt; color: var(--ink-soft); font-weight: 400; margin-bottom: 14mm; }
+  .cover .meta {
+    border-top: 2px solid var(--accent); padding-top: 6mm;
+    font-size: 10.5pt; color: var(--ink-soft); line-height: 2;
+  }
+  .cover .meta b { color: var(--ink); }
+
+  /* ---------- TOC ---------- */
+  .toc { page-break-after: always; }
+  .toc h2 { font-size: 17pt; margin-bottom: 6mm; color: var(--accent); }
+  .toc ol { list-style: none; counter-reset: toc; }
+  .toc li {
+    counter-increment: toc;
+    padding: 2.2mm 0; border-bottom: 1px dashed var(--line);
+    font-size: 10.5pt;
+  }
+  .toc li::before {
+    content: counter(toc, decimal-leading-zero);
+    color: var(--accent); font-weight: 700; margin-right: 4mm;
+    font-family: Consolas, monospace;
+  }
+  .toc .sub { padding-left: 9mm; font-size: 9.5pt; color: var(--ink-soft); }
+
+  /* ---------- Sections ---------- */
+  h2.sec {
+    font-size: 17pt; color: var(--accent);
+    border-left: 5px solid var(--accent); padding-left: 4mm;
+    margin: 8mm 0 5mm;
+  }
+  h3.sec { font-size: 12.5pt; color: var(--ink); margin: 7mm 0 3mm; padding-top: 2mm; border-top: 1px solid var(--line); }
+  h4.sec { font-size: 10.5pt; color: var(--accent2); margin: 5mm 0 2mm; }
+  p { margin: 1.8mm 0; text-align: justify; }
+  ul, ol { margin: 1.5mm 0 2.5mm 6mm; }
+  li { margin: 1mm 0; }
+  b, strong { color: var(--ink); }
+  .accent { color: var(--accent); font-weight: 700; }
+  .warn { color: var(--warn); font-weight: 700; }
+  .ok { color: var(--ok); font-weight: 700; }
+
+  /* ---------- Cards / callouts ---------- */
+  .callout {
+    background: var(--bg-soft); border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 3px; padding: 3mm 4mm; margin: 3mm 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.ok { border-left-color: var(--ok); }
+  .callout .t { font-weight: 700; margin-bottom: 1mm; }
+
+  /* ---------- Timeline ---------- */
+  .timeline { margin: 4mm 0; }
+  .tl-item { display: flex; margin-bottom: 2mm; }
+  .tl-date {
+    flex: 0 0 22mm; font-family: Consolas, monospace; font-size: 9pt;
+    color: var(--accent); font-weight: 700; padding-top: 0.5mm;
+  }
+  .tl-body { flex: 1; border-left: 2px solid var(--accent); padding-left: 4mm; }
+
+  /* ---------- Figures ---------- */
+  figure {
+    margin: 4mm 0; page-break-inside: avoid;
+    text-align: center;
+  }
+  figure img {
+    max-width: 100%; max-height: 62mm;
+    border: 1px solid var(--line); border-radius: 3px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  }
+  figcaption { font-size: 9pt; color: var(--ink-soft); margin-top: 1.5mm; }
+  figcaption .num { color: var(--accent); font-weight: 700; margin-right: 1.5mm; }
+
+  /* ---------- Code ---------- */
+  pre {
+    background: var(--code-bg); color: var(--code-fg);
+    padding: 3.5mm 4mm; border-radius: 4px; font-size: 8.2pt;
+    line-height: 1.55; overflow-x: auto; margin: 3mm 0;
+    font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  code { font-family: "Cascadia Code", Consolas, monospace; font-size: 9pt; background: #eef1f7; padding: 0 1.5mm; border-radius: 2px; }
+  pre code { background: none; padding: 0; color: inherit; }
+
+  /* ---------- Tables ---------- */
+  table { width: 100%; border-collapse: collapse; margin: 3mm 0; font-size: 9.2pt; }
+  th, td { border: 1px solid var(--line); padding: 1.8mm 2.5mm; text-align: left; vertical-align: top; }
+  th { background: var(--bg-soft); font-weight: 700; color: var(--ink); }
+
+  .footer-note { margin-top: 8mm; border-top: 1px solid var(--line); padding-top: 3mm; font-size: 9pt; color: var(--ink-soft); }
+</style>
+</head>
+<body>
+
+<!-- ======================= 封面 ======================= -->
+<div class="cover">
+  <div class="kicker">SplatRoom · Exploration Archive</div>
+  <h1>SplatRoom 合并工具<br>探索历程图文存档</h1>
+  <h2>从功能起点到标记对齐攻坚：全部主线探索与支线探索的完整记录</h2>
+  <div class="meta">
+    <b>项目：</b>SplatRoom（基于 PlayCanvas SuperSplat v2.31.10 二次开发）<br>
+    <b>范围：</b>合并工作台（?mode=merge）全部功能演进 + 关联支线<br>
+    <b>时段：</b>2026-07 至 2026-08-11（归档日）<br>
+    <b>作者：</b>摄影师黄Sir（1924705842@qq.com）<br>
+    <b>归档日期：</b>2026-08-11
+  </div>
+</div>
+
+<!-- ======================= 目录 ======================= -->
+<div class="toc">
+  <h2>目录</h2>
+  <ol>
+    <li>项目背景与架构</li>
+    <li>探索时间线总览</li>
+    <li>主线：合并工具功能演进
+      <div class="sub">3.1 多模型加载 / 3.2 选择与变换 / 3.3 视角控制 / 3.4 对齐三模式 / 3.5 合并导出</div>
+    </li>
+    <li>核心攻坚：标记对齐（对应点）专项
+      <div class="sub">4.1 功能重构 / 4.2 九轮 Bug 修复全景 / 4.3 最终方案定稿</div>
+    </li>
+    <li>支线探索
+      <div class="sub">5.1 PiP 近小远大 / 5.2 正交视角模型消失 / 5.3 表面平整 L1/L2 / 5.4 平面修整 / 5.5 对比工具 / 5.6 打包发布 / 5.7 无头浏览器复现</div>
+    </li>
+    <li>关键技术结论</li>
+    <li>构建与部署实战经验</li>
+    <li>历次部署链接清单</li>
+  </ol>
+  <p style="margin-top:8mm;color:var(--ink-soft);font-size:9.5pt;">
+    本文档为工作记忆（.workbuddy/memory）与工作日志的结构化整理，附图均来自开发过程中的真实截图。
+  </p>
+</div>
+
+<!-- ======================= 1 项目背景 ======================= -->
+<h2 class="sec" id="s1">1 · 项目背景与架构</h2>
+<p>
+  <b>SplatRoom</b> 是基于 <b>PlayCanvas SuperSplat v2.31.10</b> 二次开发的高斯泼溅（3D Gaussian Splatting）编辑工具，作者为摄影师黄Sir。
+  项目最初位于 <code>C:\Users\Byon Huang\WorkBuddy\2026-07-20-11-07-50</code>，后迁移至独立工作空间 <code>C:\Users\Byon Huang\WorkBuddy\SplatRoom</code>。
+</p>
+<p>
+  其中「合并工具」（merge）以独立窗口模式运行：访问部署链接加 <code>?mode=merge</code> 进入合并工作台，创建**独立的 PlayCanvas app**，
+  渲染链路（canvas / device / app / scene / camera）与主视窗、PiP 完全隔离。
+</p>
+<div class="callout">
+  <div class="t">架构决策要点</div>
+  <ul>
+    <li>合并场景不 import 主编辑器任何模块，独立自包含。</li>
+    <li>最多同时加载 <b>8</b> 个高斯模型（PLY）；原始 PLY 只读，参数通过 <code>.sscg</code> 侧车保存，fragment shader 实时应用、导出时烘焙。</li>
+    <li>多模型通过 <code>group-renderer.ts</code> 跨 splat 合并 DataTable → 单一 Entity 渲染；Ctrl+Click 多选 → 链锁。</li>
+    <li>生产构建：rollup → <code>dist/index.js</code>（约 6.8MB）；打包用 electron-builder portable 目标（单文件 .exe）。</li>
+  </ul>
+</div>
+
+<!-- ======================= 2 时间线 ======================= -->
+<h2 class="sec" id="s2">2 · 探索时间线总览</h2>
+<div class="timeline">
+  <div class="tl-item"><div class="tl-date">07 下旬</div><div class="tl-body">SplatRoom 初始化、SuperSplat 二次开发基线搭建；SSCG 调色系统 v4（HSL 8 色区 × 3 属性）。</div></div>
+  <div class="tl-item"><div class="tl-date">07-24</div><div class="tl-body">多模型 Group/Link 支持；<code>group-renderer.ts</code> 跨 splat 合并渲染。</div></div>
+  <div class="tl-item"><div class="tl-date">08 初</div><div class="tl-body">SOG WebP 纹理修复（MAX_STRIPE_BYTES 8MB→128MB）；运镜系统（惯性动量 / Numpad 预设视角 / 自动旋转 / 双轴面板）；视频导出（setPoseOverride 首帧 keyFrame）。</div></div>
+  <div class="tl-item"><div class="tl-date">08-02</div><div class="tl-body">平面修整（Planar Fix，后暂停存档）；对比工具（?mode=compare）启动：PCA+ICP 对齐、左右分屏、24 属性直方图、破洞检测（TSPE-GS 透射率）。</div></div>
+  <div class="tl-item"><div class="tl-date">08-03</div><div class="tl-body">表面平整 L2（surface-refiner.ts）；SSCG 持续推进。</div></div>
+  <div class="tl-item"><div class="tl-date">08-04</div><div class="tl-body">X/Y/Z 正交正视视角模型消失 bug 定位与修复（gsplatCorner NaN 兜底）；表面平整 L1 多轮改造与整体回退（见 5.3）；确立 headless 复现 WebGL bug 工作流（puppeteer-core + Edge + SwiftShader）。</div></div>
+  <div class="tl-item"><div class="tl-date">08-08 ~ 08-10</div><div class="tl-body">合并工具主体功能搭建：多模型加载、选择、变换 gizmo、视角控制、自动对齐、合并导出 PLY。</div></div>
+  <div class="tl-item"><div class="tl-date">08-11</div><div class="tl-body"><b>标记对齐专项攻坚日</b>：功能重构 + 九轮 Bug 修复（详见第 4 章）；导出「存储为」对话框及手势修复。本文档归档。</div></div>
+</div>
+
+<!-- ======================= 3 主线：合并工具功能演进 ======================= -->
+<h2 class="sec" id="s3">3 · 主线：合并工具功能演进</h2>
+
+<h3 class="sec">3.1 多模型加载</h3>
+<p>
+  文件选择（<code>#fileInput</code>）、URL 输入（<code>#fileUrl</code>）、拖拽 <code>.ply</code> 到画面（橙色虚线遮罩）三种入口；
+  引擎一次性 boot，<code>loadModelFromBuffer(buf, name, sizeKB)</code> 支持多模型切换；<code>teardownModel()</code> 负责销毁旧 entity / asset / 选择状态。
+</p>
+<figure>
+  <img src="archive-assets/13-merge-tool.png" alt="merge 工具界面">
+  <figcaption><span class="num">图 3-1</span>合并工作台界面：多模型并排、选择框、右侧变换/导出面板。</figcaption>
+</figure>
+
+<h3 class="sec">3.2 选择与变换</h3>
+<ul>
+  <li>左键单击选中（Ctrl 多选/反选）；双击聚焦；Ctrl+空格拖拽框选。</li>
+  <li>选中后默认进入「移动」模式，显示 3 轴 gizmo（移动箭头 / 轴端缩放块 / 旋转环）；拖拽箭头移动模型，未命中手柄时拖拽为 orbit。</li>
+  <li>变换面板：左上角浮层，0.01 步进拖拽精确调整 pos/rot/scale。</li>
+</ul>
+
+<h3 class="sec">3.3 视角控制</h3>
+<ul>
+  <li>左键拖拽 orbit、中键 pan、右键 look、滚轮缩放。</li>
+  <li>右上角 X/Y/Z 轴导航 overlay（Blender 风格环 + 字母标签，命中测试直接算 6 个轴端屏幕位置取最近）。</li>
+  <li>视窗底部 3 个视角按钮（俯视 / 正视 / 侧视）→ <code>snapToAxis</code> 进入正交视角。</li>
+</ul>
+<div class="callout warn">
+  <div class="t">俯视退化 bug（08-11 上午，后续为标记对齐让路）</div>
+  <p>俯视/仰视（elevation≈±90°）时视线与默认 up=(0,1,0) 平行，<code>lookAt</code> 退化出 NaN → 模型消失。
+  先以 <code>safeUp(forward)</code> 硬阈值修复（视线近竖直改用 Z 轴为 up），后因左键拖拽轴导航突然翻转（up 在阈值附近跳变），
+  改为 <code>calcCameraUp(forward, azimuth)</code> 平滑 blend；轴 overlay 与 hit test 改用 <code>camera.getWorldTransform().getX()/getY()</code> 世界基，不再手动 recompute。</p>
+</div>
+
+<h3 class="sec">3.4 对齐三模式</h3>
+<table>
+  <tr><th>模式</th><th>实现</th><th>适用场景</th></tr>
+  <tr><td>手动对齐（manual）</td><td>拖拽 gizmo 手工摆放</td><td>粗调</td></tr>
+  <tr><td>自动对齐（auto）</td><td>PCA 预对齐 + Kabsch / 符号对齐 / 变换对齐（<code>merge-align.ts</code>）</td><td>整体刚体对齐</td></tr>
+  <tr><td>标记对齐（marker）</td><td>用户在两模型上点 3 组对应点 → Kabsch 求刚体变换，模型 2 对齐到模型 1</td><td>精细特征对齐</td></tr>
+</table>
+
+<h3 class="sec">3.5 合并导出</h3>
+<ul>
+  <li><code>exportMergedPly()</code>：合并多模型 gsplatData → 单一 PLY（高斯位置 / 旋转 / SH 颜色 / 不透明度）。</li>
+  <li><b>存储为对话框</b>：优先 <code>window.showSaveFilePicker</code>（Chromium 桌面版 https 安全上下文），用户可自定文件名与位置；取消抛 AbortError；不支持抛 NOT_SUPPORTED，回退到已选文件夹或直接下载。</li>
+</ul>
+<div class="callout warn">
+  <div class="t">导出失败修复（08-11 13:44）</div>
+  <p>报错 <code>Must be handling a user gesture to show a file picker</code>。根因：handler 先 <code>await exportMerged()</code> 再调 picker，
+  <code>await</code> 之后 transient activation 丢失。修复：<code>saveWithPicker(name, getData)</code> 把数据改为回调——函数内先同步拿 handle，再调回调取数据。</p>
+<pre><code>// 正确：picker 必须在用户手势同步链上
+const saved = await saveWithPicker(name, async () => {
+    const r = await scene.exportMerged(name);
+    return r.data;
+});</code></pre>
+</div>
+<figure>
+  <img src="archive-assets/10-export-failed.png" alt="导出失败错误">
+  <figcaption><span class="num">图 3-2</span>导出失败报错：showSaveFilePicker 需要用户手势。</figcaption>
+</figure>
+
+<!-- ======================= 4 标记对齐专项 ======================= -->
+<h2 class="sec" id="s4">4 · 核心攻坚：标记对齐（对应点）专项</h2>
+<p>
+  标记对齐是 08-11 当天的主战场：从功能重构到连续九轮 Bug 修复，最终沉淀出「射线-高斯最近交点 + entity-local 存储 + 手算 OpenGL 投影矩阵」的稳定方案。
+  全过程涉及投影数学、PlayCanvas 相机缓存、GSplatData 内部重排、浏览器 API 手势限制等多个深坑。
+</p>
+
+<h3 class="sec">4.1 功能重构（对应点对齐 v1）</h3>
+<ul>
+  <li>交互：选「标记对齐」→ 面板出现；选第 1 个模型=模型 1（亮起），在特征处点左键记入标记组（自动出➊），完成 3 处；选第 2 个模型=模型 2，按相同顺序点对应特征，满 3 组自动重合、模型对齐完成。</li>
+  <li>状态：<code>markerModel1 / markerModel2 / markerActive('m1'|'m2') / markerPicking / markerGroups[3]</code>（每点存 entity-local 坐标）。</li>
+  <li>核心流程：<code>addMarkerPoint()</code>（拾取→local）→ <code>updateMarkerOverlays()</code>（每帧 local→world→屏幕投影）→ <code>applyMarkerAlign()</code>（Kabsch：模型 2 对齐到模型 1）。</li>
+  <li>UI：Tab（模型 1/2）+ 3 组对应点圆点（模型 1 青 <code>#3fd0e0</code> / 模型 2 粉 <code>#ef5da8</code>，实心=已标记）+ 开始/结束标记·应用对齐·清空按钮。</li>
+</ul>
+
+<h3 class="sec">4.2 九轮 Bug 修复全景</h3>
+
+<h4 class="sec">Bug 1 · 标记点不显示（03:29 反馈）</h4>
+<p><b>现象：</b>模型上点击产生的标记点（屏幕 overlay）不显示。</p>
+<ul>
+  <li><b>根因 1（投影符号）</b>：<code>worldToScreen</code> 中 OpenGL 视图空间前向为 -Z，原代码 <code>vz = dx*fx+dy*fy+dz*fz</code> 未取负 → 前方点的 <code>vz &gt; -0.01</code> 为真被 <code>return null</code> 隐藏，标记点永远不渲染。</li>
+  <li><b>根因 2（层级）</b>：overlay div <code>z-index:9</code> 低于面板 <code>.merge-panel</code> 的 <code>10</code>，被面板盖住。</li>
+</ul>
+<div class="callout ok"><div class="t">修复</div>
+  <code>vz = -(dx*fx+dy*fy+dz*fz)</code>；<code>aspect</code> 改用 <code>getBoundingClientRect()</code> CSS 像素宽高比；overlay z-index → 20。</div>
+
+<h4 class="sec">Bug 2 · 应用对齐后模型坍塌（03:29 反馈）</h4>
+<figure>
+  <img src="archive-assets/01-collapse-after-align.jpg" alt="模型坍塌">
+  <figcaption><span class="num">图 4-1</span>应用标记对齐后其中一个模型坍塌（高斯被压扁/畸变）。</figcaption>
+</figure>
+<p><b>根因：</b><code>applyMarkerAlign</code> 末尾 <code>setLocalScale(newLocal.getScale())</code>，把 Kabsch 变换矩阵的尺度/剪切误差写进 splat 的 localScale → 高斯被压扁；且 3 点近似共线会产生病态矩阵，未校验。</p>
+<div class="callout ok"><div class="t">修复</div>
+  <ul>
+    <li>三角形面积退化检查：<code>triangleArea(w1) × triangleArea(w2) &lt; 1e-12</code> → 报错返回。</li>
+    <li><code>isRigidTransformValid(T)</code>：16 项有限 + 行列式 ∈ [1e-6, 1e6]。</li>
+    <li><b>保持 oldScale</b>：刚性对齐不改 scale（坍塌根因修复）。</li>
+    <li><code>extractRotationQuat(m)</code>：正交归一化基提取纯旋转，防 scale/shear 污染。</li>
+  </ul>
+</div>
+
+<h4 class="sec">Feature 3 · 撤销 / 重做（03:29 需求）</h4>
+<ul>
+  <li>双栈快照（local pos/rot/scale），深度 20（<code>MAX_HISTORY</code>）；每次新操作清空 redo。</li>
+  <li>面板「↩ 撤销 / ↪ 重做」按钮 + 快捷键 Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z。</li>
+  <li>坑：类字段类型注解不能用 <code>typeof this.undoStack</code>，需显式 <code>HistoryEntry[]</code> 接口。</li>
+</ul>
+
+<h4 class="sec">Bug 4 · 标记不跟随模型表面（04:02 反馈）</h4>
+<figure>
+  <img src="archive-assets/02-markers-not-stuck-1.jpg" alt="标记不跟随">
+  <figcaption><span class="num">图 4-2</span>标记点没有紧贴模型表面，移动模型/切换视角时乱窜。</figcaption>
+</figure>
+<p><b>根因：</b><code>worldToScreen</code> / <code>pickRayManual</code> 手算 gluLookAt 基（<code>forward=normalize(target-camPos)</code>，side=<code>cross(forward, worldUp=(0,1,0))</code>），与 PlayCanvas 相机经 <code>calcCameraUp</code> 平滑后的实际 up 不一致；俯视/仰视时 side 退化。</p>
+<div class="callout ok"><div class="t">修复</div>
+  两处改用 <code>camera.getWorldTransform()</code> 实际世界基：<code>right=getX() / camUp=getY() / camBack=getZ()</code>；视图空间 <code>vx=d·right, vy=d·camUp, vz=d·camBack</code>。</div>
+
+<h4 class="sec">Bug 5 · 标记仍偏移（04:17 反馈）</h4>
+<figure>
+  <img src="archive-assets/04-markers-offset.jpg" alt="标记偏移">
+  <figcaption><span class="num">图 4-3</span>标记点跑到包围盒另一侧；模型 2 第一次点击"没反应"、第二次直接变第 2 个点。</figcaption>
+</figure>
+<p><b>根因：</b><code>pickScreen()</code> 用 <code>cam._camera?.getInvViewProjMatrix?.()</code>（缓存矩阵与 GPU 不一致），而 <code>worldToScreen</code> 用另一套来源——拾取与投影不同源；且 aspect 用了 CSS 而相机投影用 buffer（DPR&gt;1 错位）。模型 2 第 1 个点被投到不可见位置，表现为"没反应"。</p>
+<div class="callout ok"><div class="t">修复</div>
+  <code>worldToScreen</code> 改读 <code>camera.camera.fov / aspectRatio</code>（公开 getter）+ 实体世界变换；<code>pickScreen</code> 废弃 <code>_camera</code> 路径，同一套参数手算射线，与投影严格互逆。</div>
+
+<h4 class="sec">Bug 6 · 绑定高斯 splat（splatIndex 方案）（05:09 反馈）</h4>
+<p><b>用户要求：</b>"标记点直接打在被点击位置的高斯点的高斯核上面，直接绑定"。</p>
+<ul>
+  <li><code>raycastPick</code> 返回值加 <code>index</code>（被命中 splat 在 <code>getProp('x/y/z')</code> 中的下标）。</li>
+  <li>markerEls 存 <code>splatIndex</code>；每帧 <code>getProp('x/y/z')[idx]</code> × 当前世界变换 → 投影。</li>
+  <li>local 坐标直接读 <code>getProp</code>（比 inverse(worldTransform) 精确）。</li>
+</ul>
+
+<h4 class="sec">Bug 7 · 边缘打不上点（05:09 反馈）</h4>
+<p><b>现象：</b>"打点时在边缘打不上，只有点中间，模型居中后才能点击打点"。</p>
+<p><b>根因：</b><code>raycastPick</code> 容差 <code>fovScale * 0.025</code> 太紧（约 9–13 像素等效），边缘/稀疏区最近 splat 离射线稍远即被拒。</p>
+<div class="callout ok"><div class="t">修复</div>容差放宽到 <code>fovScale * 0.08</code>（≈30+ 像素等效），中心到边缘都能命中。</div>
+
+<h4 class="sec">Bug 8 · 标记跑到画面中心（05:18 / 05:33 反馈）</h4>
+<figure>
+  <img src="archive-assets/08-markers-mess.jpg" alt="标记乱跑">
+  <figcaption><span class="num">图 4-4</span>标记点仍"跑得乱七八糟"（splatIndex 方案，标记与点击位置严重错位）。</figcaption>
+</figure>
+<figure>
+  <img src="archive-assets/09-click-arrow-marker-center.jpg" alt="点击箭头标记中心">
+  <figcaption><span class="num">图 4-5</span>点的是箭头位置（书左上角），标记却出现在雕塑中心——投影矩阵与 GPU 不一致的铁证。</figcaption>
+</figure>
+<p><b>两个关键发现：</b></p>
+<ul>
+  <li><b>GSplatData.reorder()</b>：PLY loader（<code>ply.js:461</code>）会按 Morton 序重排 <code>property.storage</code>，splat 下标语义不稳定——splatIndex 方案不可靠。</li>
+  <li><b>camera.camera.projectionMatrix 是缓存</b>：公共 getter 内部就是项目记忆警告过的 <code>_camera</code> 缓存矩阵，与 GPU 实际渲染不一致 → NDC 整体偏移（标记压向画面中心）。</li>
+</ul>
+<div class="callout ok"><div class="t">最终修复（手算 OpenGL 投影矩阵 + 射线-高斯最近交点）</div>
+  <ul>
+    <li>新增 <code>buildManualProj()</code>：从相机公开的 <code>fov / aspectRatio / nearClip / farClip</code> 手算标准 OpenGL 透视矩阵（列主序），与 GPU 用同一组参数构建，像素级一致；<b>不再读任何 <code>_camera</code> 缓存</b>。</li>
+    <li><code>worldToScreen</code> / <code>pickScreen</code> 都用这份手算矩阵，严格互逆。</li>
+    <li><code>raycastPick</code> 的 <code>bestP</code> 从 splat 中心改为 <b><code>lo + ld * t</code></b>（射线到 splat 中心的最近点 = 用户射线真正打到的 3D 位置）。</li>
+    <li>markerEls 存 <b><code>hitLocal: Vec3</code></b>（entity-local 命中点），每帧 <code>entity.transformPoint(hitLocal)</code> 投影——完全脱离 splat 数据与下标，模型移动/旋转/缩放时标记钉死。</li>
+  </ul>
+</div>
+
+<h3 class="sec">4.3 最终方案定稿（为什么这样一定对）</h3>
+<ol>
+  <li><b>marker 100% 落在点击像素对应的 3D 位置</b>（射线-高斯最近交点，不是 splat 中心，不存在 splat 大小导致的视觉偏移）。</li>
+  <li><b>不依赖 splat 下标</b>——绕开 <code>GSplatData.reorder()</code> 的 Morton 重排陷阱。</li>
+  <li><b>只依赖 entity-local 坐标 × 当前世界变换</b>，跟随模型，天然支持撤销/重做后的位置恢复。</li>
+  <li><b>投影与拾取同源</b>（手算 OpenGL 矩阵），杜绝缓存矩阵与 GPU 不一致的系统性偏移。</li>
+</ol>
+<div class="callout">
+  <div class="t">关键代码：手算 OpenGL 透视矩阵（列主序）</div>
+<pre><code>const fRad = (fov * Math.PI) / 180;
+const t = Math.tan(fRad / 2);
+return new Mat4().set([
+    1 / (aspect * t), 0, 0, 0,
+    0, 1 / t, 0, 0,
+    0, 0, -(far + near) / (far - near), -1,
+    0, 0, -2 * far * near / (far - near), 0
+]);</code></pre>
+</div>
+
+<!-- ======================= 5 支线探索 ======================= -->
+<h2 class="sec" id="s5">5 · 支线探索</h2>
+
+<h3 class="sec">5.1 PiP「近小远大」修复（v9.1，camera-preview.ts）</h3>
+<ul>
+  <li><b>现象：</b>画中画（PiP）预览里远处物体反而变大。</li>
+  <li><b>根因：</b>每个 GSplatInstance 只有一个 orderTexture + sorter（共享可变状态），PiP 相机滞留污染主排序。</li>
+  <li><b>修复：</b>独立 PiP 排序管线（第二个 GSplatSorter + R32U pipOrder），swap 隔离；同步 CPU 深度排序（<code>camDir=getZ()</code> → <code>invert(worldTransform).transformVector()</code> → <code>dot(center, camDirLocal)</code> 升序），每 10 帧 1 次，导出期间 <code>lockedRenderMode</code> 闸门跳过。</li>
+</ul>
+
+<h3 class="sec">5.2 X/Y/Z 正交正视视角模型消失（2026-08-04）</h3>
+<ul>
+  <li><b>触发：</b>正交投影 + 精确轴向（azim ∈ {0,90,180,270} 且 elev=0）。</li>
+  <li><b>根因：</b><code>gsplatCorner.js</code> 的 <code>initCornerCov</code> 在精确轴向正交下 <code>normalize(vec2(offDiagonal, lambda1 - diagonal1))</code> 计算出 NaN（屏幕空间协方差退化）→ corner.offset 出 clip → 所有 splat 被丢弃。</li>
+  <li><b>修复：</b>应用层 shader 检测 NaN/Inf 回退常量偏移；上游 <code>normalize</code> 处加 <code>length &gt; 1e-6</code> 兜底。</li>
+  <li><b>经验：</b>GSplat（unified:false 旧管线）<code>instance.material</code> 可被 <code>setDefine+update()</code> 触发重编译，但 <code>setParameter</code> 不生效；验证调试开关优先用 <code>#define</code> 或直接硬编码。</li>
+</ul>
+
+<h3 class="sec">5.3 表面平整 L1 / L2（surface-analyzer / surface-refiner）</h3>
+<ul>
+  <li>L2（08-03）：<code>refineSurfaceLevel2()</code> — 边缘高斯半径调低 + 游离散点清除；自适应搜索半径 = 包围盒对角线 × radiusFraction（默认 0.01）；散点评分 = 0.55×孤立度 + 0.45×透明度 &gt; 0.6；异步分块（8000 点/chunk）防 UI 冻结。</li>
+  <li>L1 性能优化（08-04）：仅离群点做邻域 PCA + 上限 64 → 100k 点 Phase2 2717ms→75ms。</li>
+  <li>L1 四项修复（08-04）：排除自身统计 / 阈值 1.5 可调 / 压缩目标压向 localAvg / 邻域 PCA 真实法线。</li>
+  <li>L1 真分裂 v1–v4（08-04）：切平面矩形网格分裂、按原高斯投影椭圆覆盖、仅在物体表面分裂（localFlatness &lt; 0.4）、三类切断（超大/过扁/夹角超限）。<b>⚠️ 因用户要求回退到 11:35 之前，整体撤销</b>（当前 L1 = 原始版：阈值 2.5 硬编码、含自身统计、无 PCA、edgeSplit 只计数），留档供将来重做。</li>
+</ul>
+<figure>
+  <img src="archive-assets/15-surface-refine.png" alt="表面平整">
+  <figcaption><span class="num">图 5-1</span>表面平整功能调试截图（L1/L2 参数面板与效果）。</figcaption>
+</figure>
+
+<h3 class="sec">5.4 平面修整（Planar Fix，08-02，已暂停）</h3>
+<p>基准面贴平面 + 压平突起高斯；文件：<code>planar-fix-box.ts / geometry/planar-fix.ts / tools/planar-fix-tool.ts / ui/planar-fix-panel.ts</code>；存档：<code>平面修整功能存档.md</code>。</p>
+
+<h3 class="sec">5.5 对比工具（?mode=compare，08-02 起）</h3>
+<ul>
+  <li><code>startCompareApp()</code>；菜单「工具→高斯训练对比-飞羽实验室」。</li>
+  <li>PCA+ICP 对齐、左右分屏、共享相机、24 属性直方图。</li>
+  <li>破洞检测（v6）：TSPE-GS 透射率 + 累积不透明度 + 48×48 网格 + 像素亮度，<code>max()</code> 融合。</li>
+  <li>文件清单：<code>compare-app/scene/panel/stats/layout/analysis/sync.ts</code>。</li>
+</ul>
+<figure>
+  <img src="archive-assets/11-compare-tool-1.png" alt="对比工具1">
+  <img src="archive-assets/12-compare-tool-2.png" alt="对比工具2">
+  <figcaption><span class="num">图 5-2</span>高斯训练对比工具界面（左右分屏、直方图、破洞检测热力）。</figcaption>
+</figure>
+
+<h3 class="sec">5.6 打包发布（electron-builder）</h3>
+<ul>
+  <li>portable 目标 → 单文件 <code>.exe</code>（免安装）；脚本 <code>npm run dist:win</code> = rollup build + electron-builder --win portable；输出 <code>release/SplatRoom-${version}.exe</code>。</li>
+  <li>入口：<code>electron-main.js</code> + <code>electron-preload.js</code>；版本号改 package.json 顶层 <code>version</code>。</li>
+  <li><b>safe-delete 假失败：</b>electron-builder 收尾调 trash 删中间文件，本沙箱的 genie-safe-delete 垫片报错导致退出码 1，但 <code>building target=portable</code> 已打印即产物完整，无需重跑。</li>
+  <li>产物校验：python 读首 2 字节应为 <code>MZ</code>，再在前部搜 7z 签名 <code>37 7A BC AF 27 1C</code>。</li>
+</ul>
+
+<h3 class="sec">5.7 无头浏览器复现 WebGL bug（headless 工作流）</h3>
+<ul>
+  <li>工具链：puppeteer-core + Edge + SwiftShader WebGL（<code>--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist</code>）。</li>
+  <li>服务器：<code>npx serve dist -l 3000</code>；遇 EPERM → <code>Remove-Item dist -Recurse -Force</code> 再重建。</li>
+  <li>关键判据：<b>截图文件大小比像素探针可靠</b>（drawImage 抓离屏 canvas 读 [0,0,0,0]）；鉴别策略——直接在着色器源码硬编码常量替换正常路径，绕过所有 splat 数据验证绘制调用。</li>
+  <li>大模型（200k 高斯）SwiftShader 单帧约 5s，<code>page.screenshot()</code> 必须带 timeout + catch，否则 ProtocolError 卡死。</li>
+</ul>
+
+<!-- ======================= 6 关键技术结论 ======================= -->
+<h2 class="sec" id="s6">6 · 关键技术结论</h2>
+<table>
+  <tr><th>主题</th><th>结论</th></tr>
+  <tr><td>相机投影矩阵</td><td><b>永远不要读 <code>camera.camera.projectionMatrix</code>（内部即 <code>_camera</code> 缓存，与 GPU 不一致）</b>。手算 OpenGL 标准透视矩阵，用公开 fov/aspect/near/far，与 GPU 像素级一致；raycast 用同一份手算矩阵的反投影。</td></tr>
+  <tr><td>3D 标记绑定</td><td>存 <b>射线-高斯最近交点的 entity-local 坐标</b>（<code>lo + ld * t</code>），每帧 <code>entity.transformPoint()</code> 投影最稳。splat 下标会被 <code>GSplatData.reorder()</code> 打乱；splat 中心会被 splat 尺寸拖偏；固定世界点不跟随模型。</td></tr>
+  <tr><td>GSplatData 内部结构</td><td><code>reorder()</code>（Morton 序）会重排 property.storage；<code>calcAabb</code> 对手动构造的数据不可信，须手动循环算 AABB；getProp('x') 与渲染同源，但下标语义在 reorder 后变化。</td></tr>
+  <tr><td>Entity 变换</td><td>Entity 无 <code>setLocalTransform</code>，须分解 <code>setLocalPosition + setLocalRotation + setLocalScale</code>；对齐变换保持 oldScale，用正交化提取纯旋转防 scale/shear 污染。</td></tr>
+  <tr><td>showSaveFilePicker</td><td>必须放在点击 handler 的同步链上；需要异步准备数据时，数据准备放进 picker 回调（picker 先拿 handle，再调回调取数据）。</td></tr>
+  <tr><td>GSplat 旧管线调试</td><td><code>instance.material</code> 可被 <code>setDefine+update()</code> 重编译，但 <code>setParameter</code> 不生效；调试开关优先 #define 或直接硬编码。</td></tr>
+  <tr><td>GSplat 排序</td><td>多个 GSplatInstance 共享 sorter/orderTexture 会互相污染 → 独立排序管线 + 深度缓冲隔离。</td></tr>
+</table>
+
+<!-- ======================= 7 构建部署经验 ======================= -->
+<h2 class="sec" id="s7">7 · 构建与部署实战经验</h2>
+<table>
+  <tr><th>坑</th><th>现象</th><th>解法</th></tr>
+  <tr><td>safe-delete FAIL_CLOSED</td><td><code>rm -rf dist</code> / <code>fs.unlinkSync</code> / <code>fs.rmSync</code> 被钩子拦截并抛错（trash aborted），删除完全不可用</td><td>不删除，用 <code>fs.renameSync</code> 移走旧目录；残留 <code>dist_bak_*</code> 忽略</td></tr>
+  <tr><td>EPERM 覆写锁</td><td><code>npm run build</code> 报 EPERM 且失败文件每次不同（某进程持有 dist deny-write 句柄）</td><td><code>rename dist → dist_bak_&lt;ts&gt;</code>，让 rollup 写全新目录</td></tr>
+  <tr><td>CloudStudio 部署 400</td><td>完整 dist（含 15MB+ .map，共 30MB）部署 exec failed (400)</td><td>复制 <code>dist_deploy_&lt;ts&gt;</code> 剔除 *.map（12MB）部署成功；400 偶发可重试同目录</td></tr>
+  <tr><td>rollup 语法错误难查</td><td>构建报错信息不含 "error:" 关键字，grep 会漏掉静默失败</td><td>构建验证用 <code>npx tsc --noEmit</code> 或查看完整构建输出</td></tr>
+</table>
+
+<!-- ======================= 8 部署链接清单 ======================= -->
+<h2 class="sec" id="s8">8 · 历次部署链接清单（08-11 标记对齐日）</h2>
+<table>
+  <tr><th>阶段</th><th>链接（?mode=merge）</th><th>说明</th></tr>
+  <tr><td>重构完成</td><td>2164132c701c442ebd91300ed4fe03be.sh3</td><td>标记对齐 3 项修复（overlay/坍塌/撤销重做）</td></tr>
+  <tr><td>修复 1</td><td>654c525e6b8f4843940fb9e305a64e8d.sh3</td><td>投影基改为相机实体世界基</td></tr>
+  <tr><td>修复 2</td><td>b9cf09aa0c9544b28b8171f61dddd5c9.bj9</td><td>统一 fov/aspectRatio 来源</td></tr>
+  <tr><td>修复 3</td><td>de6e44a619e34c13a48c511fb756f828.sh3</td><td>标记改存世界坐标</td></tr>
+  <tr><td>绑定 splat</td><td>1539fb2a9b01482196f1db234bc5a65d.bj2</td><td>splatIndex 方案（已弃用）</td></tr>
+  <tr><td>修复 4</td><td>6914bb52a8db48c9b4075063da50fda9.gz2</td><td>projectionMatrix + 放宽容差（仍偏）</td></tr>
+  <tr><td>修复 5</td><td>cddb37fea4fc419c85406cdb687663b6.bj5</td><td>射线-高斯最近交点 + entity-local</td></tr>
+  <tr><td>最终</td><td>e5582812b8d74930b91bc251fddd456c.sh3</td><td>手算 OpenGL 投影矩阵</td></tr>
+  <tr><td>导出修复</td><td>41179f8cd51a475b94ea17911448c3b4.bj4</td><td>showSaveFilePicker 手势修复（最新）</td></tr>
+</table>
+<p class="footer-note">
+  说明：CloudStudio 每次部署会新建 sandbox，链接随之变化；旧链接会失效。最新可用链接以本文档归档时（2026-08-11 13:49）为准。
+  可在「设置 - 数据管理 - 我发布的应用」中管理已发布的应用。
+</p>
+
+<div class="footer-note">
+  <b>归档说明：</b>本 PDF 由 SplatRoom 项目工作记忆（<code>~/.workbuddy/memory</code> 与项目 <code>.workbuddy/memory</code>）整理而成，
+  截图取自开发过程真实反馈。用于项目知识沉淀与后续恢复上下文。
+</div>
+
+</body>
+</html>

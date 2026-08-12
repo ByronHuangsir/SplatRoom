@@ -1,0 +1,140 @@
+import {
+    BLENDEQUATION_ADD,
+    BLENDMODE_ONE,
+    BLENDMODE_ONE_MINUS_SRC_ALPHA,
+    BLENDMODE_SRC_ALPHA,
+    CULLFACE_FRONT,
+    BlendState,
+    BoundingBox,
+    Entity,
+    Mat4,
+    ShaderMaterial,
+    Vec3
+} from 'playcanvas';
+
+import { Element, ElementType } from './element';
+import { Serializer } from './serializer';
+import { vertexShader, fragmentShader } from './shaders/box-shape-shader';
+
+const invMat = new Mat4();
+const bound = new BoundingBox();
+
+// the pivot's local scale carries the box lengths, so in the pivot's local
+// space the box is the unit cube
+const unitBound = new BoundingBox(new Vec3(0, 0, 0), new Vec3(0.5, 0.5, 0.5));
+
+class BoxShape extends Element {
+    _lenX = 2;
+    _lenY = 2;
+    _lenZ = 2;
+    pivot: Entity;
+    material: ShaderMaterial;
+
+    constructor() {
+        super(ElementType.debug);
+
+        this.pivot = new Entity('boxPivot');
+        this.pivot.addComponent('render', {
+            type: 'box'
+        });
+    }
+
+    add() {
+        const material = new ShaderMaterial({
+            uniqueName: 'boxShape',
+            vertexGLSL: vertexShader,
+            fragmentGLSL: fragmentShader
+        });
+        material.cull = CULLFACE_FRONT;
+        material.blendState = new BlendState(
+            true,
+            BLENDEQUATION_ADD, BLENDMODE_SRC_ALPHA, BLENDMODE_ONE_MINUS_SRC_ALPHA,
+            BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA
+        );
+        material.update();
+
+        this.pivot.render.meshInstances[0].material = material;
+        this.pivot.render.layers = [this.scene.worldLayer.id];
+
+        this.material = material;
+
+        this.scene.contentRoot.addChild(this.pivot);
+
+        this.updateBound();
+    }
+
+    remove() {
+        this.scene.contentRoot.removeChild(this.pivot);
+        this.scene.boundDirty = true;
+    }
+
+    destroy() {
+
+    }
+
+    serialize(serializer: Serializer): void {
+        serializer.packa(this.pivot.getWorldTransform().data);
+        serializer.pack(this.lenX);
+        serializer.pack(this.lenY);
+        serializer.pack(this.lenZ);
+    }
+
+    onPreRender() {
+        this.pivot.setLocalScale(this._lenX, this._lenY, this._lenZ);
+        invMat.copy(this.pivot.getWorldTransform()).invert();
+        this.material.setParameter('boxInvMat', invMat.data);
+        this.material.setParameter('boxLen', [this._lenX * 0.5, this._lenY * 0.5, this._lenZ  * 0.5]);
+
+        const device = this.scene.graphicsDevice;
+        device.scope.resolve('targetSize').setValue([device.width, device.height]);
+    }
+
+    moved() {
+        this.updateBound();
+    }
+
+    updateBound() {
+        // keep the pivot's scale in sync immediately (not just at the next
+        // prerender) so world-transform reads are never stale
+        this.pivot.setLocalScale(this._lenX, this._lenY, this._lenZ);
+        bound.setFromTransformedAabb(unitBound, this.pivot.getWorldTransform());
+
+        // undo/redo can change the volume while it's not in the scene
+        if (this.scene) {
+            this.scene.boundDirty = true;
+        }
+    }
+
+    get worldBound(): BoundingBox | null {
+        return bound;
+    }
+
+    set lenX(lenX: number) {
+        this._lenX = lenX;
+        this.updateBound();
+    }
+
+    get lenX() {
+        return this._lenX;
+    }
+
+    set lenY(lenY: number) {
+        this._lenY = lenY;
+        this.updateBound();
+    }
+
+    get lenY() {
+        return this._lenY;
+    }
+
+    set lenZ(lenZ: number) {
+        this._lenZ = lenZ;
+        this.updateBound();
+    }
+
+    get lenZ() {
+        return this._lenZ;
+    }
+}
+
+export { BoxShape };

@@ -1,0 +1,18 @@
+const asar = require('@electron/asar');
+const fs = require('fs');
+const { execSync } = require('child_process');
+const exe = process.argv[2];
+const buf = fs.readFileSync(exe);
+const sig = Buffer.from([0x37,0x7A,0xBC,0xAF,0x27,0x1C]);
+const off = buf.indexOf(sig);
+console.log('exe:', exe, 'size', buf.length, '7z@', off);
+fs.writeFileSync('.workbuddy/debug-shots/verify.7z', buf.slice(off));
+const py = 'C:/Users/Byon Huang/.workbuddy/binaries/python/envs/default/Scripts/python.exe';
+fs.rmSync('.workbuddy/debug-shots/verify_asar', {recursive:true, force:true});
+execSync(`"${py}" -c "import py7zr; py7zr.SevenZipFile(r'.workbuddy/debug-shots/verify.7z','r').extract(path=r'.workbuddy/debug-shots/verify_asar', targets=['resources/app.asar'])"`, {stdio:'ignore'});
+const asarPath = '.workbuddy/debug-shots/verify_asar/resources/app.asar';
+const code = asar.extractFile(asarPath, 'dist/index.js').toString();
+console.log('bundle bytes:', code.length);
+console.log('_suppressCropBox(!0):', code.split('_suppressCropBox(!0)').length - 1);
+console.log('_suppressCropBox(!1):', code.split('_suppressCropBox(!1)').length - 1);
+console.log('=> FIX PRESENT:', (code.split('_suppressCropBox(!1)').length - 1) === 2);
