@@ -15,6 +15,7 @@ import { initFileHandler } from './file-handler';
 import { GamepadCapture } from './gamepad-capture';
 import { GamepadController } from './gamepad-controller';
 import { registerIframeApi } from './iframe-api';
+import { registerLodEvents } from './lod/editor-lod';
 import { startMergeApp } from './merge/merge-app';
 import { MouseBindings } from './mouse-bindings';
 import { registerPreferences } from './preferences';
@@ -165,6 +166,7 @@ const main = async () => {
     const getScene = () => scene;
     registerCropBoxEvents(events, getScene);
     registerSurfaceRefineEvents(events, editHistory, getScene);
+    registerLodEvents(events, editHistory, getScene);
     registerSnapshotEvents(events, () => editorUI.canvas, () => document.getElementById('right-toolbar-snapshot'),
         () => {
             const s = getScene(); if (s) s.forceRender = true;

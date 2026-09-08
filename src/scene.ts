@@ -577,6 +577,45 @@ class Scene {
 
         // allow elements to postupdate
         this.forEachElement(e => e.onPostUpdate());
+
+        // V3: distance-adaptive runtime LOD switching (browsing only — gated
+        // by events 'lod.allowProxy' registered by the editor).
+        this.updateLodSwitching();
+    }
+
+    /**
+     * V3 runtime LOD: for each splat with proxy levels, compare the camera
+     * distance to the model radius and swap to the appropriate level via
+     * Splat.applyLod. Only runs while the editor's 'lod.allowProxy' gate
+     * reports a non-editing browsing state; forced back to full resolution
+     * otherwise. Switch cooldown lives on the splat.
+     */
+    private updateLodSwitching() {
+        const allow = this.events.invoke('lod.allowProxy') !== false;
+        const cam = (this.camera as any)?.mainCamera;
+        if (!cam) return;
+        const camPos = cam.getPosition();
+        const splats = this.getElementsByType(ElementType.splat) as Splat[];
+        for (let i = 0; i < splats.length; i++) {
+            const s = splats[i];
+            if (!s.lodEnabled || s.lodAssets.length === 0) continue;
+            if (!allow) {
+                // editing context: never leave a proxy level active
+                if (s.lodLevel !== -1) void s.applyLod(-1);
+                continue;
+            }
+            if (performance.now() - s._lodLastSwitchAt < 1000) continue;
+            const wb = s.worldBound;
+            if (!wb) continue;
+            const radius = wb.halfExtents.length();
+            if (!(radius > 1e-6)) continue;
+            const dx = wb.center.x - camPos.x;
+            const dy = wb.center.y - camPos.y;
+            const dz = wb.center.z - camPos.z;
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            const target = s.suggestLodLevel(dist / radius);
+            if (target !== s.lodLevel) void s.applyLod(target);
+        }
     }
 
     private onPreRender() {

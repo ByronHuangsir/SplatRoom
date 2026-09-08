@@ -58,6 +58,19 @@ class Splat extends Element {
     numSelected = 0;
     entity: Entity;
     changedCounter = 0;
+
+    // ---- runtime LOD (V3, opt-in) -------------------------------------------
+    // Proxy levels decimated from the base data (coarsest last in build order,
+    // e.g. [35%, 10%]). Swapping via replaceData to a proxy while the camera is
+    // far reduces per-frame sort/vertex cost on very large scans. The feature
+    // is inert until setLodAssets() registers levels AND the scene's
+    // 'lod.allowProxy' gate reports a non-editing browsing state.
+    lodAssets: { asset: Asset; numSplats: number }[] = [];
+    lodEnabled = false;
+    /** -1 = full-resolution base asset; otherwise index into lodAssets. */
+    lodLevel = -1;
+    _lodBaseAsset: Asset | null = null;
+    _lodLastSwitchAt = 0;
     // 一次性告警标记：主相机引用缺失（排序兜底无法取相机姿态）只提示一次，
     // 避免每帧刷屏。见 onPreRender。
     _warnedNoMainCam = false;
@@ -424,9 +437,97 @@ class Splat extends Element {
 
     destroy() {
         super.destroy();
+        this.releaseLodAssets();
         this.entity.destroy();
         this.asset.registry.remove(this.asset);
         this.asset.unload();
+    }
+
+    // ---- runtime LOD helpers (V3) ----
+
+    /**
+     * Register decimated proxy levels (coarsest FIRST, e.g. [10%, 35%] so
+     * index 0 = most aggressive reduction, higher index = closer proxy).
+     * Base data is whatever asset this splat currently renders; pass it via
+     * `baseAsset` if the caller wants a specific reference (usually the
+     * full-resolution loaded asset).
+     */
+    setLodAssets(assets: { asset: Asset; numSplats: number }[], baseAsset?: Asset) {
+        this.releaseLodAssets();
+        // store coarsest-first (reverse of the usual fractions order) so index 0
+        // is always the most reduced level used at the greatest distance.
+        this.lodAssets = assets.slice().reverse();
+        this._lodBaseAsset = baseAsset ?? this.asset;
+        this.lodLevel = -1;
+        this.lodEnabled = this.lodAssets.length > 0;
+    }
+
+    /** Unload and forget proxy assets (called on destroy and re-registration). */
+    releaseLodAssets() {
+        for (const { asset } of this.lodAssets) {
+            try {
+                asset.registry?.remove(asset);
+                asset.unload();
+            } catch { /* ignore */ }
+        }
+        this.lodAssets = [];
+        this.lodEnabled = false;
+        this.lodLevel = -1;
+    }
+
+    /**
+     * Swap the rendered data to proxy level `level` (-1 = full resolution).
+     * Keeps the previous asset alive so the next switch back is cheap.
+     */
+    async applyLod(level: number) {
+        const n = this.lodAssets.length;
+        const next = level >= 0 && level < n ? level : -1;
+        if (next === this.lodLevel && this.lodLevel !== -1) return; // idempotent (full base is level -1 but may be re-applied safely)
+        const target = next === -1 ? (this._lodBaseAsset ?? this.asset) : this.lodAssets[next].asset;
+        if (!target || target === this.asset) return;
+        await this.replaceData(target, true);
+        this.lodLevel = next;
+        this._lodLastSwitchAt = performance.now();
+        this.scene?.events?.fire('splat.lodChanged', this, next);
+    }
+
+    /**
+     * Decide which LOD level the current camera distance calls for, with
+     * hysteresis so the view does not thrash across a threshold.
+     * @param distRatio - camera distance / model radius (>= ~2 when the model
+     * fills the view, large when far away).
+     */
+    suggestLodLevel(distRatio: number): number {
+        const n = this.lodAssets.length;
+        if (!this.lodEnabled || n === 0) return -1;
+        // proxy levels engage at increasing distance: index 0 (most reduced)
+        // is reserved for the farthest view, index n-1 for mid-distance.
+        const farRatio = 14 + n * 4;      // switch to the most reduced level
+        const nearRatio = 6.5;            // below this always full resolution
+        let target = -1;
+        if (distRatio >= farRatio) {
+            target = n - 1;               // farthest → most reduced
+        } else if (distRatio >= nearRatio) {
+            // mid-distance: linear ramp toward the more reduced levels
+            const t = (distRatio - nearRatio) / (farRatio - nearRatio);
+            target = Math.min(n - 1, Math.floor(t * n));
+        }
+        // hysteresis margins relative to current level
+        if (target === this.lodLevel) return target;
+        if (target < this.lodLevel) {
+            // coming closer — require a comfortable margin below the current
+            // level's engagement band before dropping a level
+            if (distRatio > nearRatio + (farRatio - nearRatio) * 0.25) return this.lodLevel;
+        } else if (target > this.lodLevel) {
+            // receding — require a margin above before engaging a further level
+            if (this.lodLevel >= 0 && distRatio < nearRatio + (farRatio - nearRatio) * 0.75) return this.lodLevel;
+        }
+        return target;
+    }
+
+    /** True if a proxy level is currently rendered. */
+    get lodActive() {
+        return this.lodLevel >= 0;
     }
 
     async updateState(changedState = State.selected) {

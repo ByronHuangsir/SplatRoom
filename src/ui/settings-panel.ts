@@ -438,6 +438,41 @@ class SettingsPanel extends Container {
         showCameraInfoRow.append(showCameraInfoLabel);
         showCameraInfoRow.append(showCameraInfoToggle);
 
+        // runtime LOD (V3 experimental): auto proxy levels for very large
+        // models while browsing. Label kept inline — locale keys come with the
+        // full feature pass.
+        const lodRow = new Container({
+            class: 'settings-panel-row'
+        });
+
+        const lodLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Runtime LOD (large models)'
+        });
+        const lodToggle = new BooleanInput({
+            type: 'toggle',
+            class: 'settings-panel-row-toggle',
+            value: !!events.invoke('lod.autoEnabled')
+        });
+        const lodGenerateBtn = new Button({
+            class: 'settings-panel-row-button',
+            text: 'Generate'
+        });
+
+        lodRow.append(lodLabel);
+        lodRow.append(lodToggle);
+        lodRow.append(lodGenerateBtn);
+
+        lodToggle.on('change', (value: boolean) => {
+            events.fire('lod.setAuto', value);
+        });
+        events.on('lod.autoChanged', (value: boolean) => {
+            lodToggle.value = value;
+        });
+        lodGenerateBtn.on('click', () => {
+            events.invoke('lod.generateForAll');
+        });
+
         // reset preferences to defaults
 
         const resetRow = new Container({
@@ -468,6 +503,7 @@ class SettingsPanel extends Container {
         this.append(showBoundDimensionsRow);
         this.append(showCameraPosesRow);
         this.append(showCameraInfoRow);
+        this.append(lodRow);
         this.append(resetRow);
 
         // handle panel visibility

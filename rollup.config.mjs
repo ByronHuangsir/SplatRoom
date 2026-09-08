@@ -181,6 +181,31 @@ const surfaceWorker = {
     cache: false
 };
 
+// LOD build worker (V3): decimates a large splat into coarser proxy levels off
+// the main thread via splat-transform's adaptive decimation. Instantiated with
+// `new Worker('lod-worker.js', { type: 'module' })`.
+const lodWorker = {
+    input: 'src/workers/lod-worker.ts',
+    output: {
+        dir: 'dist',
+        format: 'esm',
+        sourcemap: true
+    },
+    plugins: [
+        alias({
+            entries: {
+                'playcanvas': ENGINE_DIR,
+                '@playcanvas/pcui': PCUI_DIR
+            }
+        }),
+        resolve(),
+        json(),
+        typescript()
+    ],
+    treeshake: 'smallest',
+    cache: false
+};
+
 // L1 integration probe (dev/test only): bundles the real worker client + the
 // main-thread loader so a headless browser can assert byte-identical output.
 // Gated behind BUILD_PROBE so production builds stay lean — run with:
@@ -208,7 +233,7 @@ const lwProbe = {
     cache: false
 };
 
-const configs = [application, serviceWorker, loadWorker, surfaceWorker];
+const configs = [application, serviceWorker, loadWorker, surfaceWorker, lodWorker];
 if (process.env.BUILD_PROBE) {
     configs.push(lwProbe);
 }
