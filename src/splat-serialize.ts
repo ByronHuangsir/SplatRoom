@@ -594,6 +594,9 @@ class SplatRoomChunkSource implements ChunkSource {
             shBands: outputBands as SHBands,
             extraColumns: [],
             transform: Transform.PLY,
+            // splat-transform 3.3+: sources must declare their training model.
+            // SplatRoom output is ordinary (default) gaussians.
+            model: 'default',
             availableLayers: new Set<ChunkLayer>(['position', 'geometric', 'color']),
             layouts: buildLayouts(numRest)
         };
