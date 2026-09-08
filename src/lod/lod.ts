@@ -83,6 +83,67 @@ export const decimateGsplatData = async (
         pool.destroy();
     }
 };
+
+/**
+ * Build a proxy level by uniform row sampling (stride gather). Used for very
+ * large models where a full splat-transform decimation is too heavy: the
+ * source is never deep-copied (decimation needs a full working copy for its
+ * sort/coalesce), so for tens of millions of splats the copy alone would
+ * freeze the UI for minutes. Sampling gathers ~`targetCount` rows evenly and
+ * yields between column passes so the progress bar stays live.
+ */
+export const sampleGsplatData = async (
+    source: GSplatData,
+    targetCount: number,
+    comments: string[] = [],
+    onProgress?: (fraction: number) => void
+): Promise<GSplatData> => {
+    const cols = vertexColumns(source);
+    const N = source.numSplats;
+    const target = Math.max(1, Math.min(targetCount, N));
+    if (target >= N) return dataTableToGsplatData(gsplatDataToDataTable(source), comments);
+    const step = N / target;
+
+    // allocate target columns once
+    const outs = cols.map((c) => {
+        const Ctor = c.storage.constructor;
+        return new (Ctor as any)(target) as Float32Array | Uint8Array;
+    });
+
+    // gather each column: source row i*step (clamped) → target row i
+    for (let ci = 0; ci < cols.length; ci++) {
+        const srcCol = cols[ci].storage;
+        const dstCol = outs[ci];
+        if (srcCol instanceof Float32Array && dstCol instanceof Float32Array) {
+            for (let i = 0; i < target; i++) {
+                const srcIdx = Math.min(N - 1, Math.floor(i * step));
+                dstCol[i] = srcCol[srcIdx];
+            }
+        } else if (srcCol instanceof Uint8Array && dstCol instanceof Uint8Array) {
+            for (let i = 0; i < target; i++) {
+                const srcIdx = Math.min(N - 1, Math.floor(i * step));
+                dstCol[i] = srcCol[srcIdx];
+            }
+        }
+        // let the UI paint between column passes (progress bar stays visible)
+        onProgress?.((ci + 1) / (cols.length + 1));
+        if (ci + 1 < cols.length) {
+            await new Promise<void>((resolve) => {
+                setTimeout(resolve, 0);
+            });
+        }
+    }
+    return columnsToGsplatData(
+        target,
+        cols.map((c, ci) => ({ name: c.name, data: outs[ci] })),
+        comments
+    );
+};
+// Above this splat count, LOD levels are built by row sampling (see
+// buildLodLevels) instead of full splat-transform decimation, which would need
+// a deep copy of every column for the worker transfer.
+const LOD_WORKER_MAX = 2_000_000;
+
 /**
  * Fractions of the original count worth keeping as proxy levels, based on
  * size. Small models need no LOD; the largest get an extra far level.
@@ -197,6 +258,30 @@ export const buildLodLevels = async (
     onProgress?: (f: number) => void
 ): Promise<LodLevelResult[]> => {
     const N = source.numSplats;
+
+    // Very large models: the worker path deep-copies every column for the
+    // transfer first (tens of GB for tens of millions of splats), freezing the
+    // main thread so long the progress bar never paints. Sample instead — no
+    // copy, bounded memory, per-column yields keep the UI alive.
+    if (N > LOD_WORKER_MAX) {
+        const levels: { count: number; columns: { name: string; data: Float32Array | Uint8Array }[] }[] = [];
+        for (let i = 0; i < fractions.length; i++) {
+            const target = Math.max(1, Math.round(fractions[i] * N));
+            const dec = await sampleGsplatData(
+                source,
+                target,
+                comments,
+                f => onProgress?.((i + f) / fractions.length)
+            );
+            const c = vertexColumns(dec);
+            levels.push({ count: dec.numSplats, columns: c.map(x => ({ name: x.name, data: x.storage })) });
+        }
+        return levels.map(lv => ({
+            count: lv.count,
+            data: columnsToGsplatData(lv.count, lv.columns, comments)
+        }));
+    }
+
     const targets = fractions.map(f => Math.max(1, Math.round(f * N)));
     // deep copies for transfer (source columns must not be detached)
     const cols = vertexColumns(source).map((c) => {
