@@ -1,0 +1,74 @@
+
+.tool-svg {
+    display: inline;
+    position: absolute;
+    width: 100%;
+    height: 100%;
+
+    &.hidden {
+        display: none;
+    }
+
+    &#brush-select-svg {
+        >circle {
+            fill: rgba(255, 102, 0, 0.2);
+            stroke: #f60;
+            stroke-width: 1;
+            stroke-dasharray: 5, 5;
+        }
+    }
+
+    &#rect-select-svg {
+        >rect {
+            fill: none;
+            stroke: #f60;
+            stroke-width: 1;
+            stroke-dasharray: 5, 5;
+        }
+    }
+
+    &#lasso-select-svg {
+        >polygon {
+            fill: none;
+            stroke-width: 1;
+            stroke-dasharray: 5, 5;
+            stroke-dashoffset: 0;
+        }
+    }
+
+    &#polygon-select-svg {
+        >polyline {
+            fill: none;
+            stroke-width: 1;
+            stroke-dasharray: 5, 5;
+            stroke-dashoffset: 0;
+        }
+    }
+
+    &#bound-dimensions-svg {
+        pointer-events: none;
+
+        > text {
+            font-family: monospace;
+            font-size: 11px;
+            fill: white;
+            paint-order: stroke;
+            stroke: rgba(0, 0, 0, 0.7);
+            stroke-width: 3px;
+        }
+    }
+
+    // the orient tool's points, edges and plane fill render in the scene (see
+    // tool-overlay.ts); the svg holds only the edge length labels, which match
+    // the bound dimensions overlay
+    &#orient-tool-svg {
+        >text {
+            font-family: monospace;
+            font-size: 11px;
+            fill: white;
+            paint-order: stroke;
+            stroke: rgba(0, 0, 0, 0.7);
+            stroke-width: 3px;
+        }
+    }
+}

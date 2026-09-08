@@ -1,0 +1,288 @@
+@use 'colors.scss' as *;
+
+// Floating overlay that slides up from below the status bar.
+// Positioned absolute relative to #editor-container (which has position: relative).
+// Canvas always occupies the full editor area — the timeline never reflows it.
+#timeline-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 32px;            // sit above the 32px status bar
+    height: 220px;           // lowered so it covers less of the 3D view
+    max-height: 45vh;
+    flex-direction: column;
+    border-top: 1px solid $bcg-lighter;
+    background-color: $bcg-darkest;
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.5);
+    z-index: 100;
+    opacity: 0.9;            // very slight transparency: see the model while scrubbing keyframes
+
+    // Hidden state — slide down out of view
+    transform: translateY(calc(100% + 32px));
+    transition: transform 0.2s ease-out;
+    pointer-events: none;
+
+    // Visible state — slide up into view. Uses :not(.pcui-hidden) so the
+    // pcui Container's hidden flag still controls show/hide.
+    &:not(.pcui-hidden) {
+        display: flex;
+        transform: translateY(0);
+        transition: transform 0.2s ease-out;
+        pointer-events: auto;
+    }
+
+    // Top-edge drag handle: grab the panel's top edge to resize its height.
+    #timeline-panel-resize-handle {
+        position: absolute;
+        top: -4px;
+        left: 0;
+        right: 0;
+        height: 8px;
+        cursor: ns-resize;
+        z-index: 10;
+    }
+
+    // Audio header buttons (live inside the lane header row)
+    .audio-lane-header .audio-tool-btn {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: 1px solid $bcg-lighter;
+        border-radius: 3px;
+        background: rgba(0, 0, 0, 0.35);
+        color: $clr-default;
+        font-size: 12px;
+        line-height: 16px;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+    .audio-lane-header .audio-tool-btn:hover {
+        border-color: $clr-hilight;
+        color: $clr-hilight;
+    }
+
+    // ---- Audio tools bar (top-right of the time-line area) ----
+    #audio-tools-bar {
+        position: absolute;
+        top: 28px;
+        right: 6px;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        pointer-events: auto;
+
+        .audio-tool-track {
+            display: flex;
+            flex-direction: row;
+            gap: 4px;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid $bcg-lighter;
+            border-radius: 4px;
+            padding: 2px 5px;
+
+            span {
+                font-size: 11px;
+                font-weight: 600;
+                width: 42px;
+            }
+        }
+
+        .audio-tool-btn {
+            width: 22px;
+            height: 22px;
+            padding: 0;
+            border: 1px solid $bcg-lighter;
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.35);
+            color: $clr-default;
+            font-size: 14px;
+            line-height: 20px;
+            cursor: pointer;
+
+            &:hover {
+                border-color: $clr-hilight;
+                color: $clr-hilight;
+            }
+        }
+    }
+
+    // ---- Audio lanes (name + waveform inside the time-line column) ----
+    .audio-lane-timeline {
+        background-color: rgba(0, 0, 0, 0.2);
+
+        canvas {
+            display: block;
+        }
+    }
+    .audio-lane-header {
+        font-size: 10px;
+    }
+
+    > #controls-wrap {
+        display: flex;
+        flex-direction: row;
+        background-color: $bcg-primary;
+        justify-content: center;
+        padding: 1px;
+
+        > #button-controls {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+
+            > .button {
+                font-family: pc-icon;
+                font-weight: bold;
+                font-size: 13px;
+
+                width: 36px;
+                height: 24px;
+                margin: 1px;
+                padding: 0;
+                flex-grow: 0;
+                flex-shrink: 0;
+
+                border-radius: 4px;
+
+                text-align: center;
+                line-height: 24px;
+
+                &:hover {
+                    color: #ff9900;
+                    cursor: pointer;
+                    box-shadow: none;
+                    border-color: #ff990088;
+                }
+            }
+        }
+
+        > .spacer {
+            display: flex;
+            flex-grow: 1;
+            flex-basis: 0;
+            justify-content: flex-end;
+
+            > #settings-controls {
+                display: flex;
+                align-items: center;
+                gap: 1px;
+                margin-right: 1px;
+
+                > #speed {
+                    margin: 0;
+                    width: 80px;
+                }
+
+                > #totalFrames {
+                    margin: 0;
+                    width: 80px;
+                }
+
+                > #smoothness {
+                    margin: 0;
+                    width: 60px;
+                }
+
+                > #loop {
+                    font-family: pc-icon;
+                    font-weight: bold;
+                    font-size: 13px;
+
+                    width: 36px;
+                    height: 24px;
+                    margin: 0;
+                    padding: 0;
+                    flex-grow: 0;
+                    flex-shrink: 0;
+
+                    border-radius: 4px;
+
+                    text-align: center;
+                    line-height: 24px;
+
+                    &:hover {
+                        color: #ff9900;
+                        cursor: pointer;
+                        box-shadow: none;
+                        border-color: #ff990088;
+                    }
+
+                    &.active {
+                        color: $clr-hilight;
+                    }
+                }
+            }
+        }
+    }
+
+    > #frame-slider {
+        height: 24px;
+        margin: 0px;
+
+        > .pcui-numeric-input {
+            display: none;
+            flex-grow: 0;
+            margin: 0;
+            > input {
+                width: 40px;
+            }
+        }
+    }
+
+    > #timeline-lanes {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        background-color: $bcg-darkest;
+        overflow: hidden;
+        min-height: 100px;
+
+        > #ticks-ruler {
+            position: relative;
+            flex-shrink: 0;
+            height: 22px;
+            border-bottom: 1px solid #444;
+
+            > .time-label {
+                position: absolute;
+                font-size: 9px;
+                color: #888;
+                pointer-events: none;
+            }
+
+            > .time-tick {
+                position: absolute;
+                pointer-events: none;
+            }
+        }
+
+        > #lanes-body {
+            position: relative;
+            flex: 1;
+            overflow-y: auto;
+
+            > #timeline-cursor-line {
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                width: 1px;
+                background: #ff6600;
+                pointer-events: none;
+                z-index: 10;
+            }
+
+            > .track-lane {
+                position: relative;
+                height: 28px;
+                flex-shrink: 0;
+                transition: background 0.1s;
+
+                &:hover {
+                    background: #2a2a35 !important;
+                }
+            }
+        }
+    }
+}

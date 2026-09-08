@@ -1,0 +1,265 @@
+@use 'colors.scss' as *;
+
+#crop-box-panel {
+    top: 50%;
+    transform: translate(0, -50%);
+    right: 102px;
+    width: 320px;
+    flex-direction: column;
+
+    &:not(.pcui-hidden) {
+        display: flex;
+    }
+
+    // pcui adds a `pcui-hidden` class to hidden Elements, but the generic
+    // global rule is not always loaded — our `.settings-panel-row { display:
+    // flex }` wins on specificity. Re-assert hide here so radius/height rows
+    // and face/rotation sections truly disappear when the shape is
+    // cylinder/sphere.
+    .crop-box-radius-row.pcui-hidden,
+    .crop-box-height-row.pcui-hidden,
+    .crop-box-face-row.pcui-hidden,
+    .crop-box-rotation-row.pcui-hidden,
+    .crop-box-reset-row.pcui-hidden,
+    .crop-box-section-header.pcui-hidden,
+    .crop-box-stats-row.pcui-hidden {
+        display: none;
+    }
+
+    & > .settings-panel-row {
+        display: flex;
+        flex-direction: row;
+        padding: 2px;
+        height: 28px;
+
+        & > .settings-panel-row-label {
+            flex-grow: 1;
+        }
+
+        & > .settings-panel-row-toggle {
+            background-color: $bcg-dark;
+
+            &::after {
+                background-color: $clr-default;
+            }
+
+            &.pcui-boolean-input-ticked {
+                background-color: $clr-hilight;
+
+                &::after {
+                    background-color: $clr-active;
+                }
+            }
+        }
+
+        & > .settings-panel-row-button {
+            flex-grow: 1;
+        }
+    }
+
+    // ---- section header: thin divider with a small uppercase label ----
+    .crop-box-section-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 10px 2px 4px;
+        height: 18px;
+
+        // gradient rule to the right of the label
+        &::after {
+            content: '';
+            flex: 1 1 auto;
+            height: 1px;
+            background: linear-gradient(to right, $bcg-light, transparent);
+        }
+
+        .crop-box-section-header-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: $text-secondary;
+            white-space: nowrap;
+        }
+    }
+
+    // ---- six face offset inputs ----
+    .crop-box-face-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 4px 2px;
+
+        .crop-box-face-cell {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            flex: 1 1 calc(33% - 4px);
+            min-width: 0;
+            padding: 4px 4px 4px 6px;
+            background: rgba(0, 0, 0, 0.18);
+            border-radius: 4px;
+            // colored left border picks up the axis color via --axis-chip-color
+            border-left: 2px solid var(--axis-chip-color, $clr-default);
+
+            .crop-box-face-label {
+                font-size: 10px;
+                font-weight: 600;
+                color: var(--axis-chip-color, $text-secondary);
+                padding: 0 0 3px 1px;
+                letter-spacing: 0.4px;
+            }
+
+            .crop-box-face-input {
+                width: 100%;
+            }
+        }
+    }
+
+    // ---- rotation row: three cells with colored axis chips + degree suffix ----
+    .crop-box-rotation-row {
+        display: flex;
+        gap: 6px;
+        padding: 4px 2px;
+
+        .crop-box-rotation-cell {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 6px 6px 5px;
+            background: rgba(0, 0, 0, 0.18);
+            border-radius: 6px;
+            border-top: 2px solid var(--axis-chip-color, $clr-default);
+
+            .crop-box-axis-chip {
+                align-self: center;
+                width: 20px;
+                height: 20px;
+                line-height: 20px;
+                text-align: center;
+                border-radius: 50%;
+                background: var(--axis-chip-color, $clr-default);
+                color: #0c0c0c;
+                font-size: 11px;
+                font-weight: 700;
+                margin-bottom: 5px;
+                box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+                user-select: none;
+            }
+
+            .crop-box-rotation-input {
+                width: 100%;
+
+                // pad the inner <input> so the value doesn't sit under the °
+                // suffix. PCUI's NumericInput renders <input> as a direct
+                // child of the .pcui-numeric-input container.
+                input {
+                    padding-right: 14px;
+                    text-align: right;
+                }
+            }
+
+            .crop-box-rotation-unit {
+                position: absolute;
+                right: 10px;
+                bottom: 8px;
+                font-size: 11px;
+                color: $text-secondary;
+                pointer-events: none;
+                line-height: 1;
+            }
+        }
+    }
+
+    // ---- reset rotation button ----
+    .crop-box-reset-row {
+        height: auto;
+        padding: 4px 2px 2px;
+
+        .crop-box-reset-button {
+            flex-grow: 1;
+            height: 24px;
+            font-size: 11px;
+        }
+    }
+
+    // ---- soft edge slider row ----
+    .crop-box-soft-edge-row {
+        height: auto;
+        padding: 4px 2px;
+
+        .crop-box-soft-edge-slider {
+            flex-grow: 1;
+            min-width: 0;
+        }
+    }
+
+    // ---- clip shape selector (box / cylinder / sphere) ----
+    .crop-box-shape-row {
+        display: flex;
+        gap: 4px;
+        padding: 4px 2px;
+
+        .crop-box-shape-btn {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 26px;
+            font-size: 11px;
+            border: 1px solid $bcg-light;
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.18);
+            color: $text-secondary;
+
+            &.active {
+                border-color: $clr-hilight;
+                color: $clr-hilight;
+            }
+        }
+    }
+
+    // ---- radius / height sliders ----
+    .crop-box-radius-row,
+    .crop-box-height-row {
+        height: auto;
+        padding: 4px 2px;
+
+        .crop-box-radius-slider,
+        .crop-box-height-slider {
+            flex-grow: 1;
+            min-width: 0;
+        }
+    }
+
+    // ---- splat count statistics ----
+    .crop-box-stats-row {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        padding: 8px 4px 6px;
+        margin: 4px 2px 2px;
+        background: rgba(0, 0, 0, 0.18);
+        border-radius: 4px;
+        border-left: 2px solid #6699f2;
+
+        .crop-box-stats-prefix {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: $text-secondary;
+            padding-bottom: 2px;
+        }
+
+        .crop-box-stats-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: $clr-default;
+            font-variant-numeric: tabular-nums;
+            text-align: center;
+            padding: 2px 0;
+        }
+    }
+}

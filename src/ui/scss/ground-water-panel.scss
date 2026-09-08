@@ -1,0 +1,99 @@
+@use 'colors.scss' as *;
+
+#groundwater-panel {
+    & > .panel-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .groundwater-panel-collapse-arrow {
+        font-size: 10px;
+        color: $text-secondary;
+        margin-right: 2px;
+        width: 14px;
+        text-align: center;
+        flex-shrink: 0;
+        transition: transform 0.15s ease;
+    }
+
+    // 与 floater-panel-content 一致：不用 display:flex（避免覆盖 PCUI hidden）
+    .groundwater-panel-content {
+        padding: 4px 6px;
+
+        & > * {
+            margin-bottom: 6px;
+        }
+        & > *:last-child {
+            margin-bottom: 0;
+        }
+    }
+
+    .groundwater-panel-stats {
+        font-size: 12px;
+        color: $text-secondary;
+        min-height: 15px;
+    }
+
+    .groundwater-panel-progress {
+        width: 100%;
+        height: 4px;
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 2px;
+        overflow: hidden;
+    }
+
+    .groundwater-panel-progress-fill {
+        height: 100%;
+        background: rgba(64, 128, 255, 0.8);
+        border-radius: 2px;
+        transition: width 0.1s linear;
+    }
+
+    .groundwater-panel-row {
+        display: flex;
+        gap: 6px;
+
+        .groundwater-panel-btn {
+            flex: 1;
+            padding: 4px 0;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.06);
+            color: $text-secondary;
+            cursor: pointer;
+            font-size: 12px;
+
+            &.active {
+                background: rgba(64, 128, 255, 0.35);
+                border-color: rgba(120, 170, 255, 0.6);
+                color: #fff;
+            }
+        }
+    }
+
+    .groundwater-panel-param-label {
+        font-size: 11px;
+        color: $text-secondary;
+    }
+
+    .groundwater-panel-slider {
+        width: 100%;
+    }
+
+    .groundwater-panel-flatten {
+        width: 100%;
+        padding: 6px 0;
+        border: none;
+        border-radius: 4px;
+        background: rgba(64, 128, 255, 0.5);
+        color: #fff;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+
+        &:hover {
+            background: rgba(64, 128, 255, 0.7);
+        }
+    }
+}

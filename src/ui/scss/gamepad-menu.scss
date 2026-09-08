@@ -1,0 +1,133 @@
+@use 'colors.scss' as *;
+
+#gamepad-menu {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+
+    padding: 12px 20px;
+    border-radius: 12px;
+    background-color: rgba(24, 24, 24, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.4s ease, visibility 0.4s ease, transform 0.4s ease;
+
+    &.gamepad-menu-hidden {
+        opacity: 0;
+        visibility: hidden;
+        transform: translateX(-50%) translateY(10px);
+        pointer-events: none;
+    }
+
+    &.gamepad-menu-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(-50%) translateY(0);
+        pointer-events: auto;
+    }
+
+    .gamepad-menu-title {
+        font-size: 10px;
+        font-weight: bold;
+        letter-spacing: 1.5px;
+        color: $text-secondary;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+    }
+
+    .gamepad-menu-modes {
+        display: flex;
+        flex-direction: row;
+        gap: 8px;
+    }
+
+    .gamepad-menu-btn {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 16px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background-color: rgba(255, 255, 255, 0.04);
+        color: $text-secondary;
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.2s ease;
+        white-space: nowrap;
+
+        svg { flex-shrink: 0; }
+
+        &:hover {
+            background-color: rgba(255, 255, 255, 0.08);
+            color: $text-primary;
+        }
+
+        &.active {
+            background-color: rgba(255, 102, 0, 0.15);
+            border-color: rgba(255, 102, 0, 0.5);
+            color: $clr-hilight;
+            box-shadow: 0 0 12px rgba(255, 102, 0, 0.2);
+        }
+    }
+
+    .gamepad-menu-status {
+        display: flex;
+        flex-direction: row;
+        gap: 16px;
+        align-items: center;
+        padding-top: 6px;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .gamepad-menu-status-item {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .gamepad-menu-status-label {
+        font-size: 10px;
+        color: $text-darkest;
+    }
+
+    .gamepad-menu-status-value {
+        font-size: 11px;
+        font-weight: bold;
+        font-variant-numeric: tabular-nums;
+
+        &.gamepad-menu-status-on { color: $clr-hilight; }
+        &.gamepad-menu-status-off { color: $text-dark; }
+    }
+
+    .gamepad-menu-conn-dot {
+        font-size: 10px;
+        line-height: 1;
+
+        &.gamepad-menu-conn-on {
+            color: #44dd44;
+            text-shadow: 0 0 6px rgba(68, 221, 68, 0.5);
+        }
+        &.gamepad-menu-conn-off { color: #666; }
+    }
+
+    .gamepad-menu-hint {
+        font-size: 9px;
+        color: $text-darkest;
+        margin-top: 2px;
+    }
+}

@@ -1,0 +1,208 @@
+@use 'colors.scss' as *;
+
+// IMPORTANT: pcui hides elements by adding the .pcui-hidden class, and the
+// theme hides those with .pcui-element.pcui-hidden { display: none }. That
+// rule (0,2,0) loses to a plain #gamepad-settings { display: flex } (1,0,0).
+// Scoping the display rule to :not(.pcui-hidden) restores the hiding behaviour.
+
+#gamepad-settings:not(.pcui-hidden) {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+
+    .gps-backdrop {
+        position: absolute;
+        inset: 0;
+        background-color: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+    }
+
+    .gps-panel {
+        position: relative;
+        width: min(540px, 92vw);
+        max-height: 86vh;
+        display: flex;
+        flex-direction: column;
+        background-color: rgba(24, 24, 24, 0.97);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        box-shadow: 0 16px 60px rgba(0, 0, 0, 0.7);
+        overflow: hidden;
+        animation: gps-pop 0.18s ease-out;
+    }
+
+    @keyframes gps-pop {
+        from { opacity: 0; transform: translateY(12px) scale(0.98); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .gps-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+
+        .gps-title-wrap { display: flex; flex-direction: column; gap: 2px; }
+        .gps-title { font-size: 18px; font-weight: bold; color: $text-primary; letter-spacing: 1px; }
+        .gps-subtitle { font-size: 9px; font-weight: bold; letter-spacing: 2px; color: $text-darkest; text-transform: uppercase; }
+        .gps-close-btn {
+            width: 30px; height: 30px; border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background-color: rgba(255, 255, 255, 0.04);
+            color: $text-secondary; cursor: pointer; font-size: 13px;
+            transition: all 0.2s ease;
+            &:hover {
+                background-color: rgba(255, 102, 0, 0.2);
+                border-color: rgba(255, 102, 0, 0.5);
+                color: $clr-hilight;
+            }
+        }
+    }
+
+    .gps-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 20px 14px; }
+
+    .gps-section-title {
+        display: flex; align-items: baseline; gap: 8px;
+        margin: 12px 0 8px; color: $clr-hilight;
+        font-size: 12px; font-weight: bold; letter-spacing: 1px;
+        .gps-section-sub { font-size: 9px; letter-spacing: 1.5px; color: $text-darkest; text-transform: uppercase; }
+    }
+
+    .gps-row {
+        display: flex; flex-direction: row; align-items: center; justify-content: space-between;
+        gap: 12px; padding: 9px 12px; margin-bottom: 6px;
+        border-radius: 9px; border: 1px solid transparent;
+        background-color: rgba(255, 255, 255, 0.03);
+        cursor: pointer; transition: background-color 0.15s ease, border-color 0.15s ease;
+        &:hover { background-color: rgba(255, 255, 255, 0.06); }
+        &.selected {
+            border-color: rgba(255, 102, 0, 0.45);
+            background-color: rgba(255, 102, 0, 0.08);
+            box-shadow: inset 0 0 0 1px rgba(255, 102, 0, 0.15);
+        }
+        .gps-row-label { flex: 1; font-size: 12px; color: $text-primary; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .gps-row-control { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+        .gps-key {
+            min-width: 84px; padding: 6px 12px; border-radius: 7px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background-color: rgba(255, 255, 255, 0.05);
+            color: $clr-icon-hilight; font-size: 12px; font-weight: bold;
+            text-align: center; cursor: pointer; transition: all 0.15s ease;
+            &.listening {
+                border-color: $clr-hilight; color: $clr-hilight;
+                background-color: rgba(255, 102, 0, 0.18);
+                animation: gps-blink 0.8s ease-in-out infinite;
+            }
+        }
+    }
+
+    @keyframes gps-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+    .gps-range {
+        width: 150px; height: 4px; appearance: none; -webkit-appearance: none;
+        background: linear-gradient(to right, rgba(255, 102, 0, 0.7), rgba(255, 102, 0, 0.7)) no-repeat, $bcg-lighter;
+        background-size: 50% 100%; border-radius: 2px; outline: none; cursor: pointer;
+        &::-webkit-slider-thumb {
+            appearance: none; -webkit-appearance: none;
+            width: 14px; height: 14px; border-radius: 50%;
+            background-color: $clr-hilight; border: 2px solid rgba(255, 255, 255, 0.6);
+            box-shadow: 0 0 6px rgba(255, 102, 0, 0.6); cursor: pointer;
+        }
+        &::-moz-range-thumb {
+            width: 14px; height: 14px; border-radius: 50%;
+            background-color: $clr-hilight; border: 2px solid rgba(255, 255, 255, 0.6); cursor: pointer;
+        }
+    }
+
+    .gps-slider-value { min-width: 42px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: $text-secondary; }
+
+    .gps-switch {
+        min-width: 60px; padding: 5px 10px; border-radius: 7px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background-color: rgba(255, 255, 255, 0.05);
+        font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.15s ease;
+        &.on { border-color: rgba(255, 102, 0, 0.55); background-color: rgba(255, 102, 0, 0.18); color: $clr-hilight; }
+        &.off { color: $text-dark; }
+    }
+
+    .gps-row-stepper {
+        .gps-stepper-btn {
+            width: 30px; height: 26px; border-radius: 7px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background-color: rgba(255, 255, 255, 0.05);
+            color: $text-primary; font-size: 15px; line-height: 1;
+            cursor: pointer; transition: all 0.15s ease;
+            &:hover { border-color: rgba(255, 102, 0, 0.55); background-color: rgba(255, 102, 0, 0.18); color: $clr-hilight; }
+        }
+        .gps-stepper-value { min-width: 44px; text-align: center; font-size: 13px; font-weight: bold; font-variant-numeric: tabular-nums; color: $clr-hilight; }
+    }
+
+    .gps-row-lock {
+        .gps-lock-btn {
+            min-width: 78px; padding: 5px 10px; border-radius: 7px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background-color: rgba(255, 255, 255, 0.05);
+            font-size: 11px; font-weight: bold; cursor: pointer; transition: all 0.15s ease;
+            &:hover { border-color: rgba(255, 102, 0, 0.55); }
+            &.on { border-color: rgba(255, 102, 0, 0.55); background-color: rgba(255, 102, 0, 0.18); color: $clr-hilight; }
+            &.off { color: $text-dark; }
+        }
+    }
+
+    .gps-button-row {
+        justify-content: center;
+        .gps-action-btn {
+            width: 100%; padding: 9px 0; border-radius: 8px;
+            border: 1px solid rgba(255, 102, 0, 0.4);
+            background-color: rgba(255, 102, 0, 0.12);
+            color: $clr-hilight; font-size: 12px; font-weight: bold; letter-spacing: 1px;
+            cursor: pointer; transition: all 0.15s ease;
+            &:hover { background-color: rgba(255, 102, 0, 0.25); box-shadow: 0 0 14px rgba(255, 102, 0, 0.25); }
+            &.gps-preset-active {
+                background-color: rgba(255, 102, 0, 0.3);
+                border-color: rgba(255, 102, 0, 0.85);
+                box-shadow: 0 0 16px rgba(255, 102, 0, 0.35);
+            }
+        }
+        &.selected { border-color: rgba(255, 102, 0, 0.7); }
+    }
+
+    .gps-hint { padding: 10px 20px 14px; border-top: 1px solid rgba(255, 255, 255, 0.06); font-size: 10px; color: $text-darkest; text-align: center; }
+}
+
+// Global feedback UI (appended to <body> by gamepad-capture.ts)
+.gps-rec-indicator {
+    position: fixed; top: 16px; right: 20px; z-index: 300;
+    display: none; align-items: center; gap: 8px;
+    padding: 8px 14px; border-radius: 999px;
+    background-color: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 82, 82, 0.6);
+    color: #ff6b6b; font-size: 12px; font-weight: bold; letter-spacing: 1px;
+    pointer-events: none;
+    .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background-color: #ff5252;
+        animation: gps-rec-blink 1s ease-in-out infinite;
+    }
+}
+
+@keyframes gps-rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.gps-toast {
+    position: fixed; left: 50%; bottom: 90px;
+    transform: translateX(-50%) translateY(8px); z-index: 300;
+    padding: 10px 20px; border-radius: 10px;
+    background-color: rgba(0, 0, 0, 0.85);
+    border: 1px solid rgba(255, 102, 0, 0.5);
+    color: $text-primary; font-size: 13px;
+    opacity: 0; transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+    &.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
