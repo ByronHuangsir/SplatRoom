@@ -70,7 +70,8 @@ class VideoSettingsDialog extends Container {
             { v: '720', t: '1280x720' },
             { v: '1080', t: '1920x1080' },
             { v: '1440', t: '2560x1440' },
-            { v: '4k', t: '3840x2160' }
+            { v: '4k', t: '3840x2160' },
+            { v: '8k', t: '7680x4320' }
         ];
 
         // 360 output is 2:1 equirectangular, capped at 4096 wide to stay
@@ -375,6 +376,7 @@ class VideoSettingsDialog extends Container {
                         '1080': 1920,
                         '1440': 2560,
                         '4k': 3840,
+                        '8k': 7680,
                         '360-1k': 1024,
                         '360-2k': 2048,
                         '360-4k': 3840,
@@ -387,6 +389,7 @@ class VideoSettingsDialog extends Container {
                         '1080': 1080,
                         '1440': 1440,
                         '4k': 2160,
+                        '8k': 4320,
                         '360-1k': 512,
                         '360-2k': 1024,
                         '360-4k': 1920,

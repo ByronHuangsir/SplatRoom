@@ -75,6 +75,7 @@ class ImageSettingsDialog extends Container {
                 { v: 'HD', t: 'HD' },
                 { v: 'QHD', t: 'QHD' },
                 { v: '4K', t: '4K' },
+                { v: '8K', t: '8K' },
                 { v: 'custom', t: i18n.t('popup.render-image.resolution.custom') }
             ];
         };
@@ -223,6 +224,7 @@ class ImageSettingsDialog extends Container {
                 'HD': 1920,
                 'QHD': 2560,
                 '4K': 3840,
+                '8K': 7680,
                 '360-1k': 1024,
                 '360-2k': 2048,
                 '360-4k': 3840,
@@ -234,6 +236,7 @@ class ImageSettingsDialog extends Container {
                 'HD': 1080,
                 'QHD': 1440,
                 '4K': 2160,
+                '8K': 4320,
                 '360-1k': 512,
                 '360-2k': 1024,
                 '360-4k': 1920,
