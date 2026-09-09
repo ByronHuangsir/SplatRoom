@@ -144,6 +144,72 @@ export const sampleGsplatData = async (
 // a deep copy of every column for the worker transfer.
 const LOD_WORKER_MAX = 2_000_000;
 
+/** Distance (camera/model-radius) at which the closest proxy engages. */
+const LOD_NEAR_RATIO = 6.5;
+/** Distance at which the most reduced proxy engages. */
+const LOD_FAR_RATIO = 18;
+
+// runtime-tunable engagement distances (defaults above; tweakable for tuning)
+let cfgNear = LOD_NEAR_RATIO;
+let cfgFar = LOD_FAR_RATIO;
+/** Override the near/far engagement distances (camera-distance/model-radius). */
+export const setLodDistances = (nearRatio: number, farRatio: number) => {
+    if (Number.isFinite(nearRatio) && nearRatio > 1) cfgNear = nearRatio;
+    if (Number.isFinite(farRatio) && farRatio > cfgNear) cfgFar = farRatio;
+};
+/** Read the current engagement distances. */
+export const getLodDistances = () => ({ near: cfgNear, far: cfgFar });
+
+/**
+ * Pure distance→LOD decision with per-level engagement thresholds and
+ * hysteresis. Proxy indices run coarsest-first: level 0 = most reduced (used
+ * at the greatest distance), level n-1 = closest proxy.
+ *
+ * @param distRatio - camera distance / model radius.
+ * @param levelCount - number of proxy levels (>0).
+ * @param currentLevel - currently active proxy, -1 = full resolution.
+ * @returns the level to switch to: -1 (full) … levelCount-1.
+ */
+export const suggestLodLevel = (
+    distRatio: number,
+    levelCount: number,
+    currentLevel: number,
+    nearRatio?: number,
+    farRatio?: number
+): number => {
+    const near = nearRatio ?? cfgNear;
+    const far = farRatio ?? cfgFar;
+    const n = Math.max(1, levelCount);
+    const span = Math.max(1e-6, far - near);
+    // per-level engagement distance, coarsest first: level 0 engages at
+    // farRatio, the closest proxy (n-1) at nearRatio
+    const T = (i: number) => near + span * (n - 1 - i) / Math.max(1, n - 1);
+    const upK = 1.25;  // coarsening needs to clear the band by this factor
+    const dnK = 0.8;   // refining needs to drop below the band by this factor
+
+    // ideal (no hysteresis): coarsest level whose band the distance exceeds
+    let ideal = -1;
+    for (let i = 0; i < n; i++) {
+        if (distRatio >= T(i)) {
+            ideal = i; break;
+        }
+    }
+
+    // treat "full resolution" as the finest end (index n) for comparisons
+    const curEff = currentLevel < 0 ? n : Math.min(currentLevel, n - 1);
+    const idealEff = ideal < 0 ? n : ideal;
+    if (curEff === idealEff) return currentLevel < 0 ? -1 : curEff;
+
+    if (idealEff > curEff) {
+        // refining (→ finer proxy or back to full)
+        if (currentLevel < 0) return -1; // already full
+        return distRatio <= T(currentLevel) * dnK ? ideal : currentLevel;
+    }
+    // coarsening
+    if (currentLevel < 0) return ideal; // first engagement: enter its band
+    return distRatio >= T(ideal) * upK ? ideal : currentLevel;
+};
+
 /**
  * Fractions of the original count worth keeping as proxy levels, based on
  * size. Small models need no LOD; the largest get an extra far level.

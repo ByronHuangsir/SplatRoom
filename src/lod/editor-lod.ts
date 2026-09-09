@@ -16,7 +16,7 @@
  */
 import { Element, ElementType } from '../element';
 import { Splat } from '../splat';
-import { buildLodAssets, planLodFractions } from './lod';
+import { buildLodAssets, planLodFractions, setLodDistances, getLodDistances } from './lod';
 import { EditHistory } from '../edit-history';
 import { Events } from '../events';
 import type { Scene } from '../scene';
@@ -30,6 +30,13 @@ export const registerLodEvents = (
 ) => {
     let autoEnabled = false;
     let generating = false;
+
+    // engagement-distance tuning (camera-distance/model-radius)
+    events.function('lod.distances', getLodDistances);
+    events.on('lod.setDistances', (near: number, far: number) => {
+        setLodDistances(near, far);
+        events.fire('lod.distancesChanged', getLodDistances());
+    });
 
     events.function('lod.autoEnabled', () => autoEnabled);
     events.on('lod.setAuto', (v: boolean) => {

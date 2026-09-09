@@ -16,6 +16,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
+import { suggestLodLevel } from './lod/lod';
 import { Serializer } from './serializer';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from './shaders/splat-shader';
 import { State, SplatState } from './splat-state';
@@ -492,37 +493,15 @@ class Splat extends Element {
     }
 
     /**
-     * Decide which LOD level the current camera distance calls for, with
-     * hysteresis so the view does not thrash across a threshold.
+     * Decide which LOD level the current camera distance calls for (delegates
+     * to the pure lod.suggestLodLevel: per-level thresholds, one level at a
+     * time, hysteresis against thrash).
      * @param distRatio - camera distance / model radius (>= ~2 when the model
      * fills the view, large when far away).
      */
     suggestLodLevel(distRatio: number): number {
-        const n = this.lodAssets.length;
-        if (!this.lodEnabled || n === 0) return -1;
-        // proxy levels engage at increasing distance: index 0 (most reduced)
-        // is reserved for the farthest view, index n-1 for mid-distance.
-        const farRatio = 14 + n * 4;      // switch to the most reduced level
-        const nearRatio = 6.5;            // below this always full resolution
-        let target = -1;
-        if (distRatio >= farRatio) {
-            target = n - 1;               // farthest → most reduced
-        } else if (distRatio >= nearRatio) {
-            // mid-distance: linear ramp toward the more reduced levels
-            const t = (distRatio - nearRatio) / (farRatio - nearRatio);
-            target = Math.min(n - 1, Math.floor(t * n));
-        }
-        // hysteresis margins relative to current level
-        if (target === this.lodLevel) return target;
-        if (target < this.lodLevel) {
-            // coming closer — require a comfortable margin below the current
-            // level's engagement band before dropping a level
-            if (distRatio > nearRatio + (farRatio - nearRatio) * 0.25) return this.lodLevel;
-        } else if (target > this.lodLevel) {
-            // receding — require a margin above before engaging a further level
-            if (this.lodLevel >= 0 && distRatio < nearRatio + (farRatio - nearRatio) * 0.75) return this.lodLevel;
-        }
-        return target;
+        if (!this.lodEnabled || this.lodAssets.length === 0) return -1;
+        return suggestLodLevel(distRatio, this.lodAssets.length, this.lodLevel);
     }
 
     /** True if a proxy level is currently rendered. */
