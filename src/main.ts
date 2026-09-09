@@ -183,17 +183,22 @@ const main = async () => {
     // editor ui
     const editorUI = new EditorUI(events);
 
+    // V3 WebGPU: prefer WebGPU for the main renderer and fall back to WebGL2
+    // automatically (createGraphicsDevice tries deviceTypes in order and
+    // skips WebGPU when window.navigator.gpu is missing or init fails).
+    // Force WebGL2 with ?gpu=webgl2 if the WebGPU path misbehaves on a host.
+    const urlArgs = getURLArgs();
+    const gpuPref = (urlArgs as any)?.gpu;
+
     // create the graphics device
     const graphicsDevice = await createGraphicsDevice(editorUI.canvas, {
-        deviceTypes: ['webgl2'],
+        deviceTypes: gpuPref === 'webgl2' ? ['webgl2'] : ['webgpu', 'webgl2'],
         antialias: false,
         depth: false,
         stencil: false,
         xrCompatible: false,
         powerPreference: 'high-performance'
     });
-
-    const urlArgs = getURLArgs();
 
     const overrides = [
         urlArgs

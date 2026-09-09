@@ -1090,7 +1090,11 @@ class CameraPreview extends Element {
 
     private updateVisibility() {
         const timelineOpen = this.scene.events.invoke('statusBar.panel') === 'timeline';
-        this.enabled = timelineOpen && this.hasTrack;
+        // WebGPU: the PiP private sorter/order-texture pipeline is WebGL-only
+        // (see _ensurePipSort) — disable the preview cleanly instead of showing
+        // an empty box when the main renderer runs on WebGPU.
+        const webgpu = this.scene.graphicsDevice?.isWebGPU === true;
+        this.enabled = timelineOpen && this.hasTrack && !webgpu;
 
         if (this.container) {
             this.container.style.display = this.enabled ? 'block' : 'none';
