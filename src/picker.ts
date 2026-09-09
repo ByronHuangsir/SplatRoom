@@ -7,7 +7,8 @@ import {
     Color,
     GraphicsDevice,
     RenderPassPicker,
-    RenderTarget
+    RenderTarget,
+    Texture
 } from 'playcanvas';
 
 import { ElementType } from './element';
@@ -87,6 +88,13 @@ class Picker {
     setRenderTargets(depthRT: RenderTarget, idRT: RenderTarget) {
         this.depthRenderTarget = depthRT;
         this.idRenderTarget = idRT;
+    }
+
+    // The color buffer of the last ID pass (front-most splat index per pixel,
+    // RGBA8-encoded). Used by GPU selection passes (surface-only / Selection
+    // Depth) to test whether a splat center is on the visible surface.
+    get idTexture(): Texture | null {
+        return this.idRenderTarget ? this.idRenderTarget.colorBuffer : null;
     }
 
     // Prepare for ID picking by rendering the specified splat

@@ -504,6 +504,53 @@ class SettingsPanel extends Container {
             }
         });
 
+        // selection depth / footprint (V3 experimental, SuperSplat 3 style):
+        // "surface only" = Selection Depth (splats must be on the visible
+        // surface), "footprint" = Selection Footprint (2D picks judge by
+        // gaussian coverage instead of centers only). Labels inline until
+        // localised; applied to the very next selection.
+        const selSurfaceRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const selSurfaceLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Selection: surface only (depth)'
+        });
+        const selSurfaceToggle = new BooleanInput({
+            type: 'toggle',
+            class: 'settings-panel-row-toggle',
+            value: !!events.invoke('selection.surfaceOnly')
+        });
+        selSurfaceRow.append(selSurfaceLabel);
+        selSurfaceRow.append(selSurfaceToggle);
+        selSurfaceToggle.on('change', (value: boolean) => {
+            events.fire('selection.setSurfaceOnly', value);
+        });
+        events.on('selection.surfaceOnly', (value: boolean) => {
+            selSurfaceToggle.value = value;
+        });
+
+        const selFootprintRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const selFootprintLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Selection: footprint (coverage)'
+        });
+        const selFootprintToggle = new BooleanInput({
+            type: 'toggle',
+            class: 'settings-panel-row-toggle',
+            value: !!events.invoke('selection.useFootprint')
+        });
+        selFootprintRow.append(selFootprintLabel);
+        selFootprintRow.append(selFootprintToggle);
+        selFootprintToggle.on('change', (value: boolean) => {
+            events.fire('selection.setUseFootprint', value);
+        });
+        events.on('selection.useFootprint', (value: boolean) => {
+            selFootprintToggle.value = value;
+        });
+
         // reset preferences to defaults
 
         const resetRow = new Container({
@@ -536,6 +583,8 @@ class SettingsPanel extends Container {
         this.append(showCameraInfoRow);
         this.append(lodRow);
         this.append(gpuRow);
+        this.append(selSurfaceRow);
+        this.append(selFootprintRow);
         this.append(resetRow);
 
         // handle panel visibility

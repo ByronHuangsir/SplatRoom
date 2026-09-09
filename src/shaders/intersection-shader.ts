@@ -30,6 +30,21 @@ const fragmentShader = /* glsl */ `
     // where the shape is the unit sphere (diameter 1) or unit cube (side 1)
     uniform mat4 shape_matrix_inv;
 
+    // surface-only (Selection Depth): when 1, a splat only counts when it is
+    // the front-most splat at its own projected center pixel. surfaceMap is the
+    // RGBA8 id pass (32-bit splat index per pixel, written by the pick shader);
+    // surfaceMap_params holds its width and height.
+    uniform int surfaceOnly;
+    uniform sampler2D surfaceMap;
+    uniform vec2 surfaceMap_params;
+
+    uint decodeSurfaceId(vec4 c) {
+        return uint(floor(c.r * 255.0 + 0.5))
+            | (uint(floor(c.g * 255.0 + 0.5)) << 8u)
+            | (uint(floor(c.b * 255.0 + 0.5)) << 16u)
+            | (uint(floor(c.a * 255.0 + 0.5)) << 24u);
+    }
+
     void main(void) {
         // calculate output id
         uvec2 outputUV = uvec2(gl_FragCoord);
@@ -96,6 +111,27 @@ const fragmentShader = /* glsl */ `
                 // unit cube test in shape-local space
                 vec3 local = (shape_matrix_inv * vec4(world, 1.0)).xyz;
                 clr[i] = all(lessThanEqual(abs(local), vec3(0.5))) ? 1.0 : 0.0;
+            }
+
+            // surface-only: keep a hit only when this splat is the front-most
+            // splat at its projected center pixel (i.e. its center is on the
+            // visible surface, not occluded by nearer gaussians).
+            if (surfaceOnly == 1 && clr[i] > 0.5) {
+                vec4 clip = matrix_viewProjection * vec4(world, 1.0);
+                if (clip.w <= 0.0) {
+                    clr[i] = 0.0;
+                } else {
+                    vec3 ndc = clip.xyz / clip.w;
+                    if (any(greaterThan(abs(ndc), vec3(1.0)))) {
+                        clr[i] = 0.0;
+                    } else {
+                        ivec2 surfaceUV = ivec2((ndc.xy * vec2(0.5, -0.5) + 0.5) * surfaceMap_params);
+                        uint frontId = decodeSurfaceId(texelFetch(surfaceMap, surfaceUV, 0));
+                        if (frontId != id) {
+                            clr[i] = 0.0;
+                        }
+                    }
+                }
             }
         }
 

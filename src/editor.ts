@@ -1,5 +1,5 @@
 import { MemoryFileSystem } from '@playcanvas/splat-transform';
-import { Asset, Color, GSplatData, GSplatResource, Mat4, path, Quat, Texture, Vec3, Vec4 } from 'playcanvas';
+import { Asset, Color, GSplatData, GSplatResource, Mat4, path, PROJECTION_ORTHOGRAPHIC, Quat, Texture, Vec3, Vec4 } from 'playcanvas';
 
 import { serializeGrade, deserializeGrade } from './color-grade-file';
 import { CropBox, CropBoxConfig } from './crop-box';
@@ -770,18 +770,106 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
     });
 
-    // run the GPU intersect + the resulting SelectOp inside one queued task so the
-    // gpu readback is ordered relative to other queued history ops (rapid drag +
-    // undo, drag-while-camera-settling, etc).
+    // ---- selection depth & footprint (V3, SuperSplat 3 style) --------------
+    // surfaceOnly (Selection Depth): only splats on the visible surface count —
+    // a splat must be the front-most splat at its own projected center pixel.
+    // useFootprint (Selection Footprint): 2D region/point tools judge inclusion
+    // by the gaussian's rendered footprint instead of only its center.
+    // Both default off (legacy SplatRoom center behaviour) and persist.
+    let selSurfaceOnly = false;
+    let selUseFootprint = false;
+    try {
+        selSurfaceOnly = localStorage.getItem('splatroom.selSurfaceOnly') === '1';
+        selUseFootprint = localStorage.getItem('splatroom.selUseFootprint') === '1';
+    } catch { /* storage unavailable */ }
+
+    events.function('selection.surfaceOnly', () => selSurfaceOnly);
+    events.function('selection.useFootprint', () => selUseFootprint);
+
+    const setSurfaceOnly = (value: boolean) => {
+        if (value !== selSurfaceOnly) {
+            selSurfaceOnly = value;
+            try {
+                localStorage.setItem('splatroom.selSurfaceOnly', value ? '1' : '0');
+            } catch { /* noop */ }
+            events.fire('selection.surfaceOnly', value);
+        }
+    };
+    const setUseFootprint = (value: boolean) => {
+        if (value !== selUseFootprint) {
+            selUseFootprint = value;
+            try {
+                localStorage.setItem('splatroom.selUseFootprint', value ? '1' : '0');
+            } catch { /* noop */ }
+            events.fire('selection.useFootprint', value);
+        }
+    };
+    events.on('selection.setSurfaceOnly', setSurfaceOnly);
+    events.on('selection.setUseFootprint', setUseFootprint);
+    events.on('selection.toggleSurfaceOnly', () => setSurfaceOnly(!selSurfaceOnly));
+    events.on('selection.toggleUseFootprint', () => setUseFootprint(!selUseFootprint));
+
+    // Render the surface id map (front-most splat per pixel) when Selection
+    // Depth is on and fold it into the intersect options. Must run right before
+    // the intersect draw (see runSelectIntersect) — never hoisted earlier.
+    const surfaceOptionsFor = (splat: Splat, options: any): any => {
+        if (!selSurfaceOnly) return options;
+        const surfaceMap = scene.camera.renderSurfaceMap(splat);
+        return surfaceMap ? { ...options, surfaceOnly: true, surfaceMap } : options;
+    };
+
+    // GPU intersect + fire + release inside one queued task so the gpu readback
+    // is ordered relative to other queued history ops (rapid drag + undo,
+    // drag-while-camera-settling, etc). When Selection Depth is on, the surface
+    // id map is rendered *inside the same task* right before the intersect draw
+    // — the id buffer lives in the camera's shared work target, which every
+    // frame overwrites, so rendering it any earlier would let an intervening
+    // frame invalidate the comparison.
     const runSelectIntersect = (splat: Splat, op: 'add'|'remove'|'set'|'intersect', options: any) => {
         return scene.commandQueue.enqueue(async () => {
-            const data = await scene.dataProcessor.intersect(options, splat);
+            const effective = surfaceOptionsFor(splat, options);
+            const data = await scene.dataProcessor.intersect(effective, splat);
             // SelectOp consumes `data` synchronously in its constructor
             // (IndexRanges.fromPredicate iterates immediately), so we can
             // return the buffer to the pool as soon as the op is constructed.
             events.fire('edit.add', new SelectOp(splat, op, data));
             scene.dataProcessor.releaseMask(data);
         });
+    };
+
+    // GPU intersect only; hands back the pooled mask buffer (caller owns it and
+    // must release it via dataProcessor.releaseMask).
+    const intersectHits = (splat: Splat, options: any): Promise<Uint8Array> => {
+        return scene.commandQueue.enqueue(() => scene.dataProcessor.intersect(options, splat));
+    };
+
+    // fold a penetrating center mask and a visible-footprint id list into a
+    // single committed mask (used by the footprint-without-depth strategy).
+    const unionMaskWithIds = (center: Uint8Array, ids: Uint32Array, numSplats: number): Uint8Array => {
+        const both = new Uint8Array(numSplats);
+        for (let i = 0; i < numSplats; ++i) {
+            both[i] = center[i];
+        }
+        for (let i = 0; i < ids.length; ++i) {
+            const id = ids[i];
+            if (id < numSplats) {
+                both[id] = 255;
+            }
+        }
+        return both;
+    };
+
+    // Visible-footprint id pass over a normalized rectangle (front-most splats
+    // whose rendered gaussian covers any pixel of the region).
+    const pickRectIds = async (splat: Splat, op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
+        scene.camera.pickPrep(splat, op);
+        const pick = await scene.camera.pickRect(
+            rect.start.x,
+            rect.start.y,
+            rect.end.x - rect.start.x,
+            rect.end.y - rect.start.y
+        );
+        return new Uint32Array(new Set(pick)).sort();
     };
 
     // transform maps the unit sphere (diameter 1) to world space
@@ -802,25 +890,110 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
     });
 
-    events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: any) => {
-        const mode = events.invoke('camera.mode');
+    // ---- sphere brush (V3): depth-aligned 3D paint -------------------------
+    // Paints small spheres whose centers hug the visible surface: every
+    // recorded pointer sample is anchored at the front-most surface point under
+    // the cursor (camera.intersect depth pick) and the splats inside the sphere
+    // at that depth are selected. Selection Depth is honoured per sample via
+    // the GPU surface compare (rendered inside the queued intersect task).
+    events.on('select.bySphereBrush', async (op: 'add'|'remove'|'set'|'intersect', samples: Array<{ x: number, y: number }>, radiusPx: number) => {
+        const splats = selectedSplats();
+        if (!splats.length || !samples.length || !(radiusPx > 0)) return;
+
+        const { camera } = scene;
+        const canvas = scene.canvas;
+        const camEnt = camera.mainCamera;
+        const camComp = camEnt.camera;
+        const camPos = camEnt.getPosition();
+        const fovRad = camComp.fov * Math.PI / 180;
+        const ortho = camComp.projection === PROJECTION_ORTHOGRAPHIC;
+        const viewH = Math.max(1, canvas.clientHeight);
+
+        // each sample costs a depth pick + a GPU sphere intersect (+ a surface
+        // map render when Selection Depth is on), so show the spinner for
+        // anything longer than a tap
+        const spin = samples.length > 1;
+        if (spin) {
+            events.fire('startSpinner');
+        }
+        try {
+            for (const splat of splats) {
+                for (const sample of samples) {
+                    const hit = await camera.intersect(sample.x, sample.y);
+                    if (!hit) continue;
+
+                    // world radius matching the on-screen brush radius at depth
+                    const dist = hit.position.distance(camPos);
+                    const worldPerPx = ortho ?
+                        camComp.orthoHeight / viewH :
+                        2 * dist * Math.tan(fovRad * 0.5) / viewH;
+                    const worldRadius = Math.max(1e-6, radiusPx * worldPerPx);
+
+                    // unit sphere (diameter 1) scaled to the brush diameter
+                    const transform = new Mat4();
+                    const s = worldRadius * 2;
+                    transform.setTRS(hit.position, new Quat(), new Vec3(s, s, s));
+
+                    await runSelectIntersect(splat, op, {
+                        sphere: { transform }
+                    });
+                }
+            }
+        } finally {
+            if (spin) {
+                events.fire('stopSpinner');
+            }
+        }
+    });
+
+    events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
+        const surface = selSurfaceOnly;
+        const footprint = selUseFootprint;
+        const ringMode = events.invoke('camera.mode') === 'rings';
+        const rectOptions: any = {
+            rect: { x1: rect.start.x, y1: rect.start.y, x2: rect.end.x, y2: rect.end.y }
+        };
 
         for (const splat of selectedSplats()) {
-            if (mode === 'centers') {
-                await runSelectIntersect(splat, op, {
-                    rect: { x1: rect.start.x, y1: rect.start.y, x2: rect.end.x, y2: rect.end.y }
-                });
-            } else if (mode === 'rings') {
-                scene.camera.pickPrep(splat, op);
-                const pick = await scene.camera.pickRect(
-                    rect.start.x,
-                    rect.start.y,
-                    rect.end.x - rect.start.x,
-                    rect.end.y - rect.start.y
-                );
+            if (!surface && !footprint) {
+                // legacy path: GPU center intersect in centers display, visible
+                // footprint pick in rings display (unchanged behaviour)
+                if (!ringMode) {
+                    await runSelectIntersect(splat, op, rectOptions);
+                } else {
+                    const ids = await pickRectIds(splat, op, rect);
+                    events.fire('edit.add', new SelectOp(splat, op, ids));
+                }
+                continue;
+            }
 
-                const sortedIds = new Uint32Array(new Set(pick)).sort();
-                events.fire('edit.add', new SelectOp(splat, op, sortedIds));
+            if (surface && !footprint) {
+                // Selection Depth only, center-based: centers inside the rect
+                // that are also on the visible surface. In rings display the
+                // footprint pick already shows (and picks) exactly that.
+                if (ringMode) {
+                    const ids = await pickRectIds(splat, op, rect);
+                    events.fire('edit.add', new SelectOp(splat, op, ids));
+                } else {
+                    await runSelectIntersect(splat, op, rectOptions);
+                }
+                continue;
+            }
+
+            // footprint on: visible-footprint pixels of the rect…
+            const ids = await pickRectIds(splat, op, rect);
+            if (surface) {
+                // …+ depth = exactly the visible surface splats the region
+                // covers (SuperSplat depth + footprint default)
+                events.fire('edit.add', new SelectOp(splat, op, ids));
+            } else {
+                // …− depth = visible coverage UNION penetrating centers
+                // (occluded gaussians whose center is inside the rect are still
+                // caught by the center pass)
+                const center = await intersectHits(splat, rectOptions);
+                const both = unionMaskWithIds(center, ids, splat.splatData.numSplats);
+                events.fire('edit.add', new SelectOp(splat, op, both));
+                scene.dataProcessor.releaseMask(center);
             }
         }
     });
@@ -828,74 +1001,115 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     let maskTexture: Texture = null;
 
     events.function('select.byMask', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
-        const mode = events.invoke('camera.mode');
+        const surface = selSurfaceOnly;
+        const footprint = selUseFootprint;
+        const ringMode = events.invoke('camera.mode') === 'rings';
+
+        // create/refresh the mask texture once per stroke (GPU center pass)
+        const getMaskTexture = () => {
+            if (!maskTexture || maskTexture.width !== canvas.width || maskTexture.height !== canvas.height) {
+                if (maskTexture) {
+                    maskTexture.destroy();
+                }
+                maskTexture = new Texture(scene.graphicsDevice);
+            }
+            maskTexture.setSource(canvas);
+            return maskTexture;
+        };
+
+        // visible-footprint pass: front-most splats whose rendered gaussian
+        // covers a stroked pixel of the mask.
+        const pickMaskIds = async (splat: Splat) => {
+            const mask = context.getImageData(0, 0, canvas.width, canvas.height);
+
+            // calculate mask bound so we limit pixel operations
+            let mx0 = mask.width - 1;
+            let my0 = mask.height - 1;
+            let mx1 = 0;
+            let my1 = 0;
+            for (let y = 0; y < mask.height; ++y) {
+                for (let x = 0; x < mask.width; ++x) {
+                    if (mask.data[(y * mask.width + x) * 4 + 3] === 255) {
+                        mx0 = Math.min(mx0, x);
+                        my0 = Math.min(my0, y);
+                        mx1 = Math.max(mx1, x);
+                        my1 = Math.max(my1, y);
+                    }
+                }
+            }
+
+            // Convert mask bounds to normalized coordinates
+            const nx0 = mx0 / mask.width;
+            const ny0 = my0 / mask.height;
+            const nx1 = (mx1 + 1) / mask.width;
+            const ny1 = (my1 + 1) / mask.height;
+            const nw = nx1 - nx0;
+            const nh = ny1 - ny0;
+
+            scene.camera.pickPrep(splat, op);
+            const pick = await scene.camera.pickRect(nx0, ny0, nw, nh);
+
+            // Calculate actual pixel dimensions for iteration
+            const { width, height } = scene.targetSize;
+
+            // Convert normalized coordinates to render target pixels
+            const px = Math.floor(nx0 * width);
+            const py = Math.floor(ny0 * height);
+            const pw = Math.max(1, Math.ceil((nx0 + nw) * width) - px);
+            const ph = Math.max(1, Math.ceil((ny0 + nh) * height) - py);
+
+            const selected = new Set<number>();
+            for (let y = 0; y < ph; ++y) {
+                for (let x = 0; x < pw; ++x) {
+                    const mx = Math.floor((nx0 + x / width) * mask.width);
+                    const my = Math.floor((ny0 + y / height) * mask.height);
+                    if (mask.data[(my * mask.width + mx) * 4] === 255) {
+                        selected.add(pick[(ph - 1 - y) * pw + x]);
+                    }
+                }
+            }
+
+            return new Uint32Array(selected).sort();
+        };
 
         for (const splat of selectedSplats()) {
-            if (mode === 'centers') {
-                // create mask texture
-                if (!maskTexture || maskTexture.width !== canvas.width || maskTexture.height !== canvas.height) {
-                    if (maskTexture) {
-                        maskTexture.destroy();
-                    }
-                    maskTexture = new Texture(scene.graphicsDevice);
+            if (!surface && !footprint) {
+                // legacy path: GPU center intersect in centers display, visible
+                // footprint pick in rings display (unchanged behaviour)
+                if (!ringMode) {
+                    await runSelectIntersect(splat, op, { mask: getMaskTexture() });
+                } else {
+                    const ids = await pickMaskIds(splat);
+                    events.fire('edit.add', new SelectOp(splat, op, ids));
                 }
-                maskTexture.setSource(canvas);
+                continue;
+            }
 
-                await runSelectIntersect(splat, op, {
-                    mask: maskTexture
-                });
-            } else if (mode === 'rings') {
-                const mask = context.getImageData(0, 0, canvas.width, canvas.height);
-
-                // calculate mask bound so we limit pixel operations
-                let mx0 = mask.width - 1;
-                let my0 = mask.height - 1;
-                let mx1 = 0;
-                let my1 = 0;
-                for (let y = 0; y < mask.height; ++y) {
-                    for (let x = 0; x < mask.width; ++x) {
-                        if (mask.data[(y * mask.width + x) * 4 + 3] === 255) {
-                            mx0 = Math.min(mx0, x);
-                            my0 = Math.min(my0, y);
-                            mx1 = Math.max(mx1, x);
-                            my1 = Math.max(my1, y);
-                        }
-                    }
+            if (surface && !footprint) {
+                // Selection Depth only, center-based: centers inside the mask
+                // that are also on the visible surface. In rings display the
+                // footprint pick already shows (and picks) exactly that.
+                if (ringMode) {
+                    const ids = await pickMaskIds(splat);
+                    events.fire('edit.add', new SelectOp(splat, op, ids));
+                } else {
+                    await runSelectIntersect(splat, op, { mask: getMaskTexture() });
                 }
+                continue;
+            }
 
-                // Convert mask bounds to normalized coordinates
-                const nx0 = mx0 / mask.width;
-                const ny0 = my0 / mask.height;
-                const nx1 = (mx1 + 1) / mask.width;
-                const ny1 = (my1 + 1) / mask.height;
-                const nw = nx1 - nx0;
-                const nh = ny1 - ny0;
-
-                scene.camera.pickPrep(splat, op);
-                const pick = await scene.camera.pickRect(nx0, ny0, nw, nh);
-
-                // Calculate actual pixel dimensions for iteration
-                const { width, height } = scene.targetSize;
-
-                // Convert normalized coordinates to render target pixels
-                const px = Math.floor(nx0 * width);
-                const py = Math.floor(ny0 * height);
-                const pw = Math.max(1, Math.ceil((nx0 + nw) * width) - px);
-                const ph = Math.max(1, Math.ceil((ny0 + nh) * height) - py);
-
-                const selected = new Set<number>();
-                for (let y = 0; y < ph; ++y) {
-                    for (let x = 0; x < pw; ++x) {
-                        const mx = Math.floor((nx0 + x / width) * mask.width);
-                        const my = Math.floor((ny0 + y / height) * mask.height);
-                        if (mask.data[(my * mask.width + mx) * 4] === 255) {
-                            selected.add(pick[(ph - 1 - y) * pw + x]);
-                        }
-                    }
-                }
-
-                const sortedIds = new Uint32Array(selected).sort();
-                events.fire('edit.add', new SelectOp(splat, op, sortedIds));
+            // footprint on: visible-footprint pixels of the mask…
+            const ids = await pickMaskIds(splat);
+            if (surface) {
+                // …+ depth = exactly the visible surface splats the strokes
+                // cover (SuperSplat depth + footprint default)
+                events.fire('edit.add', new SelectOp(splat, op, ids));
+            } else {
+                // …− depth = visible coverage UNION penetrating centers
+                const center = await intersectHits(splat, { mask: getMaskTexture() });
+                const both = unionMaskWithIds(center, ids, splat.splatData.numSplats);
+                events.fire('edit.add', new SelectOp(splat, op, both));
+                scene.dataProcessor.releaseMask(center);
             }
         }
     });
@@ -968,54 +1182,80 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     });
 
     events.function('select.point', async (op: 'add'|'remove'|'set'|'intersect', point: { x: number, y: number }) => {
+        const surface = selSurfaceOnly;
+        const footprint = selUseFootprint;
+        const ringMode = events.invoke('camera.mode') === 'rings';
         const { width, height } = scene.targetSize;
-        const mode = events.invoke('camera.mode');
+
+        // front-most visible splat exactly under the cursor
+        const pickPixel = async (splat: Splat): Promise<number | undefined> => {
+            scene.camera.pickPrep(splat, op);
+            const pickResult = await scene.camera.pickRect(
+                point.x,
+                point.y,
+                1 / width,
+                1 / height
+            );
+            return pickResult[0];
+        };
+
+        // centers within splatSize px of the cursor (penetrating)
+        const centerMask = (splat: Splat): Uint8Array => {
+            const splatData = splat.splatData;
+            const x = splatData.getProp('x');
+            const y = splatData.getProp('y');
+            const z = splatData.getProp('z');
+
+            const splatSize = events.invoke('camera.splatSize');
+            const camera = scene.camera.camera;
+            const sx = point.x * width;
+            const sy = point.y * height;
+
+            // calculate final matrix
+            mat.mul2(camera.camera._viewProjMat, splat.worldTransform);
+
+            const numSplats = splatData.numSplats;
+            const mask = new Uint8Array(numSplats);
+            for (let i = 0; i < numSplats; i++) {
+                vec4.set(x[i], y[i], z[i], 1.0);
+                mat.transformVec4(vec4, vec4);
+                const px = (vec4.x / vec4.w * 0.5 + 0.5) * width;
+                const py = (-vec4.y / vec4.w * 0.5 + 0.5) * height;
+                if (Math.abs(px - sx) < splatSize && Math.abs(py - sy) < splatSize) {
+                    mask[i] = 255;
+                }
+            }
+            return mask;
+        };
 
         for (const splat of selectedSplats()) {
-            const splatData = splat.splatData;
-
-            if (mode === 'centers') {
-                const x = splatData.getProp('x');
-                const y = splatData.getProp('y');
-                const z = splatData.getProp('z');
-
-                const splatSize = events.invoke('camera.splatSize');
-                const camera = scene.camera.camera;
-                const sx = point.x * width;
-                const sy = point.y * height;
-
-                // calculate final matrix
-                mat.mul2(camera.camera._viewProjMat, splat.worldTransform);
-
-                // materialize hits into an owned mask. SelectOp consumes a
-                // committed snapshot rather than a closure so we never have to
-                // worry about state shifting between capture and apply.
-                const numSplats = splatData.numSplats;
-                const mask = new Uint8Array(numSplats);
-                for (let i = 0; i < numSplats; i++) {
-                    vec4.set(x[i], y[i], z[i], 1.0);
-                    mat.transformVec4(vec4, vec4);
-                    const px = (vec4.x / vec4.w * 0.5 + 0.5) * width;
-                    const py = (-vec4.y / vec4.w * 0.5 + 0.5) * height;
-                    if (Math.abs(px - sx) < splatSize && Math.abs(py - sy) < splatSize) {
-                        mask[i] = 255;
-                    }
+            if (!surface && !footprint) {
+                // legacy path: CPU center test in centers display, front pixel
+                // pick in rings display (unchanged behaviour)
+                if (!ringMode) {
+                    events.fire('edit.add', new SelectOp(splat, op, centerMask(splat)));
+                } else {
+                    const pickId = await pickPixel(splat);
+                    events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId ?? 0])));
                 }
-
-                events.fire('edit.add', new SelectOp(splat, op, mask));
-            } else if (mode === 'rings') {
-                scene.camera.pickPrep(splat, op);
-
-                // Use normalized coordinates with minimal size for single pixel pick
-                const pickResult = await scene.camera.pickRect(
-                    point.x,
-                    point.y,
-                    1 / width,
-                    1 / height
-                );
-                const pickId = pickResult[0];
-                events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId])));
+                continue;
             }
+
+            // depth and/or footprint: a click selects the splat under the cursor
+            const pickId = await pickPixel(splat);
+            if (surface) {
+                if (pickId !== undefined) {
+                    events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId])));
+                }
+                continue;
+            }
+
+            // footprint without depth: visible splat ∪ centers near the cursor
+            const mask = centerMask(splat);
+            if (pickId !== undefined && pickId < mask.length) {
+                mask[pickId] = 255;
+            }
+            events.fire('edit.add', new SelectOp(splat, op, mask));
         }
     });
 

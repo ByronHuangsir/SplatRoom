@@ -37,7 +37,16 @@ type BoxOptions = {
     box: { transform: Mat4 };
 };
 
-type IntersectOptions = MaskOptions | RectOptions | SphereOptions | BoxOptions;
+// surface-only (Selection Depth): when `surfaceOnly` is set and `surfaceMap`
+// (the RGBA8 id pass texture, see camera.renderSurfaceMap) is provided, a splat
+// only counts when it is the front-most splat at its projected center pixel.
+// Applies to every shape mode.
+type SurfaceOptions = {
+    surfaceOnly?: boolean;
+    surfaceMap?: Texture;
+};
+
+type IntersectOptions = MaskOptions | RectOptions | SphereOptions | BoxOptions | SurfaceOptions;
 
 const shapeInvMat = new Mat4();
 const identityMat = new Mat4();
@@ -188,6 +197,14 @@ class Intersect {
                 shape_matrix_inv: identityMat.data
             });
         }
+
+        const surfaceOptions = options as SurfaceOptions;
+        const surfaceMap = surfaceOptions.surfaceOnly && surfaceOptions.surfaceMap ? surfaceOptions.surfaceMap : this.dummyTexture;
+        resolve(scope, {
+            surfaceOnly: surfaceMap !== this.dummyTexture ? 1 : 0,
+            surfaceMap,
+            surfaceMap_params: [surfaceMap.width, surfaceMap.height]
+        });
 
         device.setBlendState(BlendState.NOBLEND);
         drawQuadWithShader(device, resources.renderTarget, resources.shader);

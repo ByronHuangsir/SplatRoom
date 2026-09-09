@@ -36,6 +36,10 @@ const defaultShortcuts: Record<string, ShortcutBinding> = {
     'select.invert': { keys: ['i'], ctrl: 'required' },
     'select.delete': { keys: ['Delete', 'Backspace'] },
 
+    // Selection depth / footprint (SuperSplat-style toggles)
+    'selection.toggleSurfaceOnly': { keys: ['n'] },
+    'selection.toggleUseFootprint': { keys: ['m'], shift: 'required' },
+
     // Clipboard
     'edit.copy': { keys: ['c'], ctrl: 'required', capture: true },
     'edit.cut': { keys: ['x'], ctrl: 'required', capture: true },

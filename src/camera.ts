@@ -1065,6 +1065,17 @@ class Camera extends Element {
 
     // pick mode
 
+    // Render an ID pass that paints every visible splat of `splat` (pickOp
+    // 'set' — only locked/deleted splats are skipped) and return its color
+    // buffer. The buffer holds the front-most splat index per pixel, which GPU
+    // selection passes (surface-only / Selection Depth) sample to test whether
+    // a splat center is on the visible surface. Call right before running the
+    // intersect pass so the two renders stay in submission order.
+    renderSurfaceMap(splat: Splat): Texture | null {
+        this.picker.prepareId(splat, 'set');
+        return this.picker.idTexture;
+    }
+
     // render picker contents
     pickPrep(splat: Splat, mode: 'add' | 'remove' | 'set' | 'intersect') {
         this.picker.prepareId(splat, mode);
