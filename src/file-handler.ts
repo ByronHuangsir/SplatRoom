@@ -322,7 +322,8 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             return model;
         } catch (error) {
             const displayName = files[0]?.filename ?? 'unknown';
-            await showLoadError(error.message ?? error, displayName);
+            const stack = (error as any)?.stack?.split('\n').slice(1, 4).join('\n') ?? '';
+            await showLoadError(`${(error as any)?.message ?? error}\n\n${stack}`.trim(), displayName);
         }
     };
 
