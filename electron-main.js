@@ -261,8 +261,21 @@ async function createWindow() {
 
     // Only load the URL after the HTTP server is actually listening.
     // This prevents a race where the window tries to fetch before the server is ready.
+    // Graphics backend override: `--gpu=webgpu` (or `--gpu webgpu`) is appended
+    // as a ?gpu= query param that the renderer reads when creating the device.
+    const gpuArg = (() => {
+        const eq = process.argv.findIndex((a) => a.startsWith('--gpu='));
+        if (eq >= 0) return process.argv[eq].slice(6);
+        const sp = process.argv.indexOf('--gpu');
+        if (sp >= 0 && process.argv[sp + 1]) return process.argv[sp + 1];
+        return null;
+    })();
+    const withGpu = (url) => {
+        if (!gpuArg) return url;
+        return url + (url.includes('?') ? '&' : '?') + 'gpu=' + encodeURIComponent(gpuArg);
+    };
     if (isDev) {
-        mainWindow.loadURL('http://localhost:3000');
+        mainWindow.loadURL(withGpu('http://localhost:3000'));
         mainWindow.webContents.openDevTools();
         mainWindow.once('ready-to-show', () => { mainWindow.show(); });
     } else {
@@ -280,7 +293,7 @@ async function createWindow() {
 
         server.listen(port, '127.0.0.1', () => {
             console.log(`SplatRoom server running at http://127.0.0.1:${port}`);
-            mainWindow.loadURL(`http://127.0.0.1:${port}`);
+            mainWindow.loadURL(withGpu(`http://127.0.0.1:${port}`));
         });
     }
 

@@ -14,6 +14,7 @@ import { Events } from './events';
 import { initFileHandler } from './file-handler';
 import { GamepadCapture } from './gamepad-capture';
 import { GamepadController } from './gamepad-controller';
+import { getGpuBackendPref } from './gpu-backend';
 import { registerIframeApi } from './iframe-api';
 import { registerLodEvents } from './lod/editor-lod';
 import { startMergeApp } from './merge/merge-app';
@@ -187,13 +188,16 @@ const main = async () => {
     // WebGL2 fallback (createGraphicsDevice tries deviceTypes in order).
     // Default stays WebGL2 — several GPU readback/data-processor paths and the
     // PiP preview need per-host WebGPU verification before it can be default.
-    // Opt in with ?gpu=webgpu; force WebGL2 with ?gpu=webgl2.
+    // Precedence: URL override (?gpu=) > settings-panel preference > WebGL2.
     const urlArgs = getURLArgs();
-    const gpuPref = (urlArgs as any)?.gpu;
+    const gpuOverride = (urlArgs as any)?.gpu;
+    const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
+        gpuOverride :
+        getGpuBackendPref();
 
     // create the graphics device
     const graphicsDevice = await createGraphicsDevice(editorUI.canvas, {
-        deviceTypes: gpuPref === 'webgpu' ? ['webgpu', 'webgl2'] : ['webgl2'],
+        deviceTypes: gpuBackend === 'webgpu' ? ['webgpu', 'webgl2'] : ['webgl2'],
         antialias: false,
         depth: false,
         stencil: false,

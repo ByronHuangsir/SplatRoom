@@ -2,6 +2,7 @@ import { BooleanInput, Button, ColorPicker, Container, Label, SelectInput, Slide
 import { Color } from 'playcanvas';
 
 import { Events } from '../events';
+import { getGpuBackendPref, setGpuBackendPref } from '../gpu-backend';
 import type { GridPlane } from '../infinite-grid';
 import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
@@ -473,6 +474,36 @@ class SettingsPanel extends Container {
             events.invoke('lod.generateForAll');
         });
 
+        // graphics backend (V3 experimental): WebGL2 default / WebGPU opt-in.
+        // Takes effect on the next app start (labels inline until localised).
+        const gpuRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const gpuLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Graphics backend'
+        });
+        const gpuSelect = new SelectInput({
+            class: 'settings-panel-row-select',
+            options: [
+                { v: 'webgl2', t: 'WebGL2' },
+                { v: 'webgpu', t: 'WebGPU (experimental)' }
+            ],
+            value: getGpuBackendPref() ?? 'webgl2'
+        });
+        const gpuHint = new Label({
+            class: 'settings-panel-row-hint',
+            text: '(restart to apply)'
+        });
+        gpuRow.append(gpuLabel);
+        gpuRow.append(gpuSelect);
+        gpuRow.append(gpuHint);
+        gpuSelect.on('change', (value: string) => {
+            if (value === 'webgl2' || value === 'webgpu') {
+                setGpuBackendPref(value);
+            }
+        });
+
         // reset preferences to defaults
 
         const resetRow = new Container({
@@ -504,6 +535,7 @@ class SettingsPanel extends Container {
         this.append(showCameraPosesRow);
         this.append(showCameraInfoRow);
         this.append(lodRow);
+        this.append(gpuRow);
         this.append(resetRow);
 
         // handle panel visibility
