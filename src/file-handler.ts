@@ -6,6 +6,7 @@ import { CreateDropHandler } from './drop-handler';
 import { ElementType } from './element';
 import { Events } from './events';
 import { BrowserFileSystem, MappedReadFileSystem } from './io';
+import { attachLodFromFile } from './lod/lod-file';
 import { Scene } from './scene';
 import { Splat } from './splat';
 import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat-serialize';
@@ -311,6 +312,13 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 return null;
             }
             await scene.add(model);
+            // V3 streaming: structural multi-LOD containers (.lod / .lcc2 /
+            // streamed .sog) carry their coarse levels in-file — attach them as
+            // runtime LOD proxies so the camera switcher uses lighter data at
+            // distance (no re-decimation). Best-effort.
+            if (isContainer) {
+                void attachLodFromFile(fileSystem, mainFile.filename, model);
+            }
             return model;
         } catch (error) {
             const displayName = files[0]?.filename ?? 'unknown';
