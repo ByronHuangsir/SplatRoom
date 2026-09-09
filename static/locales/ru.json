@@ -58,6 +58,7 @@
     "panel.camera.mode": "Режим камеры",
     "panel.camera.mode.orbit": "Орбита",
     "panel.camera.mode.fly": "Полёт",
+    "panel.camera.mode.walk": "Ходьба",
     "panel.camera.axis.heading": "Направление",
     "panel.camera.axis.pitch": "Наклон",
     "panel.camera.view.front": "Спереди",

@@ -58,6 +58,7 @@
     "panel.camera.mode": "카메라 모드",
     "panel.camera.mode.orbit": "궤도",
     "panel.camera.mode.fly": "비행",
+    "panel.camera.mode.walk": "걷기",
     "panel.camera.axis.heading": "방위각",
     "panel.camera.axis.pitch": "피치",
     "panel.camera.view.front": "정면",

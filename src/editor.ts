@@ -548,9 +548,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // Exit Camera View Mode so reset takes effect on the viewport camera
         camera.cameraViewMode = false;
 
-        if (camera.controlMode === 'fly' && camera.flyEntryPose) {
-            // Fly mode: restore the snapshot captured when entering fly mode
+        if ((camera.controlMode === 'fly' || camera.controlMode === 'walk') && camera.flyEntryPose) {
+            // Fly/walk mode: restore the snapshot captured when entering the mode
             const pose = camera.flyEntryPose;
+            if (camera.controlMode === 'walk') camera.exitWalk();
             camera.setFocalPoint(pose.focalPoint, 1);
             camera.setAzimElev(pose.azim, pose.elev, 1);
             camera.setDistance(pose.distance, 1);
@@ -1511,39 +1512,50 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         setCameraMode(events.invoke('camera.mode') === 'centers' ? 'rings' : 'centers');
     });
 
-    // camera control mode (orbit/fly)
+    // camera control mode (orbit / fly / walk)
 
-    let controlMode: 'orbit' | 'fly' = 'orbit';
+    let controlMode: 'orbit' | 'fly' | 'walk' = 'orbit';
 
-    const setControlMode = (mode: 'orbit' | 'fly') => {
-        if (mode !== controlMode) {
-            // when switching to fly mode, snapshot the current orbit view as the
-            // "fly entry pose" so reset-camera can restore it later
-            if (mode === 'fly') {
-                const cam = scene.camera;
-                cam.flyEntryPose = {
-                    azim: cam.azim,
-                    elev: cam.elevation,
-                    focalPoint: cam.focalPoint.clone(),
-                    distance: cam.distance
-                };
-            } else {
-                // switching back to orbit: discard any frozen camera position
-                // left over from fly-mode look() or auto-rotate, so the camera
-                // resumes rotating around the focal point.
-                scene.camera.lookCameraPos = null;
-            }
-            controlMode = mode;
-            scene.camera.controlMode = mode;
-            events.fire('camera.controlMode', controlMode);
+    const setControlMode = (mode: 'orbit' | 'fly' | 'walk') => {
+        if (mode === controlMode) return;
+        const cam = scene.camera;
+        if (mode === 'fly' || mode === 'walk') {
+            // snapshot the current orbit view so reset-camera / exiting back to
+            // orbit can restore it later
+            cam.flyEntryPose = {
+                azim: cam.azim,
+                elev: cam.elevation,
+                focalPoint: cam.focalPoint.clone(),
+                distance: cam.distance
+            };
         }
+        if (mode === 'walk') {
+            // first-person floor traversal at eye height above the scene floor
+            const bound = scene.bound;
+            const groundY = bound && Number.isFinite(bound.center.y) ?
+                bound.center.y - bound.halfExtents.y :
+                0;
+            const eyeH = Math.max(cam.sceneRadius * 0.04, 0.05);
+            cam.prepareWalk(groundY, eyeH);
+        } else if (controlMode === 'walk') {
+            // leaving walk: re-point orbit at the current first-person pose
+            cam.exitWalk();
+        } else if (mode === 'orbit') {
+            // switching back to orbit: discard any frozen camera position
+            // left over from fly-mode look() or auto-rotate, so the camera
+            // resumes rotating around the focal point.
+            cam.lookCameraPos = null;
+        }
+        controlMode = mode;
+        cam.controlMode = mode;
+        events.fire('camera.controlMode', controlMode);
     };
 
     events.function('camera.controlMode', () => {
         return controlMode;
     });
 
-    events.on('camera.setControlMode', (mode: 'orbit' | 'fly') => {
+    events.on('camera.setControlMode', (mode: 'orbit' | 'fly' | 'walk') => {
         setControlMode(mode);
     });
 

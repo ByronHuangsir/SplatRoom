@@ -58,6 +58,7 @@
     "panel.camera.mode": "Modo da Câmera",
     "panel.camera.mode.orbit": "Órbita",
     "panel.camera.mode.fly": "Voar",
+    "panel.camera.mode.walk": "Andar",
     "panel.camera.axis.heading": "Direção",
     "panel.camera.axis.pitch": "Inclinação",
     "panel.camera.view.front": "Frente",

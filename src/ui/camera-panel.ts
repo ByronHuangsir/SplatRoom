@@ -20,6 +20,7 @@ class CameraPanel extends Container {
     private _collapseArrow: Label;
     private _orbitBtn: Button;
     private _flyBtn: Button;
+    private _walkBtn: Button;
     private _inertiaToggle: BooleanInput;
     private _rotateOrbitBtn: Button;
     private _rotateOffBtn: Button;
@@ -172,8 +173,13 @@ class CameraPanel extends Container {
         i18n.bindText(this._flyBtn, 'panel.camera.mode.fly');
         this._flyBtn.on('click', () => this._camEvents.fire('camera.setControlMode', 'fly'));
 
+        this._walkBtn = new Button({ class: 'camera-panel-mode-btn' });
+        i18n.bindText(this._walkBtn, 'panel.camera.mode.walk');
+        this._walkBtn.on('click', () => this._camEvents.fire('camera.setControlMode', 'walk'));
+
         modeButtons.append(this._orbitBtn);
         modeButtons.append(this._flyBtn);
+        modeButtons.append(this._walkBtn);
         modeRow.append(modeLabel);
         modeRow.append(modeButtons);
         this._contentContainer.append(modeRow);
@@ -669,14 +675,10 @@ class CameraPanel extends Container {
         const events = this._camEvents;
 
         // camera control mode
-        events.on('camera.controlMode', (mode: 'orbit' | 'fly') => {
-            if (mode === 'orbit') {
-                this._orbitBtn.class.add('active');
-                this._flyBtn.class.remove('active');
-            } else {
-                this._flyBtn.class.add('active');
-                this._orbitBtn.class.remove('active');
-            }
+        events.on('camera.controlMode', (mode: 'orbit' | 'fly' | 'walk') => {
+            this._orbitBtn.class[mode === 'orbit' ? 'add' : 'remove']('active');
+            this._flyBtn.class[mode === 'fly' ? 'add' : 'remove']('active');
+            this._walkBtn.class[mode === 'walk' ? 'add' : 'remove']('active');
         });
 
         // auto-rotate state sync

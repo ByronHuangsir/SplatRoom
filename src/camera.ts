@@ -114,7 +114,14 @@ class Camera extends Element {
 
     flySpeed = 1;
 
-    controlMode: 'orbit' | 'fly' = 'orbit';
+    controlMode: 'orbit' | 'fly' | 'walk' = 'orbit';
+
+    // ---- walk mode (first-person floor traversal, V3) ----
+    // Ground plane height + eye height used while controlMode === 'walk'.
+    // The camera keeps a frozen position (lookCameraPos) at groundY + eyeH
+    // and moves horizontally with WASD; look() turns in place.
+    walkGroundY = 0;
+    walkEyeHeight = 0.1;
 
     // during fly-mode look, stores the camera position that must stay fixed
     // while the azim/elev tween smoothly converges
@@ -309,6 +316,62 @@ class Camera extends Element {
         this.lookCameraPos = cameraPos;
     }
 
+    // ---- walk mode (first-person floor traversal, V3) ----
+
+    /**
+     * Enter walk mode. `groundY` is the walkable floor height and `eyeHeight`
+     * the eye above it; the eye is placed above the ground at the current
+     * camera's x/z. Renders via the frozen-position branch (lookCameraPos) so
+     * WASD walks and look() turns the eye in place.
+     */
+    prepareWalk(groundY: number, eyeHeight: number) {
+        this.walkGroundY = groundY;
+        this.walkEyeHeight = Math.max(0.02, eyeHeight);
+        if (!this.lookCameraPos) {
+            const d = this.distance * this.sceneRadius / this.fovFactor;
+            Camera.calcForwardVec(forwardVec, this.azim, this.elevation);
+            this.lookCameraPos = this.focalPoint.clone().add(forwardVec.clone().mulScalar(d));
+        }
+        this.lookCameraPos.x = this.mainCamera.getPosition().x;
+        this.lookCameraPos.z = this.mainCamera.getPosition().z;
+        this.lookCameraPos.y = this.walkGroundY + this.walkEyeHeight;
+        // modest pitch clamp for first person — tween directly (setAzimElev
+        // would clear the frozen lookCameraPos we just established)
+        const elev = Math.max(-80, Math.min(80, this.elevation));
+        if (elev !== this.elevation) {
+            this.azimElevTween.goto({ azim: this.azim, elev }, 0);
+        }
+        this.scene.forceRender = true;
+    }
+
+    /** Move the walk eye horizontally by a world-space delta (floor-locked). */
+    walkMove(dx: number, dy: number, dz: number) {
+        if (!this.lookCameraPos) {
+            this.prepareWalk(this.walkGroundY, this.walkEyeHeight);
+        }
+        this.lookCameraPos.x += dx;
+        this.lookCameraPos.z += dz;
+        // keep the eye glued to the floor plane (no free vertical in walk mode)
+        this.lookCameraPos.y = this.walkGroundY + this.walkEyeHeight;
+        this.scene.forceRender = true;
+    }
+
+    /**
+     * Leave walk mode back into orbit at the current first-person pose: the
+     * focal point is re-pointed so the orbit camera sits where the walk eye
+     * was (azim/elev already track the look direction).
+     */
+    exitWalk() {
+        const camPos = this.lookCameraPos ? this.lookCameraPos.clone() : this.mainCamera.getPosition();
+        const d = this.distance * this.sceneRadius / this.fovFactor;
+        Camera.calcForwardVec(forwardVec, this.azim, this.elevation);
+        const focal = camPos.clone().add(forwardVec.clone().mulScalar(d));
+        this.lookCameraPos = null;
+        this.focalPointTween.goto(focal, 0);
+        this.azimElevTween.goto({ azim: this.azim, elev: this.elevation }, 0);
+        this.scene.forceRender = true;
+    }
+
     /**
      * Adjust heading (azimuth) by delta degrees. In orbit mode rotates around
      * the focal point; in fly mode rotates around the camera position.
@@ -326,6 +389,10 @@ class Camera extends Element {
             const newFocalPoint = pos.clone().sub(forwardVec.clone().mulScalar(d));
             this.focalPointTween.goto(newFocalPoint, this.scene.config.controls.dampingFactor);
             this.lookCameraPos = pos;
+        } else if (this.controlMode === 'walk') {
+            // Walk mode: yaw in place — tween directly so the frozen eye
+            // position (lookCameraPos) is not cleared by setAzimElev.
+            this.azimElevTween.goto({ azim: mod(this.azim + delta, 360), elev: this.elevation }, 0);
         } else {
             // Orbit mode: rotate around focal point
             this.setAzimElev(this.azim + delta, this.elevation);
@@ -349,6 +416,10 @@ class Camera extends Element {
             const newFocalPoint = pos.clone().sub(forwardVec.clone().mulScalar(d));
             this.focalPointTween.goto(newFocalPoint, this.scene.config.controls.dampingFactor);
             this.lookCameraPos = pos;
+        } else if (this.controlMode === 'walk') {
+            // Walk mode: pitch in place — tween directly (keeps lookCameraPos)
+            const elev = Math.max(this.minElev, Math.min(this.maxElev, this.elevation + delta));
+            this.azimElevTween.goto({ azim: this.azim, elev }, 0);
         } else {
             // Orbit mode: rotate around focal point
             this.setAzimElev(this.azim, this.elevation + delta);
@@ -772,7 +843,10 @@ class Camera extends Element {
 
         if (this.lookCameraPos) {
             cameraPosition.copy(this.lookCameraPos);
-            if (this.azimElevTween.timer >= this.azimElevTween.transitionTime) {
+            if (this.controlMode === 'walk') {
+                // first person: eye stays glued to the floor plane
+                cameraPosition.y = this.walkGroundY + this.walkEyeHeight;
+            } else if (this.azimElevTween.timer >= this.azimElevTween.transitionTime) {
                 this.lookCameraPos = null;
             }
         } else {

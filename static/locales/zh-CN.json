@@ -58,6 +58,7 @@
     "panel.camera.mode": "相机模式",
     "panel.camera.mode.orbit": "轨道",
     "panel.camera.mode.fly": "飞行",
+    "panel.camera.mode.walk": "步行",
     "panel.camera.axis.heading": "航向",
     "panel.camera.axis.pitch": "俯仰",
     "panel.camera.view.front": "前",

@@ -66,6 +66,11 @@ class PointerController {
 
         // dispatch one drag-step (dx, dy) to the action mapped for `button`
         const applyButtonAction = (button: number, dx: number, dy: number, px: number, py: number) => {
+            // First-person walk: any drag turns the head (ignore custom mapping)
+            if (camera.controlMode === 'walk') {
+                look(dx, dy);
+                return;
+            }
             const action = getActionForButton(button);
             if (action === 'pan') {
                 pan(px, py, dx, dy);
@@ -226,7 +231,7 @@ class PointerController {
                     touch.x = event.offsetX;
                     touch.y = event.offsetY;
 
-                    if (camera.controlMode === 'fly') {
+                    if (camera.controlMode === 'fly' || camera.controlMode === 'walk') {
                         look(dx, dy);
                     } else {
                         orbit(dx, dy);
@@ -240,14 +245,18 @@ class PointerController {
                     const my = (touches[0].y + touches[1].y) * 0.5;
                     const ml = dist(touches[0].x, touches[0].y, touches[1].x, touches[1].y);
 
-                    if (camera.controlMode === 'fly') {
+                    if (camera.controlMode === 'fly' || camera.controlMode === 'walk') {
                         // In fly mode, pinch moves forward/backward by moving focal point
                         const zoomDelta = (ml - midlen) * 0.01;
                         const worldTransform = camera.mainCamera.getWorldTransform();
                         const zAxis = worldTransform.getZ();
                         moveVec.copy(zAxis).mulScalar(-zoomDelta * camera.flySpeed);
-                        const p = camera.focalPoint.add(moveVec);
-                        camera.setFocalPoint(p);
+                        if (camera.controlMode === 'walk') {
+                            camera.walkMove(moveVec.x, 0, moveVec.z);
+                        } else {
+                            const p = camera.focalPoint.add(moveVec);
+                            camera.setFocalPoint(p);
+                        }
                     } else {
                         pan(mx, my, (mx - midx), (my - midy));
                         zoom((ml - midlen) * 0.01);
@@ -314,7 +323,7 @@ class PointerController {
             const isPinch = (event.ctrlKey && !ctrlDown) || event.metaKey;
             const isOrbit = event.ctrlKey && ctrlDown;
 
-            if (camera.controlMode === 'fly') {
+            if (camera.controlMode === 'fly' || camera.controlMode === 'walk') {
                 if (isOrbit) {
                     look(deltaX, deltaY);
                 } else if (event.shiftKey) {
@@ -325,13 +334,17 @@ class PointerController {
                     // with the same pinch/scroll factors as the orbit path
                     zoom(isPinch ? deltaY * -0.02 : wheelDelta * -0.002);
                 } else {
-                    // Bare scroll / pinch: move focal point forward/backward
+                    // Bare scroll / pinch: walk/fly forward or backward
                     const factor = camera.flySpeed * 0.01;
                     const worldTransform = camera.mainCamera.getWorldTransform();
                     const zAxis = worldTransform.getZ();
                     moveVec.copy(zAxis).mulScalar(wheelDelta * factor);
-                    const p = camera.focalPoint.add(moveVec);
-                    camera.setFocalPoint(p);
+                    if (camera.controlMode === 'walk') {
+                        camera.walkMove(moveVec.x, 0, moveVec.z);
+                    } else {
+                        const p = camera.focalPoint.add(moveVec);
+                        camera.setFocalPoint(p);
+                    }
                 }
             } else if (isOrbit) {
                 orbit(deltaX, deltaY);
@@ -390,9 +403,10 @@ class PointerController {
             ctrlDown = false;
         };
 
-        // Helper to switch to fly mode when a fly key is pressed
+        // Helper to switch to fly mode when a fly key is pressed. Walk mode is
+        // a movement mode too — a WASD press must not pull the user out of it.
         const handleFlyKey = (down: boolean) => {
-            if (down && camera.controlMode !== 'fly') {
+            if (down && camera.controlMode === 'orbit') {
                 camera.scene.events.fire('camera.setControlMode', 'fly');
             }
         };
@@ -480,13 +494,16 @@ class PointerController {
             const wheelActive = performance.now() - lastWheelTime < 150;
             camera.userDragging = pressedButton !== -1 || inertiaActive || wheelActive;
 
-            // ---- fly-mode WASD movement ----
-            if (camera.controlMode !== 'fly') return;
+            // ---- fly/walk WASD movement ----
+            // walk mode reuses the fly movement keys, but moves the eye
+            // horizontally (floor-locked) instead of the orbit focal point.
+            const isWalk = camera.controlMode === 'walk';
+            if (camera.controlMode !== 'fly' && !isWalk) return;
 
-            // Fly mode: WASD for movement, Q/E for up/down - moves focal point
+            // Fly/walk: WASD for movement, Q/E for up/down (ignored in walk)
             const forward = (flyForward ? 1 : 0) - (flyBackward ? 1 : 0);
             const strafe = (flyRight ? 1 : 0) - (flyLeft ? 1 : 0);
-            const vertical = (flyUp ? 1 : 0) - (flyDown ? 1 : 0);
+            const vertical = isWalk ? 0 : (flyUp ? 1 : 0) - (flyDown ? 1 : 0);
 
             if (forward || strafe || vertical) {
                 // Calculate speed modifier based on current modifier key state
@@ -517,10 +534,15 @@ class PointerController {
                     moveVec.y += vertical * factor;
                 }
 
-                // Move the focal point (camera follows due to orbit calculation)
-                const p = camera.focalPoint.add(moveVec);
-                camera.setFocalPoint(p);
-                // Fly-key movement is interaction too — overlays keep skipping.
+                if (isWalk) {
+                    // walk: translate the frozen eye position horizontally
+                    camera.walkMove(moveVec.x, 0, moveVec.z);
+                } else {
+                    // Move the focal point (camera follows due to orbit calculation)
+                    const p = camera.focalPoint.add(moveVec);
+                    camera.setFocalPoint(p);
+                }
+                // Fly/walk-key movement is interaction too — overlays keep skipping.
                 camera.userDragging = true;
             }
         };

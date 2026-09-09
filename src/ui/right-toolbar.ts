@@ -183,9 +183,11 @@ class RightToolbar extends Container {
             showHideSplats.class[value ? 'add' : 'remove']('active');
         });
 
-        events.on('camera.controlMode', (mode: 'orbit' | 'fly') => {
+        events.on('camera.controlMode', (mode: 'orbit' | 'fly' | 'walk') => {
             orbitMode.class[mode === 'orbit' ? 'add' : 'remove']('active');
-            flyMode.class[mode === 'fly' ? 'add' : 'remove']('active');
+            // fly and walk are both first-person movement modes sharing the fly
+            // toolbar button's visual state
+            flyMode.class[mode === 'fly' || mode === 'walk' ? 'add' : 'remove']('active');
         });
 
         events.on('colorPanel.visible', (visible: boolean) => {
