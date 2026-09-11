@@ -1,3 +1,5 @@
+import { Vec3 } from 'playcanvas';
+
 import { Events } from '../events';
 
 interface Tool {
@@ -7,6 +9,9 @@ interface Tool {
     // tool is active. return true if consumed, otherwise the corresponding
     // transform tool is activated instead.
     setTransformMode?: (mode: 'translate' | 'rotate' | 'scale') => boolean;
+    // optional: the thing this tool currently manipulates (e.g. its volume), so
+    // the focus shortcut frames that instead of the selection bound
+    getFocus?: () => { focalPoint: Vec3, radius: number } | null;
 }
 
 class ToolManager {
@@ -38,6 +43,13 @@ class ToolManager {
             return coordSpace;
         });
 
+        // what the active tool wants framed (its volume), or null when the
+        // active tool has nothing of its own to frame
+        events.function('tool.focus', () => {
+            const tool = this.active ? this.tools.get(this.active) : null;
+            return tool?.getFocus?.() ?? null;
+        });
+
         events.on('tool.setCoordSpace', (value: 'local' | 'world') => {
             setCoordSpace(value);
         });
@@ -45,6 +57,10 @@ class ToolManager {
         events.on('tool.toggleCoordSpace', () => {
             setCoordSpace(coordSpace === 'local' ? 'world' : 'local');
         });
+
+        // publish the initial state: the toolbar and other pre-built UI show the
+        // active coordinate space, and they are constructed before any toggle
+        events.fire('tool.coordSpace', coordSpace);
 
         // the 1/2/3 shortcuts switch the active tool's gizmo mode if it
         // supports one (box/sphere selection), otherwise activate the

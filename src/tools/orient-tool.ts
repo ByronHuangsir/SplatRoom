@@ -81,7 +81,7 @@ class OrientTool {
         i18n.bindText(clearButton, 'orient.clear');
 
         const selectToolbar = new Container({
-            class: 'select-toolbar',
+            class: ['select-toolbar', 'select-toolbar-tool'],
             hidden: true
         });
 

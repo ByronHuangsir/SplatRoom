@@ -25,6 +25,7 @@ class BoxSelection {
     activate: () => void;
     deactivate: () => void;
     setTransformMode: (mode: Exclude<ShapeGizmoMode, 'none'>) => boolean;
+    getFocus: () => { focalPoint: Vec3, radius: number };
 
     active = false;
 
@@ -218,6 +219,15 @@ class BoxSelection {
         this.setTransformMode = (mode) => {
             gizmo.toggleMode(mode);
             return true;
+        };
+
+        // the focus shortcut frames the volume while this tool is active
+        this.getFocus = () => {
+            const half = Math.sqrt(box.lenX * box.lenX + box.lenY * box.lenY + box.lenZ * box.lenZ) * 0.5;
+            return {
+                focalPoint: box.pivot.getPosition().clone(),
+                radius: half
+            };
         };
 
         const apply = (op: 'set' | 'add' | 'remove' | 'intersect') => {

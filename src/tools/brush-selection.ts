@@ -5,7 +5,7 @@ class BrushSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, busy?: boolean }) {
         // create svg
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.classList.add('tool-svg', 'hidden');
@@ -17,6 +17,14 @@ class BrushSelection {
         svg.appendChild(circle);
 
         const { canvas, context } = mask;
+
+        // track the pointer while the tool is inactive too (the tools overlay is
+        // hidden then), so activation places the cursor at the mouse
+        const pointer = { x: 0, y: 0 };
+        window.addEventListener('pointermove', (e: PointerEvent) => {
+            pointer.x = e.clientX;
+            pointer.y = e.clientY;
+        }, { capture: true, passive: true });
 
         let radius = 40;
 
@@ -51,6 +59,12 @@ class BrushSelection {
                 e.preventDefault();
                 e.stopPropagation();
 
+                // a stroke attempted while the previous selection is still
+                // pending is swallowed rather than left to orbit the camera
+                if (mask.busy) {
+                    return;
+                }
+
                 dragId = e.pointerId;
                 parent.setPointerCapture(dragId);
 
@@ -83,7 +97,11 @@ class BrushSelection {
         };
 
         const dragEnd = () => {
-            parent.releasePointerCapture(dragId);
+            // a touch that has lifted, or was cancelled, no longer holds the
+            // capture and releasing it throws
+            if (parent.hasPointerCapture(dragId)) {
+                parent.releasePointerCapture(dragId);
+            }
             dragId = undefined;
             canvas.style.display = 'none';
         };
@@ -95,12 +113,27 @@ class BrushSelection {
 
                 dragEnd();
 
-                await events.invoke(
-                    'select.byMask',
-                    opFromModifiers(e),
-                    canvas,
-                    context
-                );
+                // block new strokes until the async selection has consumed the
+                // shared mask canvas
+                mask.busy = true;
+                try {
+                    await events.invoke(
+                        'select.byMask',
+                        opFromModifiers(e),
+                        canvas,
+                        context
+                    );
+                } finally {
+                    mask.busy = false;
+                }
+            }
+        };
+
+        // a cancelled touch gets no pointerup, and a drag left open blocks every
+        // later one
+        const pointercancel = (e: PointerEvent) => {
+            if (e.pointerId === dragId) {
+                dragEnd();
             }
         };
 
@@ -116,9 +149,17 @@ class BrushSelection {
         this.activate = () => {
             svg.classList.remove('hidden');
             parent.style.display = 'block';
+
+            // place the cursor at the mouse rather than wherever the previous
+            // stroke ended (the overlay is hidden while the tool is inactive)
+            const rect = parent.getBoundingClientRect();
+            circle.setAttribute('cx', (pointer.x - rect.left).toString());
+            circle.setAttribute('cy', (pointer.y - rect.top).toString());
+
             parent.addEventListener('pointerdown', pointerdown);
             parent.addEventListener('pointermove', pointermove);
             parent.addEventListener('pointerup', pointerup);
+            parent.addEventListener('pointercancel', pointercancel);
             parent.addEventListener('wheel', wheel);
         };
 
@@ -132,6 +173,7 @@ class BrushSelection {
             parent.removeEventListener('pointerdown', pointerdown);
             parent.removeEventListener('pointermove', pointermove);
             parent.removeEventListener('pointerup', pointerup);
+            parent.removeEventListener('pointercancel', pointercancel);
             parent.removeEventListener('wheel', wheel);
         };
 

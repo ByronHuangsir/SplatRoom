@@ -25,6 +25,7 @@ class SphereSelection {
     activate: () => void;
     deactivate: () => void;
     setTransformMode: (mode: Exclude<ShapeGizmoMode, 'none'>) => boolean;
+    getFocus: () => { focalPoint: Vec3, radius: number };
 
     active = false;
 
@@ -185,6 +186,14 @@ class SphereSelection {
         this.setTransformMode = (mode) => {
             gizmo.toggleMode(mode);
             return true;
+        };
+
+        // the focus shortcut frames the volume while this tool is active
+        this.getFocus = () => {
+            return {
+                focalPoint: sphere.pivot.getPosition().clone(),
+                radius: sphere.radius
+            };
         };
 
         const apply = (op: 'set' | 'add' | 'remove' | 'intersect') => {

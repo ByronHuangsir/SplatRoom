@@ -163,7 +163,11 @@ class PointerController {
                         inertiaActive = true;
                     }
                     pressedButton = -1;
-                    target.releasePointerCapture(event.pointerId);
+                    // the capture may already be gone (implicit release, or a
+                    // pointerup that never had one): releasing again throws
+                    if (target.hasPointerCapture(event.pointerId)) {
+                        target.releasePointerCapture(event.pointerId);
+                    }
                     // Stay "dragging" while inertia coasts so overlays (PiP)
                     // keep skipping work until the view settles.
                     camera.userDragging = inertiaActive;
@@ -171,7 +175,9 @@ class PointerController {
             } else {
                 touches = touches.filter(touch => touch.id !== event.pointerId);
                 if (touches.length === 0) {
-                    target.releasePointerCapture(event.pointerId);
+                    if (target.hasPointerCapture(event.pointerId)) {
+                        target.releasePointerCapture(event.pointerId);
+                    }
                     camera.userDragging = false;
                 }
             }

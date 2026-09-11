@@ -65,7 +65,11 @@ class RectSelection {
         };
 
         const dragEnd = () => {
-            parent.releasePointerCapture(dragId);
+            // a touch that has lifted, or was cancelled, no longer holds the
+            // capture and releasing it throws
+            if (parent.hasPointerCapture(dragId)) {
+                parent.releasePointerCapture(dragId);
+            }
             dragId = undefined;
             svg.classList.add('hidden');
         };
@@ -77,24 +81,33 @@ class RectSelection {
 
                 const w = parent.clientWidth;
                 const h = parent.clientHeight;
+                const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
                 if (dragMoved) {
                     // rect select - wait for selection to complete before hiding rect
                     await events.invoke(
                         'select.rect',
                         opFromModifiers(e), {
-                            start: { x: Math.min(start.x, end.x) / w, y: Math.min(start.y, end.y) / h },
-                            end: { x: Math.max(start.x, end.x) / w, y: Math.max(start.y, end.y) / h }
+                            start: { x: clamp01(Math.min(start.x, end.x) / w), y: clamp01(Math.min(start.y, end.y) / h) },
+                            end: { x: clamp01(Math.max(start.x, end.x) / w), y: clamp01(Math.max(start.y, end.y) / h) }
                         });
                 } else {
                     // pick - wait for selection to complete before hiding rect
                     await events.invoke(
                         'select.point',
                         opFromModifiers(e),
-                        { x: e.offsetX / parent.clientWidth, y: e.offsetY / parent.clientHeight }
+                        { x: clamp01(e.offsetX / w), y: clamp01(e.offsetY / h) }
                     );
                 }
 
+                dragEnd();
+            }
+        };
+
+        // a cancelled touch gets no pointerup, and a drag left open blocks every
+        // later one
+        const pointercancel = (e: PointerEvent) => {
+            if (e.pointerId === dragId) {
                 dragEnd();
             }
         };
@@ -104,6 +117,7 @@ class RectSelection {
             parent.addEventListener('pointerdown', pointerdown);
             parent.addEventListener('pointermove', pointermove);
             parent.addEventListener('pointerup', pointerup);
+            parent.addEventListener('pointercancel', pointercancel);
         };
 
         this.deactivate = () => {
@@ -114,6 +128,7 @@ class RectSelection {
             parent.removeEventListener('pointerdown', pointerdown);
             parent.removeEventListener('pointermove', pointermove);
             parent.removeEventListener('pointerup', pointerup);
+            parent.removeEventListener('pointercancel', pointercancel);
         };
     }
 

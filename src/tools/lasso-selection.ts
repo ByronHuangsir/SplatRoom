@@ -7,7 +7,7 @@ class LassoSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, busy?: boolean }) {
         // create svg
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.classList.add('tool-svg', 'hidden');
@@ -79,18 +79,29 @@ class LassoSelection {
             context.fill();
 
             // wait for selection to complete
-            await events.invoke(
-                'select.byMask',
-                opFromModifiers(e),
-                canvas,
-                context
-            );
+            mask.busy = true;
+            try {
+                await events.invoke(
+                    'select.byMask',
+                    opFromModifiers(e),
+                    canvas,
+                    context
+                );
+            } finally {
+                mask.busy = false;
+            }
         };
 
         const pointerdown = (e: PointerEvent) => {
             if (dragId === undefined && (e.pointerType === 'mouse' ? e.button === 0 : e.isPrimary)) {
                 e.preventDefault();
                 e.stopPropagation();
+
+                // a stroke attempted while the previous selection is still
+                // pending is swallowed rather than left to orbit the camera
+                if (mask.busy) {
+                    return;
+                }
 
                 dragId = e.pointerId;
                 parent.setPointerCapture(dragId);
@@ -109,7 +120,11 @@ class LassoSelection {
         };
 
         const dragEnd = () => {
-            parent.releasePointerCapture(dragId);
+            // a touch that has lifted, or was cancelled, no longer holds the
+            // capture and releasing it throws
+            if (parent.hasPointerCapture(dragId)) {
+                parent.releasePointerCapture(dragId);
+            }
             dragId = undefined;
         };
 
@@ -128,12 +143,21 @@ class LassoSelection {
             }
         };
 
+        // a cancelled touch gets no pointerup, and a drag left open blocks every
+        // later one
+        const pointercancel = (e: PointerEvent) => {
+            if (e.pointerId === dragId) {
+                dragEnd();
+            }
+        };
+
         this.activate = () => {
             svg.classList.remove('hidden');
             parent.style.display = 'block';
             parent.addEventListener('pointerdown', pointerdown);
             parent.addEventListener('pointermove', pointermove);
             parent.addEventListener('pointerup', pointerup);
+            parent.addEventListener('pointercancel', pointercancel);
         };
 
         this.deactivate = () => {
@@ -146,6 +170,7 @@ class LassoSelection {
             parent.removeEventListener('pointerdown', pointerdown);
             parent.removeEventListener('pointermove', pointermove);
             parent.removeEventListener('pointerup', pointerup);
+            parent.removeEventListener('pointercancel', pointercancel);
         };
     }
 }

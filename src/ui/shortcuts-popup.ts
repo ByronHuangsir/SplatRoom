@@ -59,11 +59,14 @@ const popupConfig: Record<string, CategoryConfig> = {
             { id: 'select.all', localeKey: 'popup.shortcuts.select-all' },
             { id: 'select.none', localeKey: 'popup.shortcuts.deselect-all' },
             { id: 'select.invert', localeKey: 'popup.shortcuts.invert-selection' },
-            { id: 'select.delete', localeKey: 'popup.shortcuts.delete-selected-splats' }
+            { id: 'select.delete', localeKey: 'popup.shortcuts.delete-selected-splats' },
+            { id: 'selection.toggleUseDepth', localeKey: 'popup.shortcuts.toggle-selection-depth' },
+            { id: 'selection.toggleFootprint', localeKey: 'popup.shortcuts.toggle-selection-footprint' }
         ],
         hints: [
             { displayKey: 'Shift', localeKey: 'popup.shortcuts.add-to-selection' },
-            { displayKey: 'Ctrl', localeKey: 'popup.shortcuts.remove-from-selection' }
+            { displayKey: 'Ctrl', localeKey: 'popup.shortcuts.remove-from-selection' },
+            { displayKey: 'Shift + Ctrl', localeKey: 'popup.shortcuts.intersect-selection' }
         ]
     },
     tools: {
@@ -76,6 +79,7 @@ const popupConfig: Record<string, CategoryConfig> = {
             { id: 'tool.lassoSelection', localeKey: 'popup.shortcuts.lasso-selection' },
             { id: 'tool.polygonSelection', localeKey: 'popup.shortcuts.polygon-selection' },
             { id: 'tool.brushSelection', localeKey: 'popup.shortcuts.brush-selection' },
+            { id: 'tool.sphereBrushSelection', localeKey: 'popup.shortcuts.sphere-brush-selection' },
             { id: 'tool.floodSelection', localeKey: 'popup.shortcuts.flood-selection' },
             { id: 'tool.eyedropperSelection', localeKey: 'popup.shortcuts.eyedropper-selection' },
             { id: 'tool.deactivate', localeKey: 'popup.shortcuts.deactivate-tool' },

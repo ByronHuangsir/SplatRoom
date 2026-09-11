@@ -2,9 +2,16 @@
 // a front wall of gaussians and a second wall behind it, so depth / footprint
 // selection have something meaningful to discriminate. Writes to the path given
 // as argv[2].
+//
+//   --asym   front wall only in the UPPER half, back wall only in the LOWER
+//            half: makes a vertical flip in the render/pick mapping show up as
+//            a mismatched count.
 const fs = require('fs');
 
-const out = process.argv[2] || 'dist/test-model.ply';
+const args = process.argv.slice(2);
+const asym = args.includes('--asym');
+const positional = args.filter(a => !a.startsWith('--'));
+const out = positional[0] || 'dist/test-model.ply';
 
 const FRONT = 1200;
 const BACK = 800;
@@ -66,11 +73,14 @@ const write = (x, y, z, r, g, b) => {
 };
 
 for (let i = 0; i < FRONT; ++i) {
-    write((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, 0, 0.9, 0.3, 0.3);
+    // asymmetric mode: the front wall covers only the upper half of the model
+    const y = asym ? 0.05 + Math.random() * 0.9 : Math.random() - 0.5;
+    write((Math.random() - 0.5) * 2, y, 0, 0.9, 0.3, 0.3);
 }
 for (let i = 0; i < BACK; ++i) {
-    write((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, -0.6, 0.3, 0.3, 0.9);
+    const y = asym ? -0.95 + Math.random() * 0.9 : Math.random() - 0.5;
+    write((Math.random() - 0.5) * 2, y, -0.6, 0.3, 0.3, 0.9);
 }
 
 fs.writeFileSync(out, Buffer.concat([Buffer.from(header, 'ascii'), Buffer.from(data.buffer)]));
-console.log(`wrote ${out}: ${total} gaussians (${FRONT} front @z=0, ${BACK} back @z=-0.6)`);
+console.log(`wrote ${out}: ${total} gaussians (${FRONT} front @z=0${asym ? ' upper half' : ''}, ${BACK} back @z=-0.6${asym ? ' lower half' : ''})`);

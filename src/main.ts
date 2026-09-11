@@ -310,7 +310,10 @@ const main = async () => {
 
     const mask = {
         canvas: maskCanvas,
-        context: maskContext
+        context: maskContext,
+        // set while a tool's async selection is still consuming the shared
+        // stroke canvas, so a second stroke can't start and repaint it mid-flight
+        busy: false
     };
 
     // tool manager

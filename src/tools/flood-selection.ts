@@ -16,7 +16,7 @@ class FloodSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }, canvasContainer: Container) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, busy?: boolean }, canvasContainer: Container) {
 
         // create canvas
         const { canvas, context } = mask;
@@ -138,9 +138,15 @@ class FloodSelection {
                     y: Math.floor(e.offsetY)
                 };
 
-                await refreshSelection();
-
-                await apply(opFromModifiers(e));
+                // block new clicks until the async selection has consumed the
+                // shared mask canvas
+                mask.busy = true;
+                try {
+                    await refreshSelection();
+                    await apply(opFromModifiers(e));
+                } finally {
+                    mask.busy = false;
+                }
 
                 context.clearRect(0, 0, canvas.width, canvas.height);
             }
@@ -159,7 +165,9 @@ class FloodSelection {
             selectToolbar.hidden = true;
             canvasContainer.dom.removeEventListener('pointerdown', pointerdown);
             canvasContainer.dom.removeEventListener('pointermove', pointermove);
-            canvasContainer.dom.removeEventListener('pointerup', pointerup);
+            // removed with the same capture flag it was added with, otherwise the
+            // listener leaks across activations
+            canvasContainer.dom.removeEventListener('pointerup', pointerup, true);
             point = undefined;
         };
     }

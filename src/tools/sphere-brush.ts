@@ -12,7 +12,7 @@ class SphereBrushSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, busy?: boolean }) {
         // create svg
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.classList.add('tool-svg', 'hidden');
@@ -38,9 +38,6 @@ class SphereBrushSelection {
         svg.appendChild(defs);
 
         const circle = document.createElementNS(svg.namespaceURI, 'circle') as SVGCircleElement;
-        circle.setAttribute('fill', 'url(#sphere-brush-gradient)');
-        circle.setAttribute('stroke', '#f60');
-        circle.setAttribute('stroke-width', '1');
         svg.appendChild(circle);
 
         const { canvas, context } = mask;
@@ -51,7 +48,6 @@ class SphereBrushSelection {
 
         const prev = { x: 0, y: 0 };
         let dragId: number | undefined;
-        let busy = false;
         const points: { x: number, y: number, radius: number }[] = [];
 
         // track the pointer while the tool is inactive too (the tools overlay is
@@ -125,7 +121,7 @@ class SphereBrushSelection {
 
                 // a stroke attempted while the previous selection is still
                 // pending is swallowed rather than left to orbit the camera
-                if (busy) {
+                if (mask.busy) {
                     return;
                 }
 
@@ -183,7 +179,7 @@ class SphereBrushSelection {
 
                 // block new strokes until the async selection has consumed the
                 // shared mask canvas and finished its depth picking
-                busy = true;
+                mask.busy = true;
                 try {
                     await events.invoke(
                         'select.bySphereBrush',
@@ -196,7 +192,7 @@ class SphereBrushSelection {
                         canvas
                     );
                 } finally {
-                    busy = false;
+                    mask.busy = false;
                 }
             }
         };

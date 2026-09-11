@@ -7,7 +7,7 @@ class PolygonSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, busy?: boolean }) {
         // create svg
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.classList.add('tool-svg', 'hidden');
@@ -62,12 +62,17 @@ class PolygonSelection {
             context.fill();
 
             // wait for selection to complete
-            await events.invoke(
-                'select.byMask',
-                opFromModifiers(e),
-                canvas,
-                context
-            );
+            mask.busy = true;
+            try {
+                await events.invoke(
+                    'select.byMask',
+                    opFromModifiers(e),
+                    canvas,
+                    context
+                );
+            } finally {
+                mask.busy = false;
+            }
 
             // clear polygon after selection completes
             points = [];
@@ -93,6 +98,11 @@ class PolygonSelection {
             if (e.pointerType === 'mouse' ? e.button === 0 : e.isPrimary) {
                 e.preventDefault();
                 e.stopPropagation();
+
+                // a tap, or a click right after a keyboard tool switch, arrives
+                // without a preceding pointermove: take the point from the event
+                // so the first click is never dropped
+                currentPoint = { x: e.offsetX, y: e.offsetY };
 
                 if (isClosed()) {
                     await commitSelection(e);

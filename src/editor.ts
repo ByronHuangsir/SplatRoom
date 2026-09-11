@@ -514,6 +514,14 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // Exit Camera View Mode so focus takes effect on the viewport camera
         scene.camera.cameraViewMode = false;
 
+        // a tool with its own volume (sphere/box selection) frames that instead
+        // of the selection bound
+        const toolFocus = events.invoke('tool.focus') as { focalPoint: Vec3, radius: number } | null;
+        if (toolFocus) {
+            scene.camera.focus({ focalPoint: toolFocus.focalPoint, radius: toolFocus.radius, speed: 1 });
+            return;
+        }
+
         const splats = selectedSplats();
         if (splats.length === 0) {
             scene.camera.focus();
@@ -966,22 +974,13 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
     });
 
-    let maskTexture: Texture = null;
-
     events.function('select.byMask', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
         const method = screenSelectionMethod();
 
-        // create/refresh the mask texture once per stroke (GPU center pass)
-        const getMaskTexture = () => {
-            if (!maskTexture || maskTexture.width !== canvas.width || maskTexture.height !== canvas.height) {
-                if (maskTexture) {
-                    maskTexture.destroy();
-                }
-                maskTexture = new Texture(scene.graphicsDevice);
-            }
-            maskTexture.setSource(canvas);
-            return maskTexture;
-        };
+        // snapshot the stroke into an op-private texture: a cached texture could
+        // be repainted by a later stroke before the queued intersect reads it
+        const maskTexture = new Texture(scene.graphicsDevice);
+        maskTexture.setSource(canvas);
 
         // visible-footprint pass: front-most splats whose rendered gaussian
         // covers a stroked pixel of the mask.
@@ -1038,25 +1037,29 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             return new Uint32Array(selected).sort();
         };
 
-        for (const splat of selectedSplats()) {
-            if (method === 'centers') {
-                await runSelectIntersect(splat, op, { mask: getMaskTexture() });
-            } else if (method === 'footprint') {
-                // the splat's projected gaussian extent vs the stroke, through
-                // all depths (a wider test than the center test)
-                await runSelectIntersect(splat, op, { mask: getMaskTexture(), footprint: getFootprint() });
-            } else {
-                // depth: visible splats under the stroke, narrowed to centers
-                // in the stroke when the footprint toggle is off
-                const ids = await pickMaskIds(splat);
-                if (getFootprint() > 0 || !ids.length) {
-                    events.fire('edit.add', new SelectOp(splat, op, ids));
+        try {
+            for (const splat of selectedSplats()) {
+                if (method === 'centers') {
+                    await runSelectIntersect(splat, op, { mask: maskTexture });
+                } else if (method === 'footprint') {
+                    // the splat's projected gaussian extent vs the stroke, through
+                    // all depths (a wider test than the center test)
+                    await runSelectIntersect(splat, op, { mask: maskTexture, footprint: getFootprint() });
                 } else {
-                    const center = await intersectHits(splat, { mask: getMaskTexture() });
-                    events.fire('edit.add', new SelectOp(splat, op, retainVisibleIds(center, ids, splat.splatData.numSplats)));
-                    scene.dataProcessor.releaseMask(center);
+                    // depth: visible splats under the stroke, narrowed to centers
+                    // in the stroke when the footprint toggle is off
+                    const ids = await pickMaskIds(splat);
+                    if (getFootprint() > 0 || !ids.length) {
+                        events.fire('edit.add', new SelectOp(splat, op, ids));
+                    } else {
+                        const center = await intersectHits(splat, { mask: maskTexture });
+                        events.fire('edit.add', new SelectOp(splat, op, retainVisibleIds(center, ids, splat.splatData.numSplats)));
+                        scene.dataProcessor.releaseMask(center);
+                    }
                 }
             }
+        } finally {
+            maskTexture.destroy();
         }
     });
 
@@ -1176,7 +1179,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     // TO DO:
     // -  alternative distance metrics such as HSV.
     // -  alternative UI for threshold, two handles for min/max?
-    events.function('select.colorMatch', async (op: 'add'|'remove'|'set', point: { x: number, y: number }, threshold = 0) => {
+    events.function('select.colorMatch', async (op: 'add'|'remove'|'set'|'intersect', point: { x: number, y: number }, threshold = 0) => {
         const splats = selectedSplats();
         const targetSize = scene.targetSize;
         if (!splats.length || !targetSize || !point) {
