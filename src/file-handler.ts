@@ -7,6 +7,7 @@ import { ElementType } from './element';
 import { Events } from './events';
 import { BrowserFileSystem, MappedReadFileSystem } from './io';
 import { attachLodFromFile } from './lod/lod-file';
+import { renderDiagnostics } from './render-diagnostics';
 import { Scene } from './scene';
 import { Splat } from './splat';
 import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat-serialize';
@@ -269,6 +270,38 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
         });
     };
 
+    // Give the engine a moment to finish setting the instance up (the sorter and
+    // the first sort land a frame or two after the element is added), then say
+    // what is missing if the splat still cannot be drawn. Silence here is what
+    // made "the model opens but nothing shows" hard to diagnose.
+    const reportIfNotRenderable = async (model: Splat, filename: string) => {
+        await new Promise<void>((resolve) => {
+            window.setTimeout(() => resolve(), 4000);
+        });
+        // the user may have closed or replaced the model in the meantime
+        if (!model.scene || !model.entity?.parent) {
+            return;
+        }
+        const diag = renderDiagnostics(model);
+        if (diag.ok) {
+            return;
+        }
+        console.warn(`[SplatRoom] '${filename}' ${diag.summary}`, diag.facts);
+        await events.invoke('showPopup', {
+            type: 'error',
+            header: i18n.t('popup.error-loading'),
+            message: `'${filename}' loaded but cannot be displayed.\n\n${diag.summary}\n\n` +
+                `Diagnostics: ${JSON.stringify(diag.facts)}\n` +
+                'Run splatDiag() in the developer console for the same report.'
+        });
+    };
+
+    // console helper: splatDiag() reports why each loaded model is (or is not)
+    // renderable — the quickest thing to paste back when a model loads blank
+    (window as any).splatDiag = () => {
+        return (scene.getElementsByType(ElementType.splat) as Splat[]).map(renderDiagnostics);
+    };
+
     // import splat model(s) - handles single files, SOG, and LCC formats
     const importSplatModel = async (files: ImportFile[], animationFrame: boolean) => {
         try {
@@ -318,6 +351,12 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             // distance (no re-decimation). Best-effort.
             if (isContainer) {
                 void attachLodFromFile(fileSystem, mainFile.filename, model);
+            }
+            // a model that loads but cannot be drawn would otherwise leave an
+            // empty viewport with no explanation: check shortly after the load
+            // and report what is missing
+            if (!animationFrame) {
+                void reportIfNotRenderable(model, filename);
             }
             return model;
         } catch (error) {
