@@ -1,6 +1,8 @@
 import {
     ADDRESS_CLAMP_TO_EDGE,
+    FILTER_NEAREST,
     PIXELFORMAT_RGBA8,
+    PIXELFORMAT_RGBA32F,
     SEMANTIC_POSITION,
     drawQuadWithShader,
     GraphicsDevice,
@@ -19,34 +21,47 @@ import { vertexShader, fragmentShader } from '../shaders/intersection-shader';
 import { Splat } from '../splat';
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 
+// every mode accepts `footprint`: 0 (default) tests the splat's center point,
+// >0 widens the test by the splat's rendered extent (the 2*sqrt(2)-sigma
+// ellipsoid the renderer rasterizes) scaled by that factor, so a splat whose
+// visible footprint touches the region counts even when its center falls
+// outside it (SuperSplat 3 semantics).
 type MaskOptions = {
     mask: Texture;
+    footprint?: number;
 };
 
 type RectOptions = {
     rect: { x1: number, y1: number, x2: number, y2: number };
+    footprint?: number;
 };
 
 type SphereOptions = {
     // transform mapping the unit sphere (diameter 1) to world space
     sphere: { transform: Mat4 };
+    footprint?: number;
 };
 
 type BoxOptions = {
     // transform mapping the unit cube (side 1) to world space
     box: { transform: Mat4 };
+    footprint?: number;
 };
 
-// surface-only (Selection Depth): when `surfaceOnly` is set and `surfaceMap`
-// (the RGBA8 id pass texture, see camera.renderSurfaceMap) is provided, a splat
-// only counts when it is the front-most splat at its projected center pixel.
-// Applies to every shape mode.
-type SurfaceOptions = {
-    surfaceOnly?: boolean;
-    surfaceMap?: Texture;
+// sphere brush: a stroke sampled into a world-space path (SuperSplat's mode 4).
+// Points are flattened as x, y, z, signed radius; a negative radius marks the
+// start of a new subpath (a depth discontinuity in the stroke) while keeping
+// that point's sphere. The stroke mask gates candidates by their projected
+// center when footprint is 0, matching the brush's visible-stroke semantics.
+type SphereBrushOptions = {
+    sphereBrush: {
+        points: Float32Array;
+        mask: Texture;
+        footprint?: number;
+    };
 };
 
-type IntersectOptions = MaskOptions | RectOptions | SphereOptions | BoxOptions | SurfaceOptions;
+type IntersectOptions = MaskOptions | RectOptions | SphereOptions | BoxOptions | SphereBrushOptions;
 
 const shapeInvMat = new Mat4();
 const identityMat = new Mat4();
@@ -64,6 +79,7 @@ class Intersect {
     private shader: Shader = null;
     private texture: Texture = null;
     private renderTarget: RenderTarget = null;
+    private pathTexture: Texture = null;
 
     constructor(device: GraphicsDevice) {
         this.device = device;
@@ -72,6 +88,29 @@ class Intersect {
             height: 1,
             format: PIXELFORMAT_RGBA8
         });
+    }
+
+    // grow-only path texture (one RGBA32F texel per sphere-brush path point):
+    // the shader reads pathCount entries, so a larger retained texture avoids
+    // reallocating on every stroke's slightly different sample count
+    private getPathTexture(count: number) {
+        if (!this.pathTexture || this.pathTexture.width < count) {
+            this.pathTexture?.destroy();
+            this.pathTexture = new Texture(this.device, {
+                name: 'sphereBrushPath',
+                width: count,
+                height: 1,
+                format: PIXELFORMAT_RGBA32F,
+                mipmaps: false,
+                addressU: ADDRESS_CLAMP_TO_EDGE,
+                addressV: ADDRESS_CLAMP_TO_EDGE,
+                // float textures are only filterable with an extension, and the
+                // shader fetches exact texels anyway
+                minFilter: FILTER_NEAREST,
+                magFilter: FILTER_NEAREST
+            });
+        }
+        return this.pathTexture;
     }
 
     private getResources(width: number, numSplats: number) {
@@ -125,7 +164,10 @@ class Intersect {
         const { scope } = device;
 
         const numSplats = splat.splatData.numSplats;
-        const transformA = (splat.entity.gsplat.instance.resource as any).getTexture('transformA');
+        const resource = splat.entity.gsplat.instance.resource as any;
+        const transformA = resource.getTexture('transformA');
+        // per-splat scale (xyz) + rotation z, used by the footprint tests
+        const transformB = resource.getTexture('transformB');
         const splatTransform = splat.transformTexture;
         const transformPalette = splat.transformPalette.texture;
 
@@ -136,35 +178,45 @@ class Intersect {
         // allocate resources
         const resources = this.getResources(transformA.width, numSplats);
 
+        // footprint is carried by whichever shape option is in play (the brush
+        // keeps it inside its own options object)
+        const footprint = (options as MaskOptions).footprint ??
+            (options as SphereOptions).footprint ??
+            (options as SphereBrushOptions).sphereBrush?.footprint ??
+            0;
+
         resolve(scope, {
             transformA,
+            transformB,
             splatTransform,
             transformPalette,
             splat_params: [transformA.width, numSplats],
             matrix_model: splat.entity.getWorldTransform().data,
             matrix_viewProjection: this.viewProjectionMat.data,
-            output_params: [resources.texture.width, resources.texture.height]
+            output_params: [resources.texture.width, resources.texture.height],
+            footprint
         });
 
         const maskOptions = options as MaskOptions;
-
-        if (maskOptions.mask) {
-            resolve(scope, {
-                mode: 0,
-                mask: maskOptions.mask,
-                mask_params: [maskOptions.mask.width, maskOptions.mask.height]
-            });
-        } else {
-            resolve(scope, {
-                mask: this.dummyTexture,
-                mask_params: [0, 0]
-            });
-        }
-
         const rectOptions = options as RectOptions;
+        const sphereOptions = options as SphereOptions;
+        const boxOptions = options as BoxOptions;
+        const sphereBrush = (options as SphereBrushOptions).sphereBrush;
+
+        // the sphere brush gates candidates with the stroke mask when footprint
+        // is 0 (its "visible stroke" semantics), so that mask doubles as the
+        // mode-0 mask
+        const maskTexture = sphereBrush?.mask ?? maskOptions.mask;
+        resolve(scope, maskTexture ? {
+            mask: maskTexture,
+            mask_params: [maskTexture.width, maskTexture.height]
+        } : {
+            mask: this.dummyTexture,
+            mask_params: [0, 0]
+        });
+
         if (rectOptions.rect) {
             resolve(scope, {
-                mode: 1,
                 rect_params: [
                     rectOptions.rect.x1 * 2.0 - 1.0,
                     rectOptions.rect.y1 * 2.0 - 1.0,
@@ -178,9 +230,45 @@ class Intersect {
             });
         }
 
-        const sphereOptions = options as SphereOptions;
-        const boxOptions = options as BoxOptions;
-        if (sphereOptions.sphere) {
+        // path uniforms are always resolved: a stale path must never be read by
+        // a following non-brush pass
+        const points = sphereBrush?.points;
+        const pathCount = points ? Math.floor(points.length / 4) : 0;
+        const pathMin = [0, 0, 0];
+        const pathMax = [0, 0, 0];
+        if (pathCount > 0) {
+            // world-space bounds of the path (each capsule segment widened by
+            // its own radius); the shader culls candidates against this before
+            // walking the path
+            pathMin.fill(Infinity);
+            pathMax.fill(-Infinity);
+            for (let i = 0; i < pathCount; ++i) {
+                const radius = Math.abs(points[i * 4 + 3]);
+                for (let axis = 0; axis < 3; ++axis) {
+                    const v = points[i * 4 + axis];
+                    pathMin[axis] = Math.min(pathMin[axis], v - radius);
+                    pathMax[axis] = Math.max(pathMax[axis], v + radius);
+                }
+            }
+
+            const pathTexture = this.getPathTexture(pathCount);
+            const pathData = pathTexture.lock() as Float32Array;
+            pathData.set(points.subarray(0, pathCount * 4));
+            pathTexture.unlock();
+        }
+        resolve(scope, {
+            pathCount,
+            pathMin,
+            pathMax,
+            pathTexture: this.pathTexture ?? this.dummyTexture
+        });
+
+        if (sphereBrush) {
+            resolve(scope, {
+                mode: 4,
+                shape_matrix_inv: identityMat.data
+            });
+        } else if (sphereOptions.sphere) {
             shapeInvMat.copy(sphereOptions.sphere.transform).invert();
             resolve(scope, {
                 mode: 2,
@@ -194,17 +282,10 @@ class Intersect {
             });
         } else {
             resolve(scope, {
+                mode: rectOptions.rect ? 1 : 0,
                 shape_matrix_inv: identityMat.data
             });
         }
-
-        const surfaceOptions = options as SurfaceOptions;
-        const surfaceMap = surfaceOptions.surfaceOnly && surfaceOptions.surfaceMap ? surfaceOptions.surfaceMap : this.dummyTexture;
-        resolve(scope, {
-            surfaceOnly: surfaceMap !== this.dummyTexture ? 1 : 0,
-            surfaceMap,
-            surfaceMap_params: [surfaceMap.width, surfaceMap.height]
-        });
 
         device.setBlendState(BlendState.NOBLEND);
         drawQuadWithShader(device, resources.renderTarget, resources.shader);
@@ -229,4 +310,4 @@ class Intersect {
     }
 }
 
-export { Intersect, IntersectOptions, MaskOptions, RectOptions, SphereOptions, BoxOptions };
+export { Intersect, IntersectOptions, MaskOptions, RectOptions, SphereOptions, BoxOptions, SphereBrushOptions };

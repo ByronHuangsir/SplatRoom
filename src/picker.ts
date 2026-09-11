@@ -91,8 +91,7 @@ class Picker {
     }
 
     // The color buffer of the last ID pass (front-most splat index per pixel,
-    // RGBA8-encoded). Used by GPU selection passes (surface-only / Selection
-    // Depth) to test whether a splat center is on the visible surface.
+    // RGBA8-encoded).
     get idTexture(): Texture | null {
         return this.idRenderTarget ? this.idRenderTarget.colorBuffer : null;
     }
@@ -240,19 +239,85 @@ class Picker {
         // Read the pixel using Texture.read() which handles RGBA16F format
         const pixels = await colorBuffer.read(px, texY, 1, 1, { renderTarget: rt });
 
-        // Convert half-float values to floats
-        // R channel: accumulated depth * alpha
-        // A channel: transmittance (1 - alpha)
-        const r = half2Float(pixels[0]);
-        const transmittance = half2Float(pixels[3]);
+        return this.decodeDepth(pixels, 0);
+    }
+
+    // Read normalized depth at many scattered screen positions (0-1 range, y
+    // down) after a single prepareDepth. Points are grouped into 64px tiles, so
+    // a brush stroke costs a handful of readbacks instead of one per sample or
+    // one read of its whole screen bound.
+    async readDepths(points: { x: number, y: number }[]): Promise<(number | null)[]> {
+        if (!this.depthRenderTarget) {
+            return new Array(points.length).fill(null);
+        }
+
+        const rt = this.depthRenderTarget;
+        const pixelsX = new Int32Array(points.length);
+        const pixelsY = new Int32Array(points.length);
+        const result: (number | null)[] = new Array(points.length).fill(null);
+        const tiles = new Map<string, { indices: number[], minX: number, minY: number, maxX: number, maxY: number }>();
+        const tileSize = 64;
+
+        for (let i = 0; i < points.length; ++i) {
+            const { x, y } = points[i];
+            if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1 || rt.width < 1 || rt.height < 1) {
+                continue;
+            }
+
+            const px = Math.min(Math.floor(x * rt.width), rt.width - 1);
+            const py = Math.min(Math.floor(y * rt.height), rt.height - 1);
+            pixelsX[i] = px;
+            pixelsY[i] = py;
+
+            const key = `${Math.floor(px / tileSize)},${Math.floor(py / tileSize)}`;
+            const tile = tiles.get(key);
+            if (tile) {
+                tile.indices.push(i);
+                tile.minX = Math.min(tile.minX, px);
+                tile.minY = Math.min(tile.minY, py);
+                tile.maxX = Math.max(tile.maxX, px);
+                tile.maxY = Math.max(tile.maxY, py);
+            } else {
+                tiles.set(key, { indices: [i], minX: px, minY: py, maxX: px, maxY: py });
+            }
+        }
+
+        // Flip Y for texture reads on WebGL (texture origin is bottom-left):
+        // read the flipped band and index its rows from the bottom
+        const flip = this.device.isWebGL2;
+
+        for (const tile of tiles.values()) {
+            const width = tile.maxX - tile.minX + 1;
+            const height = tile.maxY - tile.minY + 1;
+            const texY = flip ? rt.height - tile.maxY - 1 : tile.minY;
+
+            const pixels = await rt.colorBuffer.read(tile.minX, texY, width, height, {
+                renderTarget: rt,
+                immediate: true
+            });
+
+            for (const index of tile.indices) {
+                const row = flip ? tile.maxY - pixelsY[index] : pixelsY[index] - tile.minY;
+                result[index] = this.decodeDepth(pixels, (row * width + pixelsX[index] - tile.minX) * 4);
+            }
+        }
+
+        return result;
+    }
+
+    // Decode a depth-pass pixel (RGBA16F): R channel is accumulated depth *
+    // alpha, A channel is the transmittance (1 - alpha).
+    private decodeDepth(pixels: any, offset: number): number | null {
+        const r = half2Float(pixels[offset]);
+        const transmittance = half2Float(pixels[offset + 3]);
         const alpha = 1 - transmittance;
 
-        // Check alpha (transmittance close to 1 means nothing visible)
+        // transmittance close to 1 means nothing visible
         if (alpha < 1e-6) {
             return null;
         }
 
-        // Return normalized depth (0-1 range)
+        // normalized depth (0-1 range)
         return r / alpha;
     }
 

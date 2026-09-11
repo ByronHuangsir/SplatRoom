@@ -36,9 +36,11 @@ const defaultShortcuts: Record<string, ShortcutBinding> = {
     'select.invert': { keys: ['i'], ctrl: 'required' },
     'select.delete': { keys: ['Delete', 'Backspace'] },
 
-    // Selection depth / footprint (SuperSplat-style toggles)
-    'selection.toggleSurfaceOnly': { keys: ['n'] },
-    'selection.toggleUseFootprint': { keys: ['m'], shift: 'required' },
+    // Selection depth / footprint (SuperSplat 3 toggles: N = depth, M =
+    // footprint there; M is already the centers/rings view toggle here, so the
+    // footprint toggle takes shift+M instead)
+    'selection.toggleUseDepth': { keys: ['n'] },
+    'selection.toggleFootprint': { keys: ['m'], shift: 'required' },
 
     // Clipboard
     'edit.copy': { keys: ['c'], ctrl: 'required', capture: true },
@@ -60,6 +62,7 @@ const defaultShortcuts: Record<string, ShortcutBinding> = {
     'tool.eyedropperSelection': { keys: ['e'], ctrl: 'required', capture: true },
     'tool.brushSelection.smaller': { keys: ['['], repeat: true },
     'tool.brushSelection.bigger': { keys: [']'], repeat: true },
+    'tool.sphereBrushSelection': { keys: ['b'], shift: 'required' },
     'tool.deactivate': { keys: ['Escape'] },
     'tool.toggleCoordSpace': { keys: ['c'], shift: 'required' },
 

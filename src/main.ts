@@ -25,6 +25,7 @@ import { registerRenderEvents } from './render';
 import { Scene } from './scene';
 import { getSceneConfig } from './scene-config';
 import { registerSelectionEvents } from './selection';
+import { registerSelectionFlags } from './selection-flags';
 import { registerSequenceEvents } from './sequence';
 import { ShortcutManager } from './shortcut-manager';
 import { startSplatFactoryApp } from './splatfactory/splatfactory-app';
@@ -106,6 +107,10 @@ const getURLArgs = () => {
 const main = async () => {
     // root events object
     const events = new Events();
+
+    // selection depth / footprint flags: registered up front because the
+    // settings panel reads them while it is being constructed
+    registerSelectionFlags(events);
 
     // tool modules (src/tool-modules) — register module events (compare.open, …)
     registerToolModules(events);
@@ -316,7 +321,7 @@ const main = async () => {
     toolManager.register('polygonSelection', new PolygonSelection(events, editorUI.toolsContainer.dom, mask));
     toolManager.register('lassoSelection', new LassoSelection(events, editorUI.toolsContainer.dom, mask));
     toolManager.register('sphereSelection', new SphereSelection(events, scene, editorUI.canvasContainer, editorUI.tooltips));
-    toolManager.register('sphereBrushSelection', new SphereBrushSelection(events, editorUI.toolsContainer.dom));
+    toolManager.register('sphereBrushSelection', new SphereBrushSelection(events, editorUI.toolsContainer.dom, mask));
     toolManager.register('boxSelection', new BoxSelection(events, scene, editorUI.canvasContainer, editorUI.tooltips));
     toolManager.register('eyedropperSelection', new EyedropperSelection(events, editorUI.toolsContainer.dom, editorUI.canvasContainer));
     toolManager.register('heal', new HealTool(events, editorUI.toolsContainer.dom, mask));

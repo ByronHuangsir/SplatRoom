@@ -262,7 +262,11 @@ class BottomToolbar extends Container {
         tooltips.register(brush, tooltip('tooltip.bottom-toolbar.brush-selection', 'tool.brushSelection'));
         tooltips.register(flood, tooltip('tooltip.bottom-toolbar.flood-selection', 'tool.floodSelection'));
         tooltips.register(sphere, tooltip('tooltip.bottom-toolbar.sphere-selection'));
-        tooltips.register(sphereBrush, () => 'Sphere brush (surface depth)', 'top');
+        tooltips.register(sphereBrush, () => {
+            const shortcut = shortcutManager.formatShortcut('tool.sphereBrushSelection');
+            const text = 'Sphere brush (surface depth)';
+            return shortcut ? i18n.formatTooltipWithShortcut(text, shortcut) : text;
+        }, 'top');
         tooltips.register(box, tooltip('tooltip.bottom-toolbar.box-selection'));
         tooltips.register(heal, tooltip('tooltip.bottom-toolbar.heal'));
         tooltips.register(move, tooltip('tooltip.bottom-toolbar.move', 'tool.moveShortcut'));

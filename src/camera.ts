@@ -1004,47 +1004,117 @@ class Camera extends Element {
 
     // intersect the scene at the given normalized screen coordinate (0-1 range) using depth picking
     async intersect(x: number, y: number) {
+        return (await this.intersectMany([{ x, y }]))[0];
+    }
+
+    // world size of one screen pixel at the given view depth (ortho is
+    // depth-independent)
+    worldSizePerPixel(depth: number) {
+        const pixelScale = (2 / this.camera.projectionMatrix.data[5]) / Math.max(1, this.scene.canvas.clientHeight);
+        return this.ortho ? pixelScale : pixelScale * depth;
+    }
+
+    // batch depth picking: intersect the scene at many normalized screen
+    // coordinates (0-1 range), rendering the depth pass once per splat for the
+    // whole batch - which is what keeps a sampled brush stroke practical (V3
+    // sphere brush). The optional pose snapshot pins the frame the gesture was
+    // made in: the call may run from the command queue well after the gesture
+    // and the camera can move in between.
+    async intersectMany(
+        points: { x: number, y: number }[],
+        splats = this.scene.getElementsByType(ElementType.splat) as Splat[],
+        pose?: { position: Vec3, rotation: Quat, orthoHeight: number, near: number, far: number }
+    ) {
         const { scene } = this;
-        const splats = scene.getElementsByType(ElementType.splat);
+        const closestDepths = points.map(() => Infinity);
+        const closestSplats: (Splat | null)[] = new Array(points.length).fill(null);
 
-        let closestDepth = Infinity;
-        let closestSplat: Splat | null = null;
+        const cameraPos = pose?.position ?? this.mainCamera.getPosition().clone();
+        const cameraRot = pose?.rotation ?? this.mainCamera.getRotation().clone();
+        const orthoHeight = pose?.orthoHeight ?? this.camera.orthoHeight;
+        const near = pose?.near ?? this.near;
+        const far = pose?.far ?? this.far;
+        const forward = cameraRot.transformVector(Vec3.FORWARD, new Vec3());
 
-        // Find the splat with the smallest depth at this screen position
+        // run fn with the camera swapped to the snapshot frame and restored
+        // before returning: the rays, every depth pass and the near/far encoding
+        // the depths are decoded with must all share one frame
+        const withSnapshotCamera = (fn: () => void) => {
+            const livePos = this.mainCamera.getPosition().clone();
+            const liveRot = this.mainCamera.getRotation().clone();
+            const liveOrthoHeight = this.camera.orthoHeight;
+            const liveNear = this.near;
+            const liveFar = this.far;
+
+            this.mainCamera.setPosition(cameraPos);
+            this.mainCamera.setRotation(cameraRot);
+            this.camera.orthoHeight = orthoHeight;
+            this.near = near;
+            this.far = far;
+            fn();
+            this.mainCamera.setPosition(livePos);
+            this.mainCamera.setRotation(liveRot);
+            this.camera.orthoHeight = liveOrthoHeight;
+            this.near = liveNear;
+            this.far = liveFar;
+        };
+
+        // build the pick rays under the snapshot frame. getRay seeds the ray
+        // origin differently per projection (the camera for perspective, the
+        // near plane for ortho), so each origin's own view depth is measured
+        // here rather than assuming near
+        const rays: { origin: Vec3, direction: Vec3, cosAngle: number, originDepth: number }[] = [];
+        withSnapshotCamera(() => {
+            for (const { x, y } of points) {
+                this.getRay(x * scene.canvas.clientWidth, y * scene.canvas.clientHeight, ray);
+                rays.push({
+                    origin: ray.origin.clone(),
+                    direction: ray.direction.clone(),
+                    cosAngle: ray.direction.dot(forward),
+                    originDepth: vecb.sub2(ray.origin, cameraPos).dot(forward)
+                });
+            }
+        });
+
+        // find the splat with the smallest depth at each screen position
         for (let i = 0; i < splats.length; ++i) {
-            const splat = splats[i] as Splat;
+            const splat = splats[i];
 
-            this.picker.prepareDepth(splat);
-            const normalizedDepth = await this.picker.readDepth(x, y);
-
-            if (normalizedDepth !== null && normalizedDepth < closestDepth) {
-                closestDepth = normalizedDepth;
-                closestSplat = splat;
+            withSnapshotCamera(() => {
+                this.picker.prepareDepth(splat);
+            });
+            const depths = await this.picker.readDepths(points);
+            for (let j = 0; j < depths.length; ++j) {
+                const depth = depths[j];
+                if (depth !== null && depth < closestDepths[j]) {
+                    closestDepths[j] = depth;
+                    closestSplats[j] = splat;
+                }
             }
         }
 
-        if (!closestSplat) {
-            return null;
-        }
+        return points.map((point, index) => {
+            const splat = closestSplats[index];
+            if (!splat) {
+                return null;
+            }
 
-        // Convert normalized depth to linear depth
-        const linearDepth = closestDepth * (this.far - this.near) + this.near;
+            // convert normalized depth to linear depth
+            const linearDepth = closestDepths[index] * (far - near) + near;
 
-        // Convert normalized coordinates to screen pixels for getRay
-        const screenX = x * scene.canvas.clientWidth;
-        const screenY = y * scene.canvas.clientHeight;
+            // calculate the world position from the snapshotted ray + view depth
+            const { origin, direction, cosAngle, originDepth } = rays[index];
+            const t = (linearDepth - originDepth) / cosAngle;
+            const position = new Vec3();
+            position.copy(origin).add(vec.copy(direction).mulScalar(t));
 
-        // Calculate world position from ray and depth
-        this.getRay(screenX, screenY, ray);
-        const t = linearDepth / ray.direction.dot(this.mainCamera.forward);
-        const position = new Vec3();
-        position.copy(ray.origin).add(vec.copy(ray.direction).mulScalar(t));
-
-        return {
-            splat: closestSplat,
-            position: position,
-            distance: t
-        };
+            return {
+                splat,
+                position,
+                distance: t,
+                depth: linearDepth
+            };
+        });
     }
 
     // intersect the scene at the normalized screen location (0-1 range) and focus the camera on this location
@@ -1064,17 +1134,6 @@ class Camera extends Element {
     }
 
     // pick mode
-
-    // Render an ID pass that paints every visible splat of `splat` (pickOp
-    // 'set' — only locked/deleted splats are skipped) and return its color
-    // buffer. The buffer holds the front-most splat index per pixel, which GPU
-    // selection passes (surface-only / Selection Depth) sample to test whether
-    // a splat center is on the visible surface. Call right before running the
-    // intersect pass so the two renders stay in submission order.
-    renderSurfaceMap(splat: Splat): Texture | null {
-        this.picker.prepareId(splat, 'set');
-        return this.picker.idTexture;
-    }
 
     // render picker contents
     pickPrep(splat: Splat, mode: 'add' | 'remove' | 'set' | 'intersect') {

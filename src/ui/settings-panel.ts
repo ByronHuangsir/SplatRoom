@@ -504,29 +504,29 @@ class SettingsPanel extends Container {
             }
         });
 
-        // selection depth / footprint (V3 experimental, SuperSplat 3 style):
-        // "surface only" = Selection Depth (splats must be on the visible
-        // surface), "footprint" = Selection Footprint (2D picks judge by
-        // gaussian coverage instead of centers only). Labels inline until
-        // localised; applied to the very next selection.
+        // selection depth / footprint (V3, SuperSplat 3 semantics):
+        // "depth" = only splats visible on the surface can be selected,
+        // "footprint" = the hit test uses the splat's rendered gaussian extent
+        // instead of its center point. Labels inline until localised; both
+        // apply to the very next selection.
         const selSurfaceRow = new Container({
             class: 'settings-panel-row'
         });
         const selSurfaceLabel = new Label({
             class: 'settings-panel-row-label',
-            text: 'Selection: surface only (depth)'
+            text: 'Selection: depth (surface only)'
         });
         const selSurfaceToggle = new BooleanInput({
             type: 'toggle',
             class: 'settings-panel-row-toggle',
-            value: !!events.invoke('selection.surfaceOnly')
+            value: !!events.invoke('selection.useDepth')
         });
         selSurfaceRow.append(selSurfaceLabel);
         selSurfaceRow.append(selSurfaceToggle);
         selSurfaceToggle.on('change', (value: boolean) => {
-            events.fire('selection.setSurfaceOnly', value);
+            events.fire('selection.setUseDepth', value);
         });
-        events.on('selection.surfaceOnly', (value: boolean) => {
+        events.on('selection.useDepth', (value: boolean) => {
             selSurfaceToggle.value = value;
         });
 
@@ -540,15 +540,15 @@ class SettingsPanel extends Container {
         const selFootprintToggle = new BooleanInput({
             type: 'toggle',
             class: 'settings-panel-row-toggle',
-            value: !!events.invoke('selection.useFootprint')
+            value: (events.invoke('selection.footprint') as number) > 0
         });
         selFootprintRow.append(selFootprintLabel);
         selFootprintRow.append(selFootprintToggle);
         selFootprintToggle.on('change', (value: boolean) => {
-            events.fire('selection.setUseFootprint', value);
+            events.fire('selection.setFootprint', value ? 1 : 0);
         });
-        events.on('selection.useFootprint', (value: boolean) => {
-            selFootprintToggle.value = value;
+        events.on('selection.footprint', (value: number) => {
+            selFootprintToggle.value = value > 0;
         });
 
         // reset preferences to defaults

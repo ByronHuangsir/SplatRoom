@@ -1,54 +1,120 @@
 import { Events } from '../events';
 import { opFromModifiers } from '../select-op';
 
-// Depth-aligned 3D sphere brush (V3, SuperSplat-style "Sphere Brush").
-// Dragging paints small spheres whose centers hug the visible surface: pointer
-// samples are recorded while dragging and on pointer-up the editor's
-// select.bySphereBrush handler depth-picks the front-most surface point under
-// each sample and applies a sphere selection there. A stroke therefore stays a
-// single gesture with bounded, throttled GPU work per sample.
+// Depth-aligned 3D sphere brush (V3, SuperSplat-style "Sphere Brush", Shift+B).
+//
+// The stroke is recorded as a dense path of samples, each with the brush radius
+// in css pixels at the time it was taken (so a stroke can taper), and drawn into
+// the shared stroke mask. On pointer-up the editor depth-picks every sample in
+// one batched pass and runs the whole path through a single GPU intersect, so
+// the brush hugs the visible surface without paying per-sample readbacks.
 class SphereBrushSelection {
     activate: () => void;
     deactivate: () => void;
 
-    constructor(events: Events, parent: HTMLElement) {
+    constructor(events: Events, parent: HTMLElement, mask: { canvas: HTMLCanvasElement, context: CanvasRenderingContext2D }) {
         // create svg
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.classList.add('tool-svg', 'hidden');
         svg.id = 'sphere-brush-select-svg';
         parent.appendChild(svg);
 
-        // cursor circle showing the brush radius
+        // shaded-sphere cursor: a radial gradient fill reads as a ball rolling
+        // over the surface
+        const defs = document.createElementNS(svg.namespaceURI, 'defs');
+        const gradient = document.createElementNS(svg.namespaceURI, 'radialGradient');
+        gradient.id = 'sphere-brush-gradient';
+        gradient.setAttribute('cx', '37%');
+        gradient.setAttribute('cy', '33%');
+        gradient.setAttribute('r', '72%');
+        [['0%', '0.5'], ['55%', '0.25'], ['100%', '0.08']].forEach(([offset, opacity]) => {
+            const stop = document.createElementNS(svg.namespaceURI, 'stop');
+            stop.setAttribute('offset', offset);
+            stop.setAttribute('stop-color', '#f60');
+            stop.setAttribute('stop-opacity', opacity);
+            gradient.appendChild(stop);
+        });
+        defs.appendChild(gradient);
+        svg.appendChild(defs);
+
         const circle = document.createElementNS(svg.namespaceURI, 'circle') as SVGCircleElement;
-        circle.setAttribute('fill', 'none');
+        circle.setAttribute('fill', 'url(#sphere-brush-gradient)');
         circle.setAttribute('stroke', '#f60');
-        circle.setAttribute('stroke-width', '2');
+        circle.setAttribute('stroke-width', '1');
         svg.appendChild(circle);
 
+        const { canvas, context } = mask;
+
         let radius = 40;
+
         circle.setAttribute('r', radius.toString());
 
-        const samples: Array<{ x: number, y: number }> = [];
-        let last: { x: number, y: number } | null = null;
+        const prev = { x: 0, y: 0 };
         let dragId: number | undefined;
+        let busy = false;
+        const points: { x: number, y: number, radius: number }[] = [];
 
-        const update = (e: PointerEvent) => {
-            circle.setAttribute('cx', e.offsetX.toString());
-            circle.setAttribute('cy', e.offsetY.toString());
+        // track the pointer while the tool is inactive too (the tools overlay is
+        // hidden then), so activation places the cursor at the mouse rather than
+        // where the previous stroke ended
+        const pointer = { x: 0, y: 0 };
+        window.addEventListener('pointermove', (e: PointerEvent) => {
+            pointer.x = e.clientX;
+            pointer.y = e.clientY;
+        }, { capture: true, passive: true });
+
+        // append a stroke sample, interpolating extra samples so consecutive
+        // path points sit at most a fraction of the brush radius apart (the GPU
+        // stitches them into capsules - a coarse path would scallop)
+        const appendPoint = (x: number, y: number, force = false) => {
+            const last = points[points.length - 1];
+            if (!last) {
+                points.push({ x, y, radius });
+                return;
+            }
+
+            const dx = x - last.x;
+            const dy = y - last.y;
+            const distance = Math.hypot(dx, dy);
+            const spacing = Math.max(2, Math.min(last.radius, radius) * 0.25);
+            const steps = Math.floor(distance / spacing);
+            for (let i = 1; i <= steps; ++i) {
+                const t = i * spacing / distance;
+                points.push({
+                    x: last.x + dx * t,
+                    y: last.y + dy * t,
+                    radius: last.radius + (radius - last.radius) * t
+                });
+            }
+
+            if (force) {
+                const tail = points[points.length - 1];
+                if (tail.x !== x || tail.y !== y || tail.radius !== radius) {
+                    points.push({ x, y, radius });
+                }
+            }
         };
 
-        // record a sample (spaced so overlapping spheres stay bounded)
-        const record = (e: PointerEvent) => {
-            const width = Math.max(1, parent.clientWidth);
-            const height = Math.max(1, parent.clientHeight);
+        const update = (e: PointerEvent) => {
             const x = e.offsetX;
             const y = e.offsetY;
-            const spacing = Math.max(6, radius * 0.35);
-            if (!last || Math.hypot(x - last.x, y - last.y) >= spacing) {
-                if (samples.length < 512) {
-                    samples.push({ x: x / width, y: y / height });
-                }
-                last = { x, y };
+
+            circle.setAttribute('cx', x.toString());
+            circle.setAttribute('cy', y.toString());
+
+            if (dragId !== undefined) {
+                appendPoint(x, y);
+
+                context.beginPath();
+                context.strokeStyle = '#f60';
+                context.lineCap = 'round';
+                context.lineWidth = radius * 2;
+                context.moveTo(prev.x, prev.y);
+                context.lineTo(x, y);
+                context.stroke();
+
+                prev.x = x;
+                prev.y = y;
             }
         };
 
@@ -57,13 +123,33 @@ class SphereBrushSelection {
                 e.preventDefault();
                 e.stopPropagation();
 
+                // a stroke attempted while the previous selection is still
+                // pending is swallowed rather than left to orbit the camera
+                if (busy) {
+                    return;
+                }
+
                 dragId = e.pointerId;
                 parent.setPointerCapture(dragId);
 
-                samples.length = 0;
-                last = null;
+                // initialize canvas
+                if (canvas.width !== parent.clientWidth || canvas.height !== parent.clientHeight) {
+                    canvas.width = parent.clientWidth;
+                    canvas.height = parent.clientHeight;
+                }
+
+                // clear canvas
+                context.clearRect(0, 0, canvas.width, canvas.height);
+
+                // display it
+                canvas.style.display = 'inline';
+
+                prev.x = e.offsetX;
+                prev.y = e.offsetY;
+                points.length = 0;
+                appendPoint(prev.x, prev.y);
+
                 update(e);
-                record(e);
             }
         };
 
@@ -71,16 +157,19 @@ class SphereBrushSelection {
             if (dragId !== undefined) {
                 e.preventDefault();
                 e.stopPropagation();
-                update(e);
-                record(e);
-            } else {
-                update(e);
             }
+
+            update(e);
         };
 
         const dragEnd = () => {
-            parent.releasePointerCapture(dragId);
+            // a touch that has lifted, or was cancelled, no longer holds the
+            // capture and releasing it throws
+            if (parent.hasPointerCapture(dragId)) {
+                parent.releasePointerCapture(dragId);
+            }
             dragId = undefined;
+            canvas.style.display = 'none';
         };
 
         const pointerup = async (e: PointerEvent) => {
@@ -88,16 +177,35 @@ class SphereBrushSelection {
                 e.preventDefault();
                 e.stopPropagation();
 
+                appendPoint(e.offsetX, e.offsetY, true);
+
                 dragEnd();
 
-                if (samples.length) {
+                // block new strokes until the async selection has consumed the
+                // shared mask canvas and finished its depth picking
+                busy = true;
+                try {
                     await events.invoke(
                         'select.bySphereBrush',
                         opFromModifiers(e),
-                        samples.slice(),
-                        radius
+                        points.map(point => ({
+                            x: point.x / canvas.width,
+                            y: point.y / canvas.height,
+                            radius: point.radius
+                        })),
+                        canvas
                     );
+                } finally {
+                    busy = false;
                 }
+            }
+        };
+
+        // a cancelled touch gets no pointerup, and a drag left open blocks every
+        // later one
+        const pointercancel = (e: PointerEvent) => {
+            if (e.pointerId === dragId) {
+                dragEnd();
             }
         };
 
@@ -110,16 +218,18 @@ class SphereBrushSelection {
             }
         };
 
-        const syncCircle = () => {
-            circle.setAttribute('r', radius.toString());
-        };
-
         this.activate = () => {
             svg.classList.remove('hidden');
             parent.style.display = 'block';
+
+            const rect = parent.getBoundingClientRect();
+            circle.setAttribute('cx', (pointer.x - rect.left).toString());
+            circle.setAttribute('cy', (pointer.y - rect.top).toString());
+
             parent.addEventListener('pointerdown', pointerdown);
             parent.addEventListener('pointermove', pointermove);
             parent.addEventListener('pointerup', pointerup);
+            parent.addEventListener('pointercancel', pointercancel);
             parent.addEventListener('wheel', wheel);
         };
 
@@ -133,18 +243,20 @@ class SphereBrushSelection {
             parent.removeEventListener('pointerdown', pointerdown);
             parent.removeEventListener('pointermove', pointermove);
             parent.removeEventListener('pointerup', pointerup);
+            parent.removeEventListener('pointercancel', pointercancel);
             parent.removeEventListener('wheel', wheel);
         };
 
-        // share the brush size hotkeys / wheel behaviour with the 2D brush
+        // share the 2d brush's size events so the [ and ] shortcuts (and
+        // alt+wheel) adjust whichever brush is active
         events.on('tool.brushSelection.smaller', () => {
             radius = Math.max(1, radius / 1.05);
-            syncCircle();
+            circle.setAttribute('r', radius.toString());
         });
 
         events.on('tool.brushSelection.bigger', () => {
             radius = Math.min(500, radius * 1.05);
-            syncCircle();
+            circle.setAttribute('r', radius.toString());
         });
     }
 }
