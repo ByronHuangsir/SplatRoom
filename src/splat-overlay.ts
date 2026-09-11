@@ -30,6 +30,12 @@ class SplatOverlay extends Element {
     // the sorter we subscribed to in attach(); cached so detach() unsubscribes
     // from it directly (splat.entity may have been swapped out by replaceData)
     sorter: EventHandler;
+    // false while the attached splat's instance has no sorter/order texture yet
+    // (WebGPU backend, or a load that hasn't finished setting the instance up):
+    // the overlay renders nothing until it becomes ready
+    orderReady = false;
+    // one-shot note so the WebGPU case is reported once, not every frame
+    warnedNoOrderTexture = false;
 
     constructor() {
         super(ElementType.debug);
@@ -108,7 +114,28 @@ class SplatOverlay extends Element {
         this.detach();
 
         const { mesh, material } = this;
-        const instance = splat.entity.gsplat.instance;
+        const instance = (splat.entity as any).gsplat?.instance;
+
+        // the instance's order texture only exists on WebGL2 (WebGPU uses an
+        // order storage buffer instead) and its sorter is created lazily, so a
+        // splat can be attached while its instance is not renderable here yet
+        // (selection lands before the load finishes, or a proxy/LOD instance
+        // swapped in by replaceData). keep the splat and retry from
+        // onPreRender instead of throwing on undefined.width, which would abort
+        // the whole load.
+        if (!instance || !instance.sorter || !instance.orderTexture || !instance.resource || !splat.stateTexture) {
+            // on WebGPU the order data lives in a storage buffer, so this
+            // overlay can never run there: say so once instead of leaving the
+            // user wondering why centers are missing
+            if (!this.warnedNoOrderTexture && this.scene.graphicsDevice.isWebGPU) {
+                this.warnedNoOrderTexture = true;
+                console.warn('[SplatOverlay] centers overlay is unavailable on the WebGPU backend (no order texture)');
+            }
+            this.splat = splat;
+            this.orderReady = false;
+            return;
+        }
+
         const orderTexture = instance.orderTexture;
 
         // set up order texture uniforms
@@ -152,6 +179,7 @@ class SplatOverlay extends Element {
 
         splat.entity.addChild(this.entity);
         this.splat = splat;
+        this.orderReady = true;
     }
 
     detach() {
@@ -165,6 +193,21 @@ class SplatOverlay extends Element {
 
         this.entity.remove();
         this.splat = null;
+        this.orderReady = false;
+    }
+
+    // a splat attached before its instance was renderable becomes drawable as
+    // soon as the sorter / order texture exist (the engine creates the sorter
+    // lazily, a frame or two later). the retry lives in onUpdate because the
+    // scene skips render frames when nothing changed (app.autoRender = false),
+    // so onPreRender is not guaranteed to run while we wait.
+    onUpdate() {
+        if (this.splat && !this.orderReady) {
+            this.attach(this.splat);
+            if (this.orderReady) {
+                this.scene.forceRender = true;
+            }
+        }
     }
 
     onPreRender() {
@@ -195,7 +238,8 @@ class SplatOverlay extends Element {
     get enabled() {
         const { scene, splat } = this;
         const { events } = scene;
-        return splat &&
+        return !!this.orderReady &&
+            splat &&
             events.invoke('camera.splatSize') > 0 &&
             scene.camera.renderOverlays &&
             events.invoke('camera.overlay') &&

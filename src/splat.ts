@@ -317,8 +317,10 @@ class Splat extends Element {
         // @ts-ignore
         instance.meshInstance._updateAabb = false;
 
-        // when sort changes, re-render the scene
-        instance.sorter.on('updated', () => {
+        // when sort changes, re-render the scene. the instance's sorter is
+        // created lazily (and never on WebGPU, which sorts into a storage
+        // buffer), so this binding is optional rather than assumed
+        instance.sorter?.on('updated', () => {
             this.changedCounter++;
             this.scene.forceRender = true;
         });
@@ -565,8 +567,8 @@ class Splat extends Element {
             }
         }
 
-        // update sorting instance
-        this.entity.gsplat.instance.sorter.setMapping(mapping);
+        // update sorting instance (absent on WebGPU / before the sorter exists)
+        this.entity.gsplat.instance.sorter?.setMapping(mapping);
 
         // recalculate bounds after sorting changes
         await this.updateLocalBounds();
