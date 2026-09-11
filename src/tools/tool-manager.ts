@@ -11,7 +11,7 @@ interface Tool {
     setTransformMode?: (mode: 'translate' | 'rotate' | 'scale') => boolean;
     // optional: the thing this tool currently manipulates (e.g. its volume), so
     // the focus shortcut frames that instead of the selection bound
-    getFocus?: () => { focalPoint: Vec3, radius: number } | null;
+    getFocus?: () => { position: Vec3, radius: number } | null;
 }
 
 class ToolManager {

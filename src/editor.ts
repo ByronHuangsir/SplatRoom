@@ -516,9 +516,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
         // a tool with its own volume (sphere/box selection) frames that instead
         // of the selection bound
-        const toolFocus = events.invoke('tool.focus') as { focalPoint: Vec3, radius: number } | null;
+        const toolFocus = events.invoke('tool.focus') as { position: Vec3, radius: number } | null;
         if (toolFocus) {
-            scene.camera.focus({ focalPoint: toolFocus.focalPoint, radius: toolFocus.radius, speed: 1 });
+            scene.camera.focus({ focalPoint: toolFocus.position, radius: toolFocus.radius, speed: 1 });
             return;
         }
 

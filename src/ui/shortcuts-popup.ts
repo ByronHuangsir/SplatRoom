@@ -86,7 +86,10 @@ const popupConfig: Record<string, CategoryConfig> = {
             { id: 'tool.toggleCoordSpace', localeKey: 'popup.shortcuts.toggle-gizmo-coordinate-space' }
         ],
         hints: [
-            { displayKey: '[ ]', localeKey: 'popup.shortcuts.brush-size' }
+            { displayKey: '[ ]', localeKey: 'popup.shortcuts.brush-size' },
+            { displayKey: 'Enter', localeKey: 'popup.shortcuts.close-polygon' },
+            { displayKey: 'Backspace', localeKey: 'popup.shortcuts.remove-last-polygon-point' },
+            { displayKey: 'Backspace', localeKey: 'popup.shortcuts.remove-tool-point' }
         ]
     },
     playback: {
