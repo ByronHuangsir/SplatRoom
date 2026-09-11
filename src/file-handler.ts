@@ -290,9 +290,15 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
         await events.invoke('showPopup', {
             type: 'error',
             header: i18n.t('popup.error-loading'),
-            message: `'${filename}' loaded but cannot be displayed.\n\n${diag.summary}\n\n` +
-                `Diagnostics: ${JSON.stringify(diag.facts)}\n` +
+            message: [
+                `'${filename}' loaded but cannot be displayed.`,
+                '',
+                diag.summary,
+                ...(diag.warnings.length ? ['', ...diag.warnings] : []),
+                '',
+                `Diagnostics: ${JSON.stringify(diag.facts)}`,
                 'Run splatDiag() in the developer console for the same report.'
+            ].join('\n')
         });
     };
 
