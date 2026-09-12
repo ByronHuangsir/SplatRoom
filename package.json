@@ -1,9 +1,9 @@
 {
     "name": "splatroom",
-    "version": "3.4.1",
-    "author": "鎽勫奖甯堥粍Sir <1924705842@qq.com>",
+    "version": "3.5.0",
+    "author": "閹藉嫬濂栫敮鍫ョ矋Sir <1924705842@qq.com>",
     "homepage": "https://github.com/photographer-huangsir/splatroom",
-    "description": "3D Gaussian Splat Editor - 璋冭壊涓庡悗鏈熷伐浣滄祦",
+    "description": "3D Gaussian Splat Editor - 鐠嬪啳澹婃稉搴℃倵閺堢喎浼愭担婊勭ウ",
     "keywords": [
         "playcanvas",
         "ply",
@@ -114,3 +114,4 @@
         "url": "https://github.com/ByronHuangsir/SplatRoom/issues"
     }
 }
+

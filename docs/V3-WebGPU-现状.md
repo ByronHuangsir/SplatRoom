@@ -1,11 +1,18 @@
 # SplatRoom V3 — WebGPU 后端的现状（2026-09-12）
 
-> **进度更新（同日晚，3.4.1 之后，未发布）**：WGSL 移植已完成并接线，黑屏的**真正原因已定位到相机矩阵**，
-> 详见文末「第 6 节：WGSL 移植进展与剩余阻塞」。结论先行：**渲染管线本身已经通了**（splat 遍的 MRT 管线合法、
-> draw 正常发出、片元能上屏——用"全屏三角形 + 品红片元"实测确认），剩下的问题是我们自研 camera 类的
-> **视图/投影矩阵没有传到 splat 材质**（引擎的 view uniform buffer 在 WebGPU 下对该材质读出的是单位矩阵）。
+> **最新状态（3.5.0）：WebGPU 已经能正常渲染模型。** 真正的黑屏元凶不是着色器，而是
+> `DataProcessor.calcBound()` 的 **GPU 回读在 WebGPU 下返回全零**：该结果直接写进 `Splat.localBoundStorage`
+> （它是 `resource.aabb` 的别名，于是连 CPU 侧 AABB 一起被清零）→ 场景包围盒退化成一个点 → 相机无法取景、
+> near/far 都变成 0 → **投影矩阵变成 NaN** → 所有高斯都被裁掉。引擎自带的 WGSL splat 着色器"同样画不出来"
+> 也是同一个原因（相机态坏了，不是着色器坏了）。
+>
+> 修复：`Splat.updateLocalBounds()` 在 WebGPU 下若 GPU 结果不可用，则回退到构造时保存的 CPU AABB。
+> 修复后 2k 测试模型与 5M/324MB 大模型在 WebGPU 下**都正常出画面**（见第 6 节实测截图判据）。
+> 启动回退（默认仍 WebGL2）暂时保留：回读路径本身（拾取/快照/直方图）与各项编辑功能还没逐项验证。
+>
+> **历史记录**（下方第 1–5 节）描述的是修复前的状态与当时的排查结论，保留作为证据链。
 
-**结论：WebGPU 后端目前无法渲染高斯点云。已改为"启动时拒绝该设置并回退 WebGL2 + 弹窗说明"，只在开发时用 `?gpu=webgpu` 打开。**
+**当时的结论：WebGPU 后端无法渲染高斯点云，因此启动时拒绝该设置并回退 WebGL2 + 弹窗说明，只在开发时用 `?gpu=webgpu` 打开。**
 
 这份文档记录的是**可复现的证据**，不是推测：全部结论都由 `docs/verify/` 下的无头浏览器脚本在本机（NVIDIA Ampere，Edge 真实 WebGPU 适配器，非 SwiftShader）实测得到。
 
@@ -165,19 +172,35 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
   本仓库的自研相机路径下这个懒重算在 `onPreRender` 时机没有发生，因此**必须自己算投影矩阵**（或调用引擎的
   `updateProjection`/`_updateViewProjMat` 等入口）后再上传。
 
-### 6.5 下一轮的第一件事（2026-09-12 收尾时的确切状态）
+### 6.5 收尾状态：**WebGPU 已经能渲染了**（3.5.0，提交 7208748）
 
-当前提交 `a5ce94b`。已经确认的事实链：
+真因链（与 6.3 的"相机矩阵"推测相比，这里给出了最终答案）：
 
-1. WGSL 移植完成、注入生效、MRT 管线合法、draw 正常、流数据可读（6.2 全部为 ✅）。
-2. `uSplatView`（材质参数、mat4）在着色器里**读出正确值**；`uSplatProj`（紧邻声明的第二个 mat4 参数）**读出垃圾值**——
-   即使用 `Mat4.setPerspective(...)` 在本仓库侧自算（与引擎 `Camera._evaluateProjectionMatrix` 同调用）也一样。
-3. 因此怀疑点已经从"取不到相机矩阵"收敛到**材质 UB 里两个 mat4 参数的落位/上传**：
-   下一步优先做的是把 `ub_mesh_ub` 的实际布局 dump 出来（或在 `setParameter` 前后读回参数值），
-   确认第二个 mat4 是否被写到错误偏移；若确认是引擎侧限制，就换条路：把相机矩阵改成
-   `device.scope.resolve('...')` 全局 uniform，或用 4 个 `vec4` 参数拼一个 mat4（避开第二 mat4 槽位）。
-4. 判别方法仍是 6.2/6.4 的读数法：给 instance 0 画一个全屏三角形，把待测值编码进 RGB，
-   用 `_tmp/map.cjs` 读画布中央像素反解（**不要**用 `verify-large-model-backend.cjs` 的 `shot` 比例）。
+1. `DataProcessor.calcBound()`（GPU 数据处理器）把结果**回读**出来写进 `Splat.localBoundStorage`；
+2. 该 storage 是 `instance.resource.aabb` 的**别名**（`splat.ts` 构造处），于是回读全零时连引擎算好的 CPU AABB 一起被清零；
+3. `scene.bound` 随之退化成一个点（`halfExtents = (0,0,0)`）；
+4. 相机取景逻辑 `fitClippingPlanes()` 在这个退化 bound 下算出 `near == far`（实测两者都是 0）；
+5. `setPerspective(fov, aspect, 0, 0)` → **投影矩阵整块 NaN** → 所有高斯的 clip 位置都是 NaN → 视口全黑。
+   （这也是为什么**引擎自带的 WGSL splat 着色器同样画不出来** —— 坏的是相机态，不是着色器。）
+
+修复与证据：
+
+- `Splat.updateLocalBounds()`：WebGPU 下若 GPU 回读结果不可用，回退到构造时保存的 CPU AABB（`cpuBoundStorage`）。
+- 实测（`_tmp/map.cjs`，画布区域精确颜色直方图）：
+  - `test-model.ply`（2k 高斯）：视口出现大片红色前墙 + 蓝色后墙像素，画面均值 (95,42,47) —— **模型可见**；
+  - `big-model.ply`（5M 高斯 / 324 MB）：视口被模型填满，均值 (103,103,104) —— **大模型同样可见**。
+- WebGL2 无回归：`npm run check` 全绿、`verify-model-renders` 0 失败（33.3% 非背景）、`verify-webgpu-fallback` 7/7、`verify:diag` 7/7。
+
+下一步（撤掉启动回退之前必须做完）：
+
+1. **WebGPU 回读路径本身**：`texture.read` 在 WebGPU 下返回全零 —— 它同时影响拾取（`readIds`/`readDepth`）、快照、
+   直方图/按范围选择、`calcBound`（目前用 CPU 兜底）。这是目前最大的一块。
+2. 逐项验证核心编辑功能在 WebGPU 下的表现：颜色分级、隐藏/删除、裁剪盒（含切面）、粒子特效、变换调色板、选中描边（RT1 消费者）。
+3. 居中点覆盖层（需要 orderTexture，WebGPU 用 orderBuffer）与 PiP 预览。
+4. 全部通过后再移除启动回退、恢复设置面板选项、打包 3.5.x 便携版。
+
+调试工具与教训见 6.4；数值读数法（instance 0 画全屏三角形 + RGB 编码 + 反解）在这次定位中起了决定性作用。
+
 
 
 - `map.cjs`：截取画布区域 → 解码 PNG → 输出**精确颜色直方图 + 均值 + 粗粒度 ASCII 色块图 + 三条带像素读数**（排除"截图整体比例"这类不敏感指标）。
