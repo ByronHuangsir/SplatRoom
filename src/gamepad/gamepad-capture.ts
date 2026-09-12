@@ -90,7 +90,7 @@ class GamepadCapture {
             const { mainTarget, workTarget } = scene.camera;
             scene.dataProcessor.copyRt(mainTarget, workTarget);
             const data = new Uint8Array(width * height * 4);
-            await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+            await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
             // Flip vertically (WebGL origin is bottom-left)
             const line = new Uint8Array(width * 4);

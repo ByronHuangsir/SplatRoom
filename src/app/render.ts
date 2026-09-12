@@ -331,7 +331,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
             scene.dataProcessor.copyRt(mainTarget, workTarget);
 
             // read the rendered frame
-            await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+            await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
             // flip y positions to have 0,0 at the top
             let line = new Uint8Array(width * 4);
@@ -438,7 +438,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                 scene.dataProcessor.copyRt(mainTarget, workTarget);
 
                 // read the rendered frame
-                await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+                await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
             }
 
             // flip the buffer vertically: the framebuffer read is bottom-up
@@ -842,7 +842,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     scene.dataProcessor.copyRt(mainTarget, workTarget);
 
                     // read the rendered frame
-                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
                     await encodeFrame(frameTime);
                 };
@@ -1173,7 +1173,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
 
                     const { mainTarget, workTarget } = scene.camera;
                     scene.dataProcessor.copyRt(mainTarget, workTarget);
-                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
                 }
 
                 // Flip vertically
@@ -1552,7 +1552,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     // Read pixels
                     const { workTarget } = scene.camera;
                     scene.dataProcessor.copyRt(scene.camera.mainTarget, workTarget);
-                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data });
+                    await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
                     // Flip Y (render target is upside-down)
                     for (let y = 0; y < Math.floor(height / 2); y++) {

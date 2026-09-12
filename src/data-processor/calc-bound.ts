@@ -188,22 +188,22 @@ class CalcBound {
             withReadbackTimeout(resources.selectedMinTexture.read(0, 0, transformA.width, 1, {
                 renderTarget: resources.selectedMinRenderTarget,
                 data: resources.selectedMinData,
-                immediate: false
+                immediate: true
             })),
             withReadbackTimeout(resources.selectedMaxTexture.read(0, 0, transformA.width, 1, {
                 renderTarget: resources.selectedMaxRenderTarget,
                 data: resources.selectedMaxData,
-                immediate: false
+                immediate: true
             })),
             withReadbackTimeout(resources.visibleMinTexture.read(0, 0, transformA.width, 1, {
                 renderTarget: resources.visibleMinRenderTarget,
                 data: resources.visibleMinData,
-                immediate: false
+                immediate: true
             })),
             withReadbackTimeout(resources.visibleMaxTexture.read(0, 0, transformA.width, 1, {
                 renderTarget: resources.visibleMaxRenderTarget,
                 data: resources.visibleMaxData,
-                immediate: false
+                immediate: true
             }))
         ]);
         const failures = reads.filter(r => r.status === 'rejected');

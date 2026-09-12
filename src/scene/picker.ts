@@ -164,10 +164,14 @@ class Picker {
         // Flip Y for texture read on WebGL (texture origin is bottom-left)
         const texY = this.device.isWebGL2 ? rt.height - py - ph : py;
 
-        // Read pixels using texture.read() API
+        // Read pixels using texture.read() API.
+        // `immediate: true` matters on the WebGPU backend: the copy is recorded into the
+        // current command encoder, which PlayCanvas only submits at a frame boundary, so a
+        // deferred map can resolve before the pick pass has actually been submitted and
+        // return an empty buffer (picking came back as all zeros on WebGPU).
         const pixels = await colorBuffer.read(px, texY, pw, ph, {
             renderTarget: rt,
-            immediate: false
+            immediate: true
         });
 
         const result: number[] = [];
@@ -237,7 +241,7 @@ class Picker {
         const texY = this.device.isWebGL2 ? rt.height - py - 1 : py;
 
         // Read the pixel using Texture.read() which handles RGBA16F format
-        const pixels = await colorBuffer.read(px, texY, 1, 1, { renderTarget: rt });
+        const pixels = await colorBuffer.read(px, texY, 1, 1, { renderTarget: rt, immediate: true });
 
         return this.decodeDepth(pixels, 0);
     }

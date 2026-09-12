@@ -323,12 +323,12 @@ class CalcHistogram {
                 withReadbackTimeout(this.minMaxTex.read(0, 0, 1, 1, {
                     renderTarget: this.minMaxRT,
                     data: this.minMaxData,
-                    immediate: false
+                    immediate: true
                 })),
                 withReadbackTimeout(this.binTex.read(0, 0, NUM_BINS, 1, {
                     renderTarget: this.binRT,
                     data: this.binData,
-                    immediate: false
+                    immediate: true
                 }))
             ]);
         } catch (err) {

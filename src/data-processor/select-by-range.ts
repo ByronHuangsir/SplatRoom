@@ -201,7 +201,7 @@ class SelectByRange {
             const data = await withReadbackTimeout(resources.texture.read(0, 0, resources.texture.width, resources.texture.height, {
                 renderTarget: resources.renderTarget,
                 data: buffer,
-                immediate: false
+                immediate: true
             }));
             return data as Uint8Array;
         } catch (err) {
