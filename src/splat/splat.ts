@@ -85,6 +85,9 @@ class Splat extends Element {
     transformTexture: Texture;
     selectionBoundStorage: BoundingBox;
     localBoundStorage: BoundingBox;
+
+    // pristine copy of the engine's CPU-computed local AABB (see the constructor)
+    private cpuBoundStorage = new BoundingBox();
     worldBoundStorage: BoundingBox;
 
     _visible = true;
@@ -325,6 +328,10 @@ class Splat extends Element {
         this.transformTexture = createTexture('splatTransform', PIXELFORMAT_R16U);
 
         this.localBoundStorage = instance.resource.aabb;
+        // keep a pristine copy of the engine's CPU-computed AABB: localBoundStorage is
+        // an alias of it, so the GPU bound pass below overwrites the CPU values
+        // (with zeros on WebGPU, where its readback returns nothing)
+        this.cpuBoundStorage.copy(instance.resource.aabb);
         // @ts-ignore
         this.worldBoundStorage = instance.meshInstance._aabb;
 
@@ -1083,7 +1090,35 @@ class Splat extends Element {
     // calculate both selection and local bounds (async, callers must await)
     async updateLocalBounds(): Promise<void> {
         await this.scene.dataProcessor.calcBound(this, this.selectionBoundStorage, this.localBoundStorage);
+
+        // V3/WebGPU: the bound pass reads its result back from the GPU, and that
+        // readback currently returns nothing on the WebGPU backend (every splat bound
+        // comes back as all zeros, silently). A degenerate local bound then collapses
+        // the scene bound, so the camera cannot frame the model and its near/far clips
+        // end up equal — the projection matrix becomes NaN and the viewport stays
+        // black for every model, regardless of size. Until the readback works there,
+        // fall back to the AABB the engine computed on the CPU when the resource was
+        // created (it holds the same local-space extent).
+        if (this.scene.graphicsDevice.isWebGPU && !Splat.isUsableBound(this.localBoundStorage)) {
+            if (Splat.isUsableBound(this.cpuBoundStorage)) {
+                this.localBoundStorage.copy(this.cpuBoundStorage);
+            }
+        }
+
         this.updateWorldBound();
+    }
+
+    // a bound is usable when it has a finite centre and a non-zero extent
+    private static isUsableBound(bound: BoundingBox | null | undefined): boolean {
+        if (!bound) {
+            return false;
+        }
+        const { x, y, z } = bound.center;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            return false;
+        }
+        const h = bound.halfExtents;
+        return Number.isFinite(h.x) && Number.isFinite(h.y) && Number.isFinite(h.z) && (Math.abs(h.x) + Math.abs(h.y) + Math.abs(h.z)) > 1e-8;
     }
 
     // update world bound from local bound (synchronous)
