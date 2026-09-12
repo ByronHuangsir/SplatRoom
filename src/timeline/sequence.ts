@@ -1,9 +1,9 @@
 import { Asset, Quat } from 'playcanvas';
 
-import { Events } from './core/events';
-import { loadGSplatDataAsync, MappedReadFileSystem, validateGSplatData } from './io';
-import { Scene } from './scene/scene';
-import { Splat } from './splat/splat';
+import { Events } from '../core/events';
+import { loadGSplatDataAsync, MappedReadFileSystem, validateGSplatData } from '../io/index';
+import { Scene } from '../scene/scene';
+import { Splat } from '../splat/splat';
 
 type FrameData = {
     asset: Asset;

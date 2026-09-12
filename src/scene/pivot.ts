@@ -1,7 +1,7 @@
 import { Vec3, Quat } from 'playcanvas';
 
 import { Events } from '../core/events';
-import { Transform } from '../transform';
+import { Transform } from '../transform/transform';
 
 // stores the transform pivot location in world space
 // the transform tools (translate, rotate, scale) and transform panel modify this pivot

@@ -42,6 +42,42 @@ npm run verify:render
 > 端口被占用时 `serve` 会自动换端口，以它输出的 URL 为准。
 > Electron 打包版内建静态服务用 5173（`electron-main.js` 的 `findAvailablePort(5173)`），现场报错里的 `127.0.0.1:5173` 即此。
 
+## 源码布局（`src/`）
+
+`src/` 根部只保留入口与对外 API，其余按领域分目录（2026-09-11 整理，根部由 76 个松散文件降到 5 个）：
+
+| 目录 | 内容 |
+|---|---|
+| `src/`（根部 5 个）| `index.ts`（应用入口）、`main.ts`、`sw.ts`（service worker）、`pc-app.ts`、`iframe-api.ts`（内嵌 API）|
+| `core/` | 基础设施：事件、命令队列、编辑历史/操作、选择与 op、序列化、偏好、快捷键、GPU 后端、渲染诊断等 |
+| `app/` | 应用层：`editor.ts`、`render.ts`、文档与文件处理（`doc`/`file-handler`/`drop-handler`/`asset-loader`/`recent-files`）、发布 |
+| `scene/` | 场景图与拾取：`scene`/`element`/`underlay`/`outline`/`infinite-grid`/`pivot`/`picker`/形状与工具覆盖层/裁切盒 |
+| `splat/` | 高斯数据与渲染：`splat`、序列化、状态、overlay、group renderer、变换调色板、球形元数据 |
+| `camera/` | 相机与交互：`camera`、控制器、路径控制、PiP 预览、相机位姿、补间、鼠标绑定 |
+| `ui/` | PCUI 面板、工具栏、弹窗、scss、svg |
+| `tools/` | 选择/变换/修复等工具（含球刷、裁切、平面修复残留）|
+| `data-processor/` `shaders/` `workers/` | GPU 判交/直方图/边界、GLSL 着色器、Worker 入口 |
+| `merge/` `compare/` `timeline/` `animation/` `audio/` `effects/` `geometry/` `io/` `lod/` `gamepad/` `transform/` `tool-modules/` | 各专项模块 |
+
+移动模块请用 `scripts/move-src-modules.mjs`（自动重算相对 import，含 `scripts/`、`docs/` 里的跨引用），移动后必须
+`npm run typecheck && npm run lint`。
+
+## 全新拉取仓库后的构建
+
+```powershell
+npm install
+npm run patched        # 若 npm 的 allow-scripts 策略拦住了 postinstall，手动补打补丁（见下）
+npm run build
+npm run dist:win       # 可选：打包便携版
+```
+
+- `postinstall`（`scripts/apply-patches.js`）会打两个补丁：`@playcanvas/splat-transform` 的 `MAX_STRIPE_BYTES`
+  8MB→128MB（大 SOG 导出必需），以及嵌套 `eslint-plugin-import` 的 ESLint 10 API 兼容（旧解析版本需要）。
+  **本机环境的 allow-scripts 策略会拦住它**，所以提供了 `npm run patched` 手动入口；包内文件是否已打补丁可直接
+  查 `node_modules/@playcanvas/splat-transform/dist/index.mjs` 里有没有 `MAX_STRIPE_BYTES = 128 * 1024 * 1024`。
+- 打包前若报找不到依赖树，需要给 `node_modules/app-builder-lib/out/util/appFileCopier.js` 打 TRAVERSAL 补丁
+  （离线/受限环境），打包完请还原。
+
 ## 与上游 SuperSplat 的关系
 
 - 上游：`playcanvas/supersplat`（MIT，v3.1.x，**纯 WebGPU**）；本仓库是 WebGL2 分支。

@@ -1,14 +1,14 @@
 import { ZipFileSystem, ZipReadFileSystem } from '@playcanvas/splat-transform';
 
-import { AnimationController } from './animation/animation-controller';
-import { Events } from './core/events';
-import { BrowserFileSystem, BlobReadSource } from './io';
 import { recentFiles } from './recent-files';
-import { Scene } from './scene/scene';
-import { Splat } from './splat/splat';
-import { writeSplatFile } from './splat/splat-serialize';
-import { Transform } from './transform';
-import { i18n } from './ui/localization';
+import { AnimationController } from '../animation/animation-controller';
+import { Events } from '../core/events';
+import { BrowserFileSystem, BlobReadSource } from '../io/index';
+import { Scene } from '../scene/scene';
+import { Splat } from '../splat/splat';
+import { writeSplatFile } from '../splat/splat-serialize';
+import { Transform } from '../transform/transform';
+import { i18n } from '../ui/localization';
 
 // ts compiler and vscode find this type, but eslint does not
 type FilePickerAcceptType = unknown;

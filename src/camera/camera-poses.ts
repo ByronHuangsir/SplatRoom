@@ -1,8 +1,8 @@
 import { Vec3 } from 'playcanvas';
 
 import { CubicSpline } from '../anim/spline';
-import { AnimTrack } from '../anim-track';
 import { Events } from '../core/events';
+import { AnimTrack } from '../timeline/anim-track';
 
 const DEG_TO_RAD = Math.PI / 180;
 

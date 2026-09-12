@@ -1,6 +1,6 @@
 import { Color } from 'playcanvas';
 
-import { Splat } from './splat/splat';
+import { Splat } from '../splat/splat';
 
 /**
  * Color Grade Sidecar File (.sscg) — non-destructive color grading.

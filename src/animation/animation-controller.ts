@@ -1,8 +1,8 @@
-import { AnimTrack } from '../anim-track';
 import { TrackId, TrackData } from './animation-data';
 import { AnimationTrackBase } from './animation-track-base';
 import { CameraAnimTrack } from './camera-track';
 import { Events } from '../core/events';
+import { AnimTrack } from '../timeline/anim-track';
 
 /**
  * Animation controller manages all animation tracks for the project.

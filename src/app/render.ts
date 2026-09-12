@@ -2,15 +2,15 @@ import { WebPCodec } from '@playcanvas/splat-transform';
 import { AudioBufferSource, BufferTarget, EncodedPacket, EncodedVideoPacketSource, getEncodableAudioCodecs, MkvOutputFormat, MovOutputFormat, Mp4OutputFormat, Output, StreamTarget, WebMOutputFormat } from 'mediabunny';
 import { Color, path, Quat, Vec3 } from 'playcanvas';
 
-import { buildMixBuffer } from './audio/audio-mix';
-import { Events } from './core/events';
-import { encodePng } from './core/png-writer';
-import { ElementType } from './scene/element';
-import { EquirectRenderer } from './scene/equirect-renderer';
-import { Scene } from './scene/scene';
-import { injectSphericalMetadata } from './splat/spherical-metadata';
-import { Splat } from './splat/splat';
-import { i18n } from './ui/localization';
+import { buildMixBuffer } from '../audio/audio-mix';
+import { Events } from '../core/events';
+import { encodePng } from '../core/png-writer';
+import { ElementType } from '../scene/element';
+import { EquirectRenderer } from '../scene/equirect-renderer';
+import { Scene } from '../scene/scene';
+import { injectSphericalMetadata } from '../splat/spherical-metadata';
+import { Splat } from '../splat/splat';
+import { i18n } from '../ui/localization';
 
 const nullClr = new Color(0, 0, 0, 0);
 
@@ -1660,4 +1660,4 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
 };
 
 export { ImageSettings, VideoSettings, registerRenderEvents };
-export type { TurntableVideoSettings } from './ui/turntable-video-dialog';
+export type { TurntableVideoSettings } from '../ui/turntable-video-dialog';

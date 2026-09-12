@@ -5,7 +5,7 @@ import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 import { ToolOverlay, OverlayWriter } from '../scene/tool-overlay';
 import { Splat } from '../splat/splat';
-import { Transform } from '../transform';
+import { Transform } from '../transform/transform';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';
 import { i18n } from '../ui/localization';
 

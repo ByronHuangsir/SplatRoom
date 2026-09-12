@@ -1,7 +1,7 @@
-import { CubicSpline } from '../anim/spline';
-import { AnimTrack } from '../anim-track';
 import { Keyframe, TrackData, EasingType, TRACK_DIMS } from './animation-data';
+import { CubicSpline } from '../anim/spline';
 import { Events } from '../core/events';
+import { AnimTrack } from '../timeline/anim-track';
 
 /**
  * Base class for all animation tracks.

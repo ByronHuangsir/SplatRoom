@@ -1,8 +1,8 @@
-import { Events } from './core/events';
 import { EntityTransformHandler } from './entity-transform-handler';
-import { registerPivotEvents } from './scene/pivot';
-import { Splat } from './splat/splat';
-import { SplatsTransformHandler } from './splat/splats-transform-handler';
+import { Events } from '../core/events';
+import { registerPivotEvents } from '../scene/pivot';
+import { Splat } from '../splat/splat';
+import { SplatsTransformHandler } from '../splat/splats-transform-handler';
 
 interface TransformHandler {
     activate: () => void;

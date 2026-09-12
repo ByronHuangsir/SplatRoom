@@ -9,7 +9,7 @@ import { Scene } from '../scene/scene';
 import { ToolOverlay, OverlayWriter } from '../scene/tool-overlay';
 import { Splat } from '../splat/splat';
 import { pickSplatSurfacePoint } from '../splat/splat-pick';
-import { Transform } from '../transform';
+import { Transform } from '../transform/transform';
 import { i18n } from '../ui/localization';
 
 // snap the picked plane normal to a splat-local axis within this angle so

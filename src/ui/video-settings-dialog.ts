@@ -1,9 +1,9 @@
 import { BooleanInput, Button, Container, Element, Label, SelectInput, VectorInput } from '@playcanvas/pcui';
 
-import { Events } from '../core/events';
-import { VideoSettings } from '../render';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
+import { VideoSettings } from '../app/render';
+import { Events } from '../core/events';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {

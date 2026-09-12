@@ -1,8 +1,8 @@
 import { Container, Element, Label } from '@playcanvas/pcui';
 
+import { recentFiles } from '../app/recent-files';
 import { Events } from '../core/events';
 import { ShortcutManager } from '../core/shortcut-manager';
-import { recentFiles } from '../recent-files';
 import { TOOL_MODULES } from '../tool-modules';
 import { i18n } from './localization';
 import { MenuPanel, MenuItem } from './menu-panel';

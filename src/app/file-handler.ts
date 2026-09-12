@@ -1,18 +1,18 @@
 import { Mat4, path, Quat, Vec3 } from 'playcanvas';
 
 import { deserializeGrade, serializeGrade, sidecarFilename } from './color-grade-file';
-import { Events } from './core/events';
-import { renderDiagnostics } from './core/render-diagnostics';
 import { CreateDropHandler } from './drop-handler';
-import { BrowserFileSystem, MappedReadFileSystem } from './io';
-import { attachLodFromFile } from './lod/lod-file';
-import { CropBox } from './scene/crop-box';
-import { ElementType } from './scene/element';
-import { Scene } from './scene/scene';
-import { Splat } from './splat/splat';
-import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat/splat-serialize';
-import { State } from './splat/splat-state';
-import { i18n } from './ui/localization';
+import { Events } from '../core/events';
+import { renderDiagnostics } from '../core/render-diagnostics';
+import { BrowserFileSystem, MappedReadFileSystem } from '../io/index';
+import { attachLodFromFile } from '../lod/lod-file';
+import { CropBox } from '../scene/crop-box';
+import { ElementType } from '../scene/element';
+import { Scene } from '../scene/scene';
+import { Splat } from '../splat/splat';
+import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from '../splat/splat-serialize';
+import { State } from '../splat/splat-state';
+import { i18n } from '../ui/localization';
 
 // ts compiler and vscode find this type, but eslint does not
 type FilePickerAcceptType = unknown;

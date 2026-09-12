@@ -1,9 +1,9 @@
 import { BooleanInput, Button, ColorPicker, Container, Element, Label, SelectInput, SliderInput, TextInput } from '@playcanvas/pcui';
 
 import { i18n } from './localization';
+import { ExportType, SceneExportOptions } from '../app/file-handler';
 import { Pose } from '../camera/camera-poses';
 import { Events } from '../core/events';
-import { ExportType, SceneExportOptions } from '../file-handler';
 import { AnimTrack, ExperienceSettings, defaultPostEffectSettings } from '../splat/splat-serialize';
 import sceneExport from './svg/export.svg';
 

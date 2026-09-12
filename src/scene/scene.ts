@@ -15,13 +15,13 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { AssetLoader } from '../asset-loader';
 import { Element, ElementType, ElementTypeList } from './element';
 import { InfiniteGrid as Grid } from './infinite-grid';
 import { Outline } from './outline';
 import { SceneConfig } from './scene-config';
 import { SceneState } from './scene-state';
 import { Underlay } from './underlay';
+import { AssetLoader } from '../app/asset-loader';
 import { Camera } from '../camera/camera';
 import { CameraPath3D } from '../camera/camera-path-3d';
 import { CameraPathControl } from '../camera/camera-path-control';
