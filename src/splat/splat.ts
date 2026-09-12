@@ -17,7 +17,7 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { buildGpuProjection } from './gpu-projection';
+import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { Serializer } from '../core/serializer';
@@ -670,36 +670,11 @@ class Splat extends Element {
     }
 
     // WebGPU only: upload the camera matrices as material parameters (see the call
-    // site in onPreRender and the notes in src/shaders/splat-shader-wgsl.ts).
-    private _gpuProjMat = new Mat4();
-
-    private _gpuViewProjMat = new Mat4();
-
+    // site in onPreRender and the notes in src/shaders/splat-shader-wgsl.ts). The
+    // picture-in-picture preview writes the same parameters for its own camera and restores
+    // them afterwards - see writeGpuCameraUniforms.
     private updateGpuCameraUniforms(instance: GSplatInstance) {
-        const wrapper = this.scene.camera as any;
-        const cam = wrapper?.camera;
-        if (!cam || !instance?.material) {
-            return;
-        }
-        const { material } = instance;
-        const near = cam.nearClip;
-        const far = cam.farClip;
-        const isOrtho = cam.projection === PROJECTION_ORTHOGRAPHIC;
-        const { width, height } = wrapper.targetSize ?? { width: 1, height: 1 };
-
-        // The camera component's own projection matrix is not usable here: the engine
-        // refreshes it lazily only while it syncs the render view for a frame, which our
-        // custom pass pipeline does after onPreRender runs — reading it here returns
-        // zeros. Build the matrix ourselves the way the engine does, including its
-        // horizontalFov and orthographic cases (see src/splat/gpu-projection.ts).
-        buildGpuProjection(this._gpuProjMat, cam);
-        this._gpuViewProjMat.mul2(this._gpuProjMat, cam.viewMatrix);
-
-        material.setParameter('uSplatView', cam.viewMatrix.data);
-        material.setParameter('uSplatViewProj', this._gpuViewProjMat.data);
-        material.setParameter('uSplatProj', this._gpuProjMat.data);
-        material.setParameter('uSplatCameraParams', [1 / far, far, near, isOrtho ? 1 : 0]);
-        material.setParameter('uSplatViewport', [width, height, 1 / width, 1 / height]);
+        writeGpuCameraUniforms(instance, this.scene.camera as unknown as GpuCameraSource);
     }
 
     onPreRender() {

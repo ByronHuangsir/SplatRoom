@@ -21,6 +21,7 @@ import {
 import { AnimationController } from '../animation/animation-controller';
 import { TrackId } from '../animation/animation-data';
 import { Element, ElementType } from '../scene/element';
+import { writeGpuCameraUniforms, GpuCameraSource } from '../splat/gpu-camera-uniforms';
 import { Splat } from '../splat/splat';
 
 /**
@@ -635,9 +636,17 @@ class CameraPreview extends Element {
             // otherwise blank the model in BOTH views on the next frame (the
             // "time-line expand + add keyframe → both views go blank" regression).
             let cropModified = false;
+            let cameraModified = false;
             try {
                 this._applyCropBoxForPip();
                 cropModified = true;
+
+                // WebGPU: the splat material takes its camera from material parameters
+                // (splat-shader-wgsl.ts), and they are written once per frame for the MAIN
+                // camera - so without this the preview drew the main viewport's camera and
+                // looked like a copy of the main view instead of the animation camera.
+                this._applyGpuCameraForPip();
+                cameraModified = true;
 
                 this.pipClearPass.render();
                 // render() (not before/execute/after) so the device brackets the pass:
@@ -654,6 +663,8 @@ class CameraPreview extends Element {
                 // but doing it here avoids a redundant restore on the happy path.
                 this._restoreMainCropBox();
                 cropModified = false;
+                this._restoreMainGpuCamera();
+                cameraModified = false;
             } finally {
             // ---- UNCONDITIONAL shared-state restoration (Phase 6 + 7) ----
             // Restore every instance to its MAIN pipeline (undoes Phase 1's
@@ -676,6 +687,11 @@ class CameraPreview extends Element {
                 // main view). Restore defensively.
                 if (cropModified) {
                     this._restoreMainCropBox();
+                }
+                // same for the camera parameters: left set for the preview camera they
+                // would project the main view through the animation camera
+                if (cameraModified) {
+                    this._restoreMainGpuCamera();
                 }
                 // Defensive clear cameras[] (main-view protection from async Worker sort).
                 for (const splat of splats) {
@@ -1024,6 +1040,47 @@ class CameraPreview extends Element {
         }
         if (this.scene.groupRenderer.isActive) {
             apply((this.scene.groupRenderer as any).mergedEntity?.gsplat?.instance);
+        }
+    }
+
+    /**
+     * WebGPU only: write the splat material's camera parameters for the PREVIEW camera.
+     *
+     * src/splat.ts uploads those parameters every frame from the MAIN camera, because on
+     * WebGPU the splat material does not read the engine's view uniform buffer. The material
+     * is shared with the preview render pass, so without re-writing them here the preview
+     * renders the main viewport's camera: the picture looks exactly like the main view
+     * (measured: 0.94 correlation with the viewport, -0.006 with the animation camera) while
+     * the preview camera entity itself sits correctly on the animation path.
+     *
+     * The viewport size is the preview's own render target, which is what the shader uses to
+     * scale splats, so the preview stays consistent with its smaller target. Call
+     * _restoreMainGpuCamera() afterwards (or the finally guard) so the next main-view frame
+     * is not projected through the preview camera.
+     */
+    private _applyGpuCameraForPip() {
+        if (!this.scene.graphicsDevice.isWebGPU) return;
+        const cam = this.cameraComponent;
+        if (!cam) return;
+        const source = { camera: cam as any, targetSize: { width: this.WIDTH, height: this.HEIGHT } };
+        this._forEachSplatInstance(instance => writeGpuCameraUniforms(instance, source));
+    }
+
+    /** Restore the splat material's camera parameters to the main view's camera. */
+    private _restoreMainGpuCamera() {
+        if (!this.scene.graphicsDevice.isWebGPU) return;
+        const source = this.scene.camera as unknown as GpuCameraSource;
+        this._forEachSplatInstance(instance => writeGpuCameraUniforms(instance, source));
+    }
+
+    /** Run fn for every gsplat instance that renders the shared splat material. */
+    private _forEachSplatInstance(fn: (instance: any) => void) {
+        const splats = this.scene.getElementsByType(ElementType.splat) as Splat[];
+        for (const splat of splats) {
+            fn((splat.entity as any)?.gsplat?.instance);
+        }
+        if (this.scene.groupRenderer.isActive) {
+            fn((this.scene.groupRenderer as any).mergedEntity?.gsplat?.instance);
         }
     }
 

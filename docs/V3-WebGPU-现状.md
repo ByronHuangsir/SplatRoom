@@ -689,6 +689,52 @@ WebGL2 6/6 通过，WebGPU 7/7 通过；两者全景 **同行同向**（平均�
 另外确认：`captureToCanvasWebGPU()` 不翻转行是**对的** —— `Texture.read(..., immediate: true)` 在两个后端
 都返回同一行序（这一点由 360 全景那条独立证据确定：两个后端用同一段翻转代码得到同向全景）。
 
+### 6.24 第二十一轮：PiP 在 WebGPU 下"画的是主视角"—— 已定位并修好（6.23 末尾的疑问到此结清）
+
+用户补充了现场截图并说明现象：**"播放时 PiP 里产生了和主视角一样的画面，而不是设置的相机的画面"**。
+这一条把我前一轮的四组测量全部绕过了：那些测量都让"动画相机姿态 = 编辑相机姿态"，两种假设都会通过。
+于是重新设计了一个能区分两者的实验（`_tmp/pip-who-renders-probe.cjs`，已固化为
+`docs/verify/verify-pip-camera.cjs`）：
+
+- 关键帧：第 0 帧存姿态 A、第 90 帧存姿态 B；
+- 把**编辑相机**停到完全不同的姿态 C（azim -90 / elev 70），取 PiP 画面 `pipC` 与主视口 `mainC`；
+- 再把编辑相机挪到姿态 A，取 `pipA` 与 `mainA`；
+- 正确的预览应当 ≈ `mainA` 且**不随编辑相机变化**；只会照抄主相机的预览则会 ≈ `mainC`。
+
+**修复前的实测（WebGPU）**：`pipC` vs `mainC` = **0.94**、`pipC` vs `mainA` = **-0.006**、
+`pipA` vs `pipC` = **0.011** —— 预览完全跟着主相机跑。同一脚本在 **WebGL2** 上：
+`pipC` vs `mainC` = -0.016、`pipC` vs `mainA` = **0.96**、`pipA` vs `pipC` = **1.0** —— 说明这是
+WebGPU 独有的缺陷，与用户观察一致。
+
+**根因**：WebGPU 下 splat 材质**不读引擎的 view uniform buffer**，而是读材质参数
+（`uSplatView`/`uSplatViewProj`/`uSplatProj`/`uSplatCameraParams`/`uSplatViewport`），这些参数由
+`src/splat/splat.ts` 的 `onPreRender()` **每帧按主相机**写一次；而 PiP 渲染的是**同一份材质**，
+于是它虽然用的是动画相机的相机实体，但着色器里的相机矩阵还是主相机的 → 画面就是主视角。
+（PiP 相机实体本身一直是对的：探针读出它在帧 0/90 分别落在 A/B 上，且与编辑相机不重合。）
+
+**修复**：
+
+- 新增 `src/splat/gpu-camera-uniforms.ts`：把原来 `Splat.updateGpuCameraUniforms()` 的实现抽成
+  `writeGpuCameraUniforms(instance, { camera, targetSize })`，主视图与 PiP 共用同一段逻辑；
+  `Splat` 侧改为调用它。
+- `src/camera/camera-preview.ts`：PiP 渲染前 `_applyGpuCameraForPip()`（用 **PiP 相机组件 + 320×180
+  渲染目标尺寸** 写参数，视口尺寸也随之为预览自己的目标尺寸），渲染后与 `finally` 兜底里
+  `_restoreMainGpuCamera()` 还原成主相机；与既有的 `_applyCropBoxForPip`/`_restoreMainCropBox`
+  完全同一套模式（共享材质 + 自定义渲染遍 = 必须"改—渲染—还原"）。新增 `_forEachSplatInstance()`
+  同时覆盖单模型实例与合并（group）实例。WebGL2 下这两个方法是空操作。
+
+**修复后实测（双后端逐项相同）**：`pipC` vs `mainC` = **-0.016**、`pipC` vs `mainA` = **0.96**、
+`pipA` vs `pipC` = **1.0**，对照项 `mainA` vs `mainC` = 0.032（两个视口姿态确实不同）。
+
+**新增回归脚本** `docs/verify/verify-pip-camera.cjs`（4 项检查：对照项、预览=动画相机、预览不随编辑
+相机变化、无控制台错误）：WebGPU 4/4、WebGL2 4/4。
+
+**回归**：`verify:diag` 7/7，`verify-model-renders`、`verify-pip-preview`（双后端）、
+`verify-pip-camera`（双后端）、`verify-shape-selection`（双后端 13 项）、`verify-centers-overlay`、
+`verify-selection-depth`、`verify-edit-hide`、`verify-effects`、`verify-export-image`、
+`verify-equirect-export`、`verify-ortho-camera`、`verify-transform-palette`、`verify-webgpu-fallback`
+全部 **0 失败**（主视图未被这次"改—还原"影响）。
+
 
 
 
