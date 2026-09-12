@@ -106,9 +106,11 @@ const settle = async (page) => {
             await new Promise(r => setTimeout(r, 400));
             const box = scene.events.invoke('cropBox');
             if (box) {
-                // box mode clips against the box's own world size (the radii only drive the
-                // cylinder/sphere shapes), so shrink the pivot to cut most of the model away
-                box.pivot.setLocalScale(0.35, 0.35, 0.35);
+                // box mode clips against the box's half-extents (the pivot scale is derived from
+                // them every frame), so shrink the extents themselves
+                const ext = box._extent ?? box.extent;
+                if (ext && ext.set) ext.set(0.3, 0.3, 0.3);
+                scene.events.fire('cropBox.changed');
             }
             scene.events.fire('cropBox.setClipping', true);
             await new Promise(r => setTimeout(r, 800));
@@ -122,11 +124,7 @@ const settle = async (page) => {
             { name: 'model visible at baseline', pass: baseline.colourfulPct > 20, detail: `${baseline.colourfulPct}% colourful` },
             { name: 'saturation 0 removes the colour', pass: desaturated.colourfulPct < baseline.colourfulPct * 0.3, detail: `${baseline.colourfulPct}% -> ${desaturated.colourfulPct}%` },
             { name: 'saturation 1 restores it', pass: restored.colourfulPct > baseline.colourfulPct * 0.8, detail: `${restored.colourfulPct}%` },
-            // NOTE: the crop-box step below currently does not clip on EITHER backend, so it is
-            // reported but not asserted: the harness still misses a step of the crop-box setup
-            // (the box is created, enabled, scaled and its uniforms reach the material, yet the
-            // rendered pixels do not change). Tracked as a TODO in docs/V3-WebGPU-现状.md 6.9.
-            { name: 'crop box clipping removes splats (informational)', pass: true, detail: `lit ${baseline.litPct}% -> ${cropped.litPct}% (setup incomplete, not asserted)` }
+            { name: 'crop box clipping removes splats', pass: cropped.litPct < baseline.litPct * 0.85, detail: `lit ${baseline.litPct}% -> ${cropped.litPct}% (ratio ${(cropped.litPct / baseline.litPct).toFixed(2)})` }
         ];
         console.log(JSON.stringify({ backend, baseline, desaturated, restored, cropped, cropState, checks, failed: checks.filter(c => !c.pass).length, errors }, null, 2));
         if (checks.some(c => !c.pass) || errors.length) process.exitCode = 1;

@@ -277,3 +277,19 @@ pass 描述，确认是不是 `discard`；若是，则在 `Picker.prepareId` 里
 
 **下一轮待办**：修 `verify-edit-grade-crop.cjs` 的裁剪步骤（用 pivot 缩放/切换形状 + 触发 `cropBox.changed`），
 然后逐项验证：粒子特效、变换调色板、选中描边（RT1）、居中点覆盖层（orderBuffer）、PiP、导出/快照。
+### 6.10 第七轮：裁剪盒在 WebGPU 上确认生效
+
+上一轮"裁剪盒不裁剪"其实是**验证脚本没把盒子改小**：`CropBox` 每帧用半尺寸 `_extent` 重算 pivot 缩放
+（`crop-box.ts:136`），所以对它 `setLocalScale` 无效，被下一帧覆盖回去；盒模式的 `dist` 只看盒子的世界尺寸，
+改 `radiusX/Y/Z` 完全不影响。改成写 `box._extent.set(0.3, 0.3, 0.3)` 之后：
+
+| 后端 | 裁剪前 lit | 裁剪后 lit | 断言 |
+| --- | --- | --- | --- |
+| WebGPU | 98.6% | **19.5%**（ratio 0.20） | ✓ |
+| WebGL2 | 99.7% | **40.2%**（ratio 0.40） | ✓ |
+
+`verify-edit-grade-crop.cjs` 的裁剪检查已恢复为真正断言（双后端 failed=0）。
+
+**待跟进**：两个后端的残余比例不同（0.20 vs 0.40），说明 WGSL 侧裁剪体积与 GLSL 侧**不完全一致**（可能出在
+view 空间坐标重建 / 椭圆 varyings / cap plane 宽度）。两者都正确裁剪，但下一轮应当把差异量化到具体项
+（例如同一相机下把剩余区域画成 ASCII 图对比），必要时修正 WGSL 裁剪数学。
