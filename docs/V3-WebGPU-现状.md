@@ -312,3 +312,19 @@ view 空间坐标重建 / 椭圆 varyings / cap plane 宽度）。两者都正�
 
 **下一轮**：用同一相机把两端的 `dist` 场各自画出来做逐像素对比（哪一侧先越过 0）；这是像素级等价的最后一步。
 在此之前，"裁剪在 WebGPU 下可用"成立（两侧都强裁剪），"与 WebGL2 像素级一致"尚未成立。
+### 6.12 第九轮：第二渲染目标（RT1）的两个消费方在 WebGPU 上验证通过
+
+`output.color1` 是本次移植里"引擎 WGSL 着色器原本没有"的那一半（选中描边/底层着色都靠它），
+用新脚本 `docs/verify/verify-selection-overlay.cjs` 做像素级验证：
+
+| 状态 | WebGPU 平均亮度 | WebGL2 平均亮度 |
+| --- | --- | --- |
+| 无选择 | 114 | 118 |
+| 全选（底层着色 RT1.rgb 叠加，无描边） | **151** | **157** |
+| 打开选中描边（描边遍读 RT1.a 覆盖率） | **119** | **122** |
+
+- 全选后画面显著变亮 → RT1 的 **rgb** 通道（选中 20% 叠加色）在 WebGPU 下正确写出并被 `apply-underlay` 消费 ✓
+- 打开描边后画面回落（描边重绘轮廓） → RT1 的 **alpha** 通道（`norm` 覆盖率）在 WebGPU 下正确写出并被 `apply-outline` 消费 ✓
+- 两后端 failed=0 / errors=0，数值差异 <4%（AA 与覆盖率统计口径），属于同一量级
+
+脚本入库：`node docs/verify/verify-selection-overlay.cjs "http://localhost:3621/?gpu=webgpu" test-model.ply`
