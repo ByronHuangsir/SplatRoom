@@ -1,12 +1,12 @@
 // Unit checks for src/render-diagnostics.ts, run straight from source with
 // Node's type stripping (no build needed):
-//   node --experimental-strip-types docs/verify-render-diagnostics.mts
+//   node --experimental-strip-types docs/verify/verify-render-diagnostics.mts
 //
 // Covers the case reported from the field: the experimental WebGPU backend
 // renders small models but leaves a large one blank, because the backend keeps
 // the sort order in one u32-per-splat storage buffer that can exceed the
 // adapter's binding/buffer limits.
-import { renderDiagnostics } from '../src/render-diagnostics.ts';
+import { renderDiagnostics } from '../../src/render-diagnostics.ts';
 
 const splat = (opts: {
     numSplats: number,

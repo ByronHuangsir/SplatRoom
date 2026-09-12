@@ -6,7 +6,7 @@
 //   - page errors and console errors (shader compile failures show up here)
 //   - how many splats each path selected (proves the pass actually ran)
 //
-// usage: node docs/verify-selection-depth.cjs [url]
+// usage: node docs/verify/verify-selection-depth.cjs [url]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

@@ -4,8 +4,8 @@
 // show up as the mask stroke in the upper half matching the rect in the lower
 // half instead.
 //
-// Requires the asymmetric model: node docs/gen-test-splat.cjs dist/test-model.ply --asym
-// usage: node docs/verify-mask-vs-rect.cjs [url]
+// Requires the asymmetric model: node docs/verify/gen-test-splat.cjs dist/test-model.ply --asym
+// usage: node docs/verify/verify-mask-vs-rect.cjs [url]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

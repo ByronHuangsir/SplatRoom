@@ -3,7 +3,7 @@
 // visibility). The selection tests only assert counts, so nothing until now
 // verified that pixels reach the viewport.
 //
-// usage: node docs/verify-model-renders.cjs [url]
+// usage: node docs/verify/verify-model-renders.cjs [url]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

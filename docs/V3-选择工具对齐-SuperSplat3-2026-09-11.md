@@ -51,7 +51,7 @@
 - `select.byMask` 改为**每次手势一张独立遮罩纹理**（`finally` 中销毁），取代共享缓存纹理；后者在排队期间可能被后续笔画改写。
 - `shortcuts-popup`：补球刷条目、两个选择模式开关条目、`Shift + Ctrl = 与选区相交`提示。
 
-## 三、无头验证（`docs/verify-*.cjs`，Edge + swiftshader 软件 GL）
+## 三、无头验证（`docs/verify/verify-*.cjs`，Edge + swiftshader 软件 GL）
 
 | 脚本 | 覆盖 | 结果 |
 |---|---|---|
@@ -76,10 +76,10 @@
 
 ```powershell
 npm run build
-node docs/gen-test-splat.cjs dist/test-model.ply            # 或加 --asym 供 mask/rect 一致性测试
+node docs/verify/gen-test-splat.cjs dist/test-model.ply            # 或加 --asym 供 mask/rect 一致性测试
 npx serve dist -C -l 3100
-node docs/verify-selection-toolbar.cjs  http://localhost:3100/
-node docs/verify-mask-vs-rect.cjs       http://localhost:3100/
-node docs/verify-selection-depth.cjs    http://localhost:3100/
+node docs/verify/verify-selection-toolbar.cjs  http://localhost:3100/
+node docs/verify/verify-mask-vs-rect.cjs       http://localhost:3100/
+node docs/verify/verify-selection-depth.cjs    http://localhost:3100/
 # 跑完删除 dist/test-model.ply，否则会被打进安装包
 ```

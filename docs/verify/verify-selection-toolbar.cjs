@@ -5,7 +5,7 @@
 //   - the sphere brush button activates the tool
 // Reports console/page errors as well.
 //
-// usage: node docs/verify-selection-toolbar.cjs [url]
+// usage: node docs/verify/verify-selection-toolbar.cjs [url]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

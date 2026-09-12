@@ -39,3 +39,6 @@ scripts/probe-shots/
 seg-lab/*.ply
 seg-lab/*.png
 seg-lab/*.jpg
+
+# 未入库的一次性调试脚本（归档但不提交）
+scripts/dev-history/local/
