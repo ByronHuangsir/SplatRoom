@@ -210,7 +210,7 @@ class SphereSelection {
         const fitToTarget = () => {
             const bound = selectionTargetBound(events, scene);
             if (bound) {
-                fitSphereToBound(sphere, bound);
+                fitSphereToBound(scene, sphere, bound);
                 updateUI();
             }
             return !!bound;

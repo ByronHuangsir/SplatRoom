@@ -197,6 +197,9 @@ const movedModelCase = (page, toolName) => page.evaluate(async (name) => {
 
     const el = scene.getElementsByType('debug').find(e => e.pivot && e.pivot.name === (name === 'boxSelection' ? 'boxPivot' : 'spherePivot'));
     const pos = el ? el.pivot.getPosition() : null;
+    const b = splat.localBound;
+    const modelExtent = Math.max(b.halfExtents.x, b.halfExtents.y, b.halfExtents.z) * 2;
+    const volumeSize = el ? (el.lenX !== undefined ? Math.max(el.lenX, el.lenY, el.lenZ) : el.radius * 2) : null;
 
     const bars = Array.from(document.querySelectorAll('.select-toolbar'));
     const toolbar = bars.find(t => !t.classList.contains('pcui-hidden'));
@@ -209,6 +212,8 @@ const movedModelCase = (page, toolName) => page.evaluate(async (name) => {
     const result = {
         tool: name,
         volumePosition: pos ? [+pos.x.toFixed(3), +pos.y.toFixed(3), +pos.z.toFixed(3)] : null,
+        volumeSize: volumeSize === null ? null : +volumeSize.toFixed(3),
+        modelExtent: +modelExtent.toFixed(3),
         selected: splat.numSelected,
         numSplats: splat.splatData.numSplats
     };
@@ -378,16 +383,23 @@ const opCase = (page, op) => page.evaluate(async (operation) => {
                 detail: `from ${o.before} selected, ${o.inside} inside: expected ${o.expected}, got ${o.actual}`
             })),
             {
-                // regression: the volume used to stay at the world origin, so with a model
-                // that is not centred there "set" selected nothing at all
-                name: 'box tool: fits the volume over a model away from the origin',
-                pass: movedBox.selected > 0 && Math.abs(movedBox.volumePosition[0] - 8) < 0.5,
-                detail: `volume at ${JSON.stringify(movedBox.volumePosition)}, selected ${movedBox.selected}/${movedBox.numSplats}`
+                // regression 1: the volume used to stay at the world origin, so with a model
+                // that is not centred there it pointed at nothing
+                // regression 2: a volume fitted to the WHOLE model hugs its surface, where the
+                // grid is invisible and the scale handles sit inside the model — so the default
+                // has to be noticeably smaller than the model as well
+                name: 'box tool: places a visible volume over a model away from the origin',
+                pass: Math.abs(movedBox.volumePosition[0] - 8) < 0.5 &&
+                    movedBox.volumeSize > 0 &&
+                    movedBox.volumeSize < movedBox.modelExtent * 0.75,
+                detail: `volume at ${JSON.stringify(movedBox.volumePosition)}, size ${movedBox.volumeSize} (model extent ${movedBox.modelExtent}), selected ${movedBox.selected}/${movedBox.numSplats}`
             },
             {
-                name: 'sphere tool: fits the volume over a model away from the origin',
-                pass: movedSphere.selected > 0 && Math.abs(movedSphere.volumePosition[0] - 8) < 0.5,
-                detail: `volume at ${JSON.stringify(movedSphere.volumePosition)}, selected ${movedSphere.selected}/${movedSphere.numSplats}`
+                name: 'sphere tool: places a visible volume over a model away from the origin',
+                pass: Math.abs(movedSphere.volumePosition[0] - 8) < 0.5 &&
+                    movedSphere.volumeSize > 0 &&
+                    movedSphere.volumeSize < movedSphere.modelExtent * 0.75,
+                detail: `volume at ${JSON.stringify(movedSphere.volumePosition)}, size ${movedSphere.volumeSize} (model extent ${movedSphere.modelExtent}), selected ${movedSphere.selected}/${movedSphere.numSplats}`
             }
         ];
 

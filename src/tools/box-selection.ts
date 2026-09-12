@@ -244,7 +244,7 @@ class BoxSelection {
         const fitToTarget = () => {
             const bound = selectionTargetBound(events, scene);
             if (bound) {
-                fitBoxToBound(box, bound);
+                fitBoxToBound(scene, box, bound);
                 updateUI();
             }
             return !!bound;
