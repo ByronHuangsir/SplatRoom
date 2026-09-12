@@ -328,3 +328,33 @@ view 空间坐标重建 / 椭圆 varyings / cap plane 宽度）。两者都正�
 - 两后端 failed=0 / errors=0，数值差异 <4%（AA 与覆盖率统计口径），属于同一量级
 
 脚本入库：`node docs/verify/verify-selection-overlay.cjs "http://localhost:3621/?gpu=webgpu" test-model.ply`
+### 6.13 第十轮：尝试让居中点覆盖层在 WebGPU 可用 —— 发现更深的阻塞，已回滚保护渲染
+
+**做了什么**：WebGPU 下排序结果在 `orderBuffer`（存储缓冲）里，覆盖层着色器要的是 `usampler2D splatOrder`。
+于是让 `SplatOverlay` 在 WebGPU 下**自建一张 R32U 顺序纹理**，从 sorter 的 CPU 侧 `orderData` 上传
+（worker 每次排序都会把 order 数组 postMessage 回主线程），并在 sorter `updated` 时标脏、下一帧重传。
+
+**结果（必须回滚的原因）**：有了顺序纹理之后覆盖层真的开始渲染，但它的材质在 WebGPU 下**建不出管线**：
+
+```
+warn: Entry point ""main"" doesn't exist in the shader module [ShaderModule (unlabeled)].
+      - While validating vertex stage ([Invalid ShaderModule], entryPoint: "main")
+warn: [Invalid RenderPipeline] ... RT:cameraColor ... SetPipeline
+warn: [Invalid CommandBuffer] ... Queue.Submit
+```
+
+后果不是"覆盖层不显示"，而是**整个视口变黑**（实测画面均值 114 → 0）——即切换 centers 模式会毁掉整帧。
+因此本轮**已回滚**该改动（`git checkout -- src/splat/splat-overlay.ts`），回到"覆盖层在 WebGPU 不可用只是不显示、
+不影响渲染"的安全状态；回滚后复测：`mean 114 -> 114`，模型照常显示。
+
+**新脚本入库**：`docs/verify/verify-centers-overlay.cjs`（切换 centers 模式并测量像素）：
+
+| 检查 | WebGPU | WebGL2 |
+| --- | --- | --- |
+| centers 模式不破坏渲染（回归护栏） | ✓ lit 98.4% → 98.4% | ✓ lit 99.9% → 99.9% |
+| 顺序来源 | `orderBuffer=true` / `orderTexture=false` | `orderTexture=true` / `orderBuffer=false` |
+
+**下一轮**：先查清那条 `Entry point ""main""` 的真实来源——把覆盖层材质编译出的 WGSL 模块与入口点 dump 出来
+（PlayCanvas 对 GLSL 材质在 WebGPU 上走 glslang/twgsl 转译，入口点应为 `main`；报错里带引号的 `"main"` 说明
+入口点字符串被错误地当作名字传入，或模块其实来自另一条编译路径）。修好入口点之后再恢复"自建顺序纹理"的方案，
+并用同一脚本断言覆盖层真的画出来了（还需找到脚本里正确的 overlay 句柄属性）。
