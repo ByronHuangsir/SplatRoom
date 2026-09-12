@@ -35,23 +35,28 @@ class SphereShape extends Element {
     }
 
     add() {
-        const material = new ShaderMaterial({
-            uniqueName: 'sphereShape',
-            vertexGLSL: vertexShader,
-            fragmentGLSL: fragmentShader
-        });
-        material.cull = CULLFACE_FRONT;
-        material.blendState = new BlendState(
-            true,
-            BLENDEQUATION_ADD, BLENDMODE_SRC_ALPHA, BLENDMODE_ONE_MINUS_SRC_ALPHA,
-            BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA
-        );
-        material.update();
+        // the material is built once and reused: add() runs on every activation of the
+        // selection tool, so re-creating it leaked a material (and re-transpiled its
+        // shader on WebGPU) on every toggle
+        if (!this.material) {
+            const material = new ShaderMaterial({
+                uniqueName: 'sphereShape',
+                vertexGLSL: vertexShader,
+                fragmentGLSL: fragmentShader
+            });
+            material.cull = CULLFACE_FRONT;
+            material.blendState = new BlendState(
+                true,
+                BLENDEQUATION_ADD, BLENDMODE_SRC_ALPHA, BLENDMODE_ONE_MINUS_SRC_ALPHA,
+                BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA
+            );
+            material.update();
 
-        this.pivot.render.meshInstances[0].material = material;
+            this.material = material;
+        }
+
+        this.pivot.render.meshInstances[0].material = this.material;
         this.pivot.render.layers = [this.scene.worldLayer.id];
-
-        this.material = material;
 
         this.scene.contentRoot.addChild(this.pivot);
 
