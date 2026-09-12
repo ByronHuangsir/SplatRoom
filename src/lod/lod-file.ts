@@ -20,7 +20,7 @@ import type { Splat } from '../splat';
  * source into GSplatData layers (skipping LOD 0, which the app already
  * loaded as the main data). Returns [] when the file has a single level.
  */
-export const materializeCoarseLodLevels = async (
+const materializeCoarseLodLevels = async (
     fileSystem: ReadFileSystem,
     filename: string
 ): Promise<{ count: number; data: ReturnType<typeof columnsToGsplatData> }[]> => {

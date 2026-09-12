@@ -225,13 +225,13 @@ export function eigenDecompSym3x3(
     return { values: sortedVals, vectors: sortedVecs };
 }
 
-export function classifyShape(flatness: number, edgeness: number): GaussShape {
+function classifyShape(flatness: number, edgeness: number): GaussShape {
     if (flatness >= 0.55) return GaussShape.VOLUMETRIC;
     if (edgeness >= 0.4) return GaussShape.LINE;
     return GaussShape.SURFACE;
 }
 
-export function analyzeOne(
+function analyzeOne(
     quat: [number, number, number, number],
     linearScale: [number, number, number]
 ): Omit<GaussAnalysis, 'localNormal' | 'localThickness' | 'signedDist' | 'localDensity' | 'regionDensity' | 'nnDist' | 'outlierScore' | 'isOutlier'> {

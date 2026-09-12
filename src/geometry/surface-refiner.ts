@@ -309,7 +309,7 @@ export async function refineSurface(
 /**
  * Deep-copy the current scale and rotation arrays for undo/redo.
  */
-export function snapshotScaleRotation(splat: Splat) {
+function snapshotScaleRotation(splat: Splat) {
     const arrs = extractArrays(splat);
     return cloneArrays(arrs);
 }
@@ -319,7 +319,7 @@ export type ScaleRotationSnapshot = ReturnType<typeof snapshotScaleRotation>;
 /**
  * Restore a previously saved snapshot into the live arrays.
  */
-export function restoreSnapshot(splat: Splat, snap: ScaleRotationSnapshot) {
+function restoreSnapshot(splat: Splat, snap: ScaleRotationSnapshot) {
     const arrs = extractArrays(splat);
     restoreArrays(arrs, snap);
 }

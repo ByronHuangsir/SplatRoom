@@ -627,7 +627,7 @@ function readGSplatData(data: GSplatData): SplatArrays {
  * @param session - The same session used in Level 1 (for slab boundary info)
  * @param params - Level 2 parameters
  */
-export function applyLevel2Fix(
+function applyLevel2Fix(
     data: GSplatData,
     session: PlanarFixSession,
     params: PlanarFixLevel2Params

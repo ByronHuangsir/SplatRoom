@@ -27,7 +27,7 @@ export interface ActionDef {
 }
 
 // Standard gamepad button indices
-export const BTN_NAMES: Record<number, string> = {
+const BTN_NAMES: Record<number, string> = {
     0: 'A',
     1: 'B',
     2: 'X',
@@ -50,7 +50,7 @@ export const BTN_NAMES: Record<number, string> = {
 };
 
 // PlayStation protocol names (indices identical; labels differ)
-export const BTN_NAMES_PS: Record<number, string> = {
+const BTN_NAMES_PS: Record<number, string> = {
     0: '✕ (Cross)',
     1: '○ (Circle)',
     2: '□ (Square)',
@@ -79,7 +79,7 @@ export const bindingName = (binding: Binding, preset: PresetId = 'xbox'): string
     return table[binding.index] ?? `按键${binding.index}`;
 };
 
-export const bindingEquals = (a: Binding, b: Binding): boolean => {
+const bindingEquals = (a: Binding, b: Binding): boolean => {
     return a.type === b.type && a.index === b.index;
 };
 
@@ -87,7 +87,7 @@ export const bindingEquals = (a: Binding, b: Binding): boolean => {
 export const RESERVED_BINDING_INDICES = [10, 11];
 
 /** 哨兵索引：表示未绑定 */
-export const UNBOUND_INDEX = 26;
+const UNBOUND_INDEX = 26;
 
 // --- Default bindings ---
 // 混合方案：开发包常用动作直接绑定（对齐 v1.3.0 默认键位：setOrigin=A）；
@@ -193,7 +193,7 @@ export interface AxisSettings {
     invertRightY: boolean;
 }
 
-export const DEFAULT_AXIS: AxisSettings = {
+const DEFAULT_AXIS: AxisSettings = {
     moveSensitivity: 4.0,
     lookSensitivity: 0.35,
     lookPitchSensitivity: 0.20,
@@ -211,7 +211,7 @@ export interface GamepadConfig {
     axis: AxisSettings;
 }
 
-export const CONFIG_STORAGE_KEY = 'splatroom.gamepad.config.v1';
+const CONFIG_STORAGE_KEY = 'splatroom.gamepad.config.v1';
 
 // --- Persistence ---
 

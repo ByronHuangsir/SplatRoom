@@ -64,14 +64,14 @@ export interface EffectPreset {
  *     - fade = 1 - smoothstep(0.75, 1.0, outroProg)：消散程度
  *     新增预设只需定义 mode/颜色/半径，无需关心时间曲线。
  */
-export const EFFECT_PRESETS: EffectPreset[] = [
+const EFFECT_PRESETS: EffectPreset[] = [
     { id: 'scatter', title: '粒子化（默认）', radiusScale: 1.2, mode: 0, color: null, kind: 'both' },
     { id: 'ripple', title: '波纹开场', radiusScale: 1.4, mode: 1, color: [1.0, 0.95, 0.85], kind: 'intro' },
     { id: 'drift', title: '飘散散场', radiusScale: 1.1, mode: 2, color: [1.0, 0.85, 0.5], kind: 'outro' }
 ];
 
 /** 获取某图层可用的预设（开场只显示开场预设，散场只显示散场预设） */
-export const presetsFor = (which: EffectClipKind): EffectPreset[] => {
+const presetsFor = (which: EffectClipKind): EffectPreset[] => {
     return EFFECT_PRESETS.filter(p => p.kind === 'both' || p.kind === which);
 };
 

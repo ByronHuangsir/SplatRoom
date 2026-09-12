@@ -92,7 +92,7 @@ export const decimateGsplatData = async (
  * freeze the UI for minutes. Sampling gathers ~`targetCount` rows evenly and
  * yields between column passes so the progress bar stays live.
  */
-export const sampleGsplatData = async (
+const sampleGsplatData = async (
     source: GSplatData,
     targetCount: number,
     comments: string[] = [],
@@ -317,7 +317,7 @@ const getLodWorker = (): Worker => {
  * wrap each into a GSplatData (not yet GPU assets). Falls back to the
  * synchronous main-thread path when the worker is unavailable.
  */
-export const buildLodLevels = async (
+const buildLodLevels = async (
     source: GSplatData,
     fractions: number[],
     comments: string[] = [],

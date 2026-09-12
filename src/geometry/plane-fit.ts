@@ -97,7 +97,7 @@ export function pointToPlaneDistance(p: Vec3, plane: Plane): number {
 }
 
 /** Project a point onto the plane (d = 0). */
-export function projectToPlane(p: Vec3, plane: Plane): Vec3 {
+function projectToPlane(p: Vec3, plane: Plane): Vec3 {
     const d = pointToPlaneDistance(p, plane);
     return new Vec3(
         p.x - d * plane.normal.x,
@@ -128,7 +128,7 @@ export function basisToLocal(pu: number, pv: number, d: number, plane: Plane): V
 }
 
 /** Ray-casting point-in-polygon test in 2D (polygon as array of [x,y]). */
-export function pointInPolygon2D(x: number, y: number, poly: [number, number][]): boolean {
+function pointInPolygon2D(x: number, y: number, poly: [number, number][]): boolean {
     let inside = false;
     for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
         const xi = poly[i][0], yi = poly[i][1];
@@ -141,7 +141,7 @@ export function pointInPolygon2D(x: number, y: number, poly: [number, number][])
 }
 
 /** Andrew's monotone-chain convex hull of 2D points. */
-export function convexHull2D(pts: [number, number][]): [number, number][] {
+function convexHull2D(pts: [number, number][]): [number, number][] {
     if (pts.length < 3) return pts.slice();
     const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const cross = (o: [number, number], a: [number, number], b: [number, number]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
@@ -163,7 +163,7 @@ export function convexHull2D(pts: [number, number][]): [number, number][] {
 }
 
 /** Expand a 2D polygon outward from its centroid by a fixed margin. */
-export function dilatePolygon2D(poly: [number, number][], margin: number): [number, number][] {
+function dilatePolygon2D(poly: [number, number][], margin: number): [number, number][] {
     if (poly.length === 0 || margin <= 0) return poly;
     let cx = 0, cy = 0;
     for (const [x, y] of poly) {

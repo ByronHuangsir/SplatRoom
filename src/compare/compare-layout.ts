@@ -36,7 +36,7 @@ export function computeRects(count: number, mode: CompareLayoutMode): ViewportRe
 /**
  * Human-readable label for a (count, mode) preset — used by the panel buttons.
  */
-export function layoutLabel(count: number, _mode: CompareLayoutMode): string {
+function layoutLabel(count: number, _mode: CompareLayoutMode): string {
     const cn = count === 2 ? '双' : count === 3 ? '三' : '四';
     return `左右${cn}屏`;
 }

@@ -165,7 +165,7 @@ function dataTableToGSplatData(dataTable: DataTable): GSplatData {
 }
 
 /** 手动计算合并数据的世界 AABB（calcAabb 不可信）。 */
-export function computeMergedAabb(gsplatData: GSplatData): BoundingBox {
+function computeMergedAabb(gsplatData: GSplatData): BoundingBox {
     const xs = gsplatData.getProp('x') as Float32Array;
     const ys = gsplatData.getProp('y') as Float32Array;
     const zs = gsplatData.getProp('z') as Float32Array;

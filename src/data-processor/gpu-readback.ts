@@ -14,7 +14,7 @@
  */
 
 /** Max time to wait for a GPU readback before degrading. */
-export const READBACK_TIMEOUT_MS = 1500;
+const READBACK_TIMEOUT_MS = 1500;
 
 /**
  * Yield one animation frame so pending GPU uploads/renders drain first.
