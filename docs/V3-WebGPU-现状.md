@@ -191,10 +191,28 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
   - `big-model.ply`（5M 高斯 / 324 MB）：视口被模型填满，均值 (103,103,104) —— **大模型同样可见**。
 - WebGL2 无回归：`npm run check` 全绿、`verify-model-renders` 0 失败（33.3% 非背景）、`verify-webgpu-fallback` 7/7、`verify:diag` 7/7。
 
+### 6.6 第二轮（同日更晚）：修正一个错误结论 + 收窄剩余问题
+
+**修正**：上一节写的"WebGPU 回读返回全零"是**错的**。用原生 WebGPU 命令直接 `copyTextureToBuffer` + `mapAsync`
+读相机颜色纹理的**模型区域**（origin 400,250），返回的是真实数据（256 字节非零，half-float 数值合理）；
+之前读到的全零是因为采样点在**左上角黑色背景**（`origin 0,0`）。引擎的 `texture.read`（`immediate` 真/假都一样）
+本身在 WebGPU 下是可用的。
+
+剩下的 WebGPU 失效点收敛到**两个 GPU 数据处理器通道**（不是回读）：
+
+| 通道 | 现象 | 备注 |
+| --- | --- | --- |
+| `CalcBound`（`calc-bound.ts`） | 重新执行后仍返回 `center/half = 0` | 所以 `Splat.updateLocalBounds()` 的 CPU AABB 兜底先保留 |
+| 拾取 ID/深度（`RenderPassPicker` + PICK_PASS 变体） | `prepareId()` 之后立刻读 ID 目标（= `workTarget.colorBuffer`，同时是 splat MRT 的 RT1）**整片为 0**，连清屏色 (1,1,1,1) 都没落上 | 注意：不能在拾取后再渲染一帧再读 —— RT1 会被前向 splat 遍覆盖成 0（这个坑本轮踩过一次） |
+
+复现工具（`_tmp/`，未入库）：`raw-read-probe.cjs`（原生 WebGPU 回读 + usage 检查）、`pick-target-probe.cjs`
+（拾取后立刻原生读 ID 目标 + 引擎 `readIds` 对照）、`read-probe.cjs`（`immediate` 对照）。
+
 下一步（撤掉启动回退之前必须做完）：
 
-1. **WebGPU 回读路径本身**：`texture.read` 在 WebGPU 下返回全零 —— 它同时影响拾取（`readIds`/`readDepth`）、快照、
-   直方图/按范围选择、`calcBound`（目前用 CPU 兜底）。这是目前最大的一块。
+1. **修拾取通道**：`RenderPassPicker` 在 WebGPU 下的管线/清屏/材质变体（`pickOp`/`pickMode` 走 device scope，
+   已确认 scope 里有值；要查的是 material UB 是否拿到、以及拾取遍是否真的执行/写入了目标）。
+2. **修 `calcBound` 通道**（或长期改为 CPU 计算，反正引擎已经给了 CPU AABB）。
 2. 逐项验证核心编辑功能在 WebGPU 下的表现：颜色分级、隐藏/删除、裁剪盒（含切面）、粒子特效、变换调色板、选中描边（RT1 消费者）。
 3. 居中点覆盖层（需要 orderTexture，WebGPU 用 orderBuffer）与 PiP 预览。
 4. 全部通过后再移除启动回退、恢复设置面板选项、打包 3.5.x 便携版。
