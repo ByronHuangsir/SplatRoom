@@ -1,7 +1,7 @@
 import { BooleanInput, Button, Container, ContainerArgs, Label, SliderInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 import { detectFloaters } from '../splat/floater-removal';
 
 /**

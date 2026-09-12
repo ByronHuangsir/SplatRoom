@@ -1,4 +1,4 @@
-import { Events } from '../events';
+import { Events } from '../core/events';
 
 /**
  * 音频轨道管理器（SplatRoom 音频模块）

@@ -1,5 +1,5 @@
-import { Events } from '../events';
-import { opFromModifiers } from '../select-op';
+import { Events } from '../core/events';
+import { opFromModifiers } from '../core/select-op';
 
 class BrushSelection {
     activate: () => void;

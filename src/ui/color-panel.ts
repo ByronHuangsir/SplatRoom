@@ -1,10 +1,10 @@
 import { Button, Container, Label, SliderInput } from '@playcanvas/pcui';
 import { Color } from 'playcanvas';
 
-import { Events } from '../events';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
-import { SetSplatColorAdjustmentOp, type ColorAdjustment } from '../edit-ops';
+import { SetSplatColorAdjustmentOp, type ColorAdjustment } from '../core/edit-ops';
+import { Events } from '../core/events';
 import { Splat } from '../splat/splat';
 
 // pcui slider doesn't include start and end events

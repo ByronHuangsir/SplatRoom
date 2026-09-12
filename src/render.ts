@@ -3,8 +3,8 @@ import { AudioBufferSource, BufferTarget, EncodedPacket, EncodedVideoPacketSourc
 import { Color, path, Quat, Vec3 } from 'playcanvas';
 
 import { buildMixBuffer } from './audio/audio-mix';
-import { Events } from './events';
-import { encodePng } from './png-writer';
+import { Events } from './core/events';
+import { encodePng } from './core/png-writer';
 import { ElementType } from './scene/element';
 import { EquirectRenderer } from './scene/equirect-renderer';
 import { Scene } from './scene/scene';

@@ -1,7 +1,7 @@
 import { Container, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 
 /**
  * Simple dropdown menu attached to the snapshot button.

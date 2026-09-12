@@ -1,6 +1,6 @@
 import { logger as splatTransformLogger, type FileSystem, type LogEvent, type Writer } from '@playcanvas/splat-transform';
 
-import { Events } from './events';
+import { Events } from './core/events';
 import { GZipWriter } from './io';
 import { writeSplatFile, ExperienceSettings, SerializeSettings } from './splat/splat-serialize';
 import { i18n } from './ui/localization';

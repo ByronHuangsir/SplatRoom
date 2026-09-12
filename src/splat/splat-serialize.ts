@@ -32,12 +32,12 @@ import {
     WebgpuGraphicsDevice
 } from 'playcanvas';
 
-import { version } from '../../package.json';
-import { ColorGrade, dcDecode, dcEncode, sigmoid } from '../color-grade';
-import { Events } from '../events';
-import { SHRotation } from '../sh-utils';
 import { Splat } from './splat';
 import { State } from './splat-state';
+import { version } from '../../package.json';
+import { ColorGrade, dcDecode, dcEncode, sigmoid } from '../core/color-grade';
+import { Events } from '../core/events';
+import { SHRotation } from '../core/sh-utils';
 
 type SerializeSettings = {
     maxSHBands?: number;            // specifies the maximum number of bands to be exported

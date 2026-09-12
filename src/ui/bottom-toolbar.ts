@@ -1,9 +1,9 @@
 import { Button, Element, Container } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
 import { MenuPanel } from './menu-panel';
+import { Events } from '../core/events';
+import { ShortcutManager } from '../core/shortcut-manager';
 import healSvg from './svg/heal.svg';
 import measureSvg from './svg/measure.svg';
 import orientSvg from './svg/orient.svg';

@@ -1,9 +1,9 @@
 import { Button, Container, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Events } from '../core/events';
+import { ShortcutManager } from '../core/shortcut-manager';
 import { Splat } from '../splat/splat';
 
 class StatusBar extends Container {

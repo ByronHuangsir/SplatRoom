@@ -1,7 +1,7 @@
 import { CommandQueue } from './command-queue';
 import { EditOp, MultiOp } from './edit-ops';
 import { Events } from './events';
-import { Splat } from './splat/splat';
+import { Splat } from '../splat/splat';
 
 // Check if an operation references a specific splat
 const opReferencesSplat = (op: EditOp, splat: Splat): boolean => {

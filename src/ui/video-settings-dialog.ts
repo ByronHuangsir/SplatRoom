@@ -1,6 +1,6 @@
 import { BooleanInput, Button, Container, Element, Label, SelectInput, VectorInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { VideoSettings } from '../render';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';

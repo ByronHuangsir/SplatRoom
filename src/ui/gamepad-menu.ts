@@ -3,8 +3,8 @@
 
 import { Container } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 
 const AUTO_HIDE_DELAY = 4000;
 

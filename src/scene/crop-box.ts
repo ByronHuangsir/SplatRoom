@@ -8,7 +8,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from '../serializer';
+import { Serializer } from '../core/serializer';
 import { Splat } from '../splat/splat';
 
 // unit cube corner offsets ([-0.5, 0.5]^3). the crop box pivot's world transform

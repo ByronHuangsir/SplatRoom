@@ -1,5 +1,5 @@
-import { Events } from '../events';
-import { opFromModifiers } from '../select-op';
+import { Events } from '../core/events';
+import { opFromModifiers } from '../core/select-op';
 
 // Depth-aligned 3D sphere brush (V3, SuperSplat-style "Sphere Brush", Shift+B).
 //

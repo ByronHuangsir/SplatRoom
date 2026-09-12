@@ -1,8 +1,8 @@
 import { Color, Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
 import { AnimationController } from './animation-controller';
 import { TrackId } from './animation-data';
+import { Events } from '../core/events';
 
 const _color = new Color();
 

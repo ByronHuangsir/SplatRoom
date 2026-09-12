@@ -29,10 +29,10 @@ import {
 } from 'playcanvas';
 
 import { PointerController } from './controllers';
+import { TweenValue } from './tween-value';
+import { Serializer } from '../core/serializer';
 import { Element, ElementType } from '../scene/element';
 import { Picker } from '../scene/picker';
-import { Serializer } from '../serializer';
-import { TweenValue } from './tween-value';
 import { vertexShader, fragmentShader } from '../shaders/blit-shader';
 import { Splat } from '../splat/splat';
 import { ShaderQuad, SimpleRenderPass } from '../utils/simple-render-pass';

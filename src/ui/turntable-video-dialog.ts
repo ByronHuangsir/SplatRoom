@@ -1,7 +1,7 @@
 import { Button, Container, Element, Label, SelectInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {

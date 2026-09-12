@@ -1,4 +1,4 @@
-import { Events } from '../events';
+import { Events } from '../core/events';
 
 /**
  * 格式工厂（邵青）模块（模块 2）— 3D 高斯格式转换

@@ -1,6 +1,6 @@
 import { Entity, RotateGizmo, ScaleGizmo, TransformGizmo, TranslateGizmo, Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 
 type ShapeGizmoMode = 'translate' | 'rotate' | 'scale' | 'none';

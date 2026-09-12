@@ -15,8 +15,8 @@
  * blocked during the initial focus/import.
  */
 import { buildLodAssets, planLodFractions, setLodDistances, getLodDistances } from './lod';
-import { EditHistory } from '../edit-history';
-import { Events } from '../events';
+import { EditHistory } from '../core/edit-history';
+import { Events } from '../core/events';
 import { Element, ElementType } from '../scene/element';
 import type { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';

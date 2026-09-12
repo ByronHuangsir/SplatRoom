@@ -1,4 +1,4 @@
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { ElementType } from '../scene/element';
 import { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';

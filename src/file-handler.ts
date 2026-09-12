@@ -1,11 +1,11 @@
 import { Mat4, path, Quat, Vec3 } from 'playcanvas';
 
 import { deserializeGrade, serializeGrade, sidecarFilename } from './color-grade-file';
+import { Events } from './core/events';
+import { renderDiagnostics } from './core/render-diagnostics';
 import { CreateDropHandler } from './drop-handler';
-import { Events } from './events';
 import { BrowserFileSystem, MappedReadFileSystem } from './io';
 import { attachLodFromFile } from './lod/lod-file';
-import { renderDiagnostics } from './render-diagnostics';
 import { CropBox } from './scene/crop-box';
 import { ElementType } from './scene/element';
 import { Scene } from './scene/scene';

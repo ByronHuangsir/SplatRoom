@@ -1,8 +1,8 @@
 import { Container, Element } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
 import { MenuPanel, MenuItem } from './menu-panel';
+import { Events } from '../core/events';
 import deleteSvg from './svg/delete.svg';
 import importSvg from './svg/import.svg';
 import measureSvg from './svg/measure.svg';

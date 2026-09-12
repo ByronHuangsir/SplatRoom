@@ -1,8 +1,8 @@
 import { Mat4, Ray, Vec3, Vec4 } from 'playcanvas';
 
-import { sigmoid } from '../color-grade';
 import { Splat } from './splat';
 import { State } from './splat-state';
+import { sigmoid } from '../core/color-grade';
 import { Scene } from '../scene/scene';
 
 // clicked points gather the gaussians whose centers project within this many

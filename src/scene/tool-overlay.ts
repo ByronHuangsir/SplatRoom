@@ -18,7 +18,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from '../serializer';
+import { Serializer } from '../core/serializer';
 import {
     dotVertexShader,
     dotFragmentShader,

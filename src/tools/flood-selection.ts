@@ -1,7 +1,7 @@
 import { Container, NumericInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { opFromModifiers } from '../select-op';
+import { Events } from '../core/events';
+import { opFromModifiers } from '../core/select-op';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';
 
 type Pt = {x : number, y: number };

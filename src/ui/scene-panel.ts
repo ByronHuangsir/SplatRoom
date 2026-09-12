@@ -1,6 +1,5 @@
 import { Button, Container, Element, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { CameraPanel } from './camera-panel';
 import { FloaterPanel } from './floater-panel';
 import { GroundWaterPanel } from './ground-water-panel';
@@ -14,6 +13,7 @@ import sceneNewSvg from './svg/new.svg';
 import soloSvg from './svg/solo.svg';
 import { Tooltips } from './tooltips';
 import { Transform } from './transform';
+import { Events } from '../core/events';
 
 const createSvg = (svgString: string) => {
     const decodedStr = decodeURIComponent(svgString.substring('data:image/svg+xml,'.length));

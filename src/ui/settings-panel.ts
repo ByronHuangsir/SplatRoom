@@ -1,12 +1,12 @@
 import { BooleanInput, Button, ColorPicker, Container, Label, SelectInput, SliderInput } from '@playcanvas/pcui';
 import { Color } from 'playcanvas';
 
-import { Events } from '../events';
-import { getGpuBackendPref, setGpuBackendPref } from '../gpu-backend';
-import type { GridPlane } from '../scene/infinite-grid';
-import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Events } from '../core/events';
+import { getGpuBackendPref, setGpuBackendPref } from '../core/gpu-backend';
+import { ShortcutManager } from '../core/shortcut-manager';
+import type { GridPlane } from '../scene/infinite-grid';
 
 class SettingsPanel extends Container {
     constructor(events: Events, tooltips: Tooltips, args = {}) {

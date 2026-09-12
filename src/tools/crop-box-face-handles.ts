@@ -9,7 +9,7 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { CropBox } from '../scene/crop-box';
 import { Scene } from '../scene/scene';
 

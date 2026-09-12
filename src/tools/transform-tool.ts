@@ -1,6 +1,6 @@
 import { Entity, GraphicsDevice, TransformGizmo } from 'playcanvas';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Pivot } from '../scene/pivot';
 import { Scene } from '../scene/scene';
 

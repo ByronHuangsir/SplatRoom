@@ -1,8 +1,8 @@
 import { Button, Container, Label } from '@playcanvas/pcui';
 import { Entity, Mat4, Quat, TranslateGizmo, Vec3, math } from 'playcanvas';
 
-import { EntityTransformOp, MultiOp, PlacePivotOp } from '../edit-ops';
-import { Events } from '../events';
+import { EntityTransformOp, MultiOp, PlacePivotOp } from '../core/edit-ops';
+import { Events } from '../core/events';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Pivot } from '../scene/pivot';
 import { Scene } from '../scene/scene';

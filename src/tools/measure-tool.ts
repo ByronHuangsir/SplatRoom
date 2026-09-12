@@ -1,7 +1,7 @@
 import { Button, Container, Label, NumericInput } from '@playcanvas/pcui';
 import { Entity, Mat4, Quat, TranslateGizmo, Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 import { ToolOverlay, OverlayWriter } from '../scene/tool-overlay';
 import { Splat } from '../splat/splat';

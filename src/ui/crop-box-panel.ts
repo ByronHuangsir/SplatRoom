@@ -1,10 +1,10 @@
 import { BooleanInput, Button, Container, Label, NumericInput, SliderInput } from '@playcanvas/pcui';
 import { Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Events } from '../core/events';
 import { CropBox } from '../scene/crop-box';
 import { ElementType } from '../scene/element';
 

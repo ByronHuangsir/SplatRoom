@@ -1,8 +1,8 @@
 import { Button, Container, Element, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
+import { Events } from '../core/events';
+import { ShortcutManager } from '../core/shortcut-manager';
 import cameraFrameSelectionSvg from './svg/camera-frame-selection.svg';
 import cameraResetSvg from './svg/camera-reset.svg';
 import centersSvg from './svg/centers.svg';

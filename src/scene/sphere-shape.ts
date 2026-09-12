@@ -12,7 +12,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from '../serializer';
+import { Serializer } from '../core/serializer';
 import { vertexShader, fragmentShader } from '../shaders/sphere-shape-shader';
 
 const v = new Vec3();

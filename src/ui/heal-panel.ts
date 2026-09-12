@@ -1,8 +1,8 @@
 import { Container, Label, SliderInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { HealStrategy, HealParams, getSelectedIndices } from '../heal-inpaint';
 import { i18n } from './localization';
+import { Events } from '../core/events';
+import { HealStrategy, HealParams, getSelectedIndices } from '../core/heal-inpaint';
 
 class HealPanel extends Container {
     private _fltEvents: Events;

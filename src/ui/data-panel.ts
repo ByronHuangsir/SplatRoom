@@ -1,10 +1,10 @@
 import { BooleanInput, Container, Label } from '@playcanvas/pcui';
 import { Mat4 } from 'playcanvas';
 
-import { Events } from '../events';
 import { Histogram } from './histogram';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Events } from '../core/events';
 import { Element } from '../scene/element';
 import { Splat } from '../splat/splat';
 

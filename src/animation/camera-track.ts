@@ -1,7 +1,7 @@
 import { Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
 import { AnimationTrackBase } from './animation-track-base';
+import { Events } from '../core/events';
 
 const _pos = new Vec3();
 const _target = new Vec3();

@@ -1,7 +1,7 @@
 import { BooleanInput, Button, Container, ContainerArgs, Label, SliderInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 
 const STEP_DEFAULT = 15;   // default arrow button step
 const STEP_COARSE = 1;     // drag without CTRL

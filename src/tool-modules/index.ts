@@ -1,7 +1,7 @@
-import { Events } from '../events';
 import { registerCompareModule } from './compare-module';
 import { registerMergeModule } from './merge-module';
 import { registerSplatFactoryModule } from './splatfactory-module';
+import { Events } from '../core/events';
 
 /**
  * 工具模块（Tools menu plugins）

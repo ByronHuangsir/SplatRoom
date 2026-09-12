@@ -1,9 +1,9 @@
 import { Button, Container, ContainerArgs, Label, NumericInput, VectorInput } from '@playcanvas/pcui';
 import { Quat, Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
 import { enableReliableInputDrag } from './input-drag';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 import { Pivot } from '../scene/pivot';
 
 const v = new Vec3();

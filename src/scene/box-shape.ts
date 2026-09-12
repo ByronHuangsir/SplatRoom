@@ -13,7 +13,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from '../serializer';
+import { Serializer } from '../core/serializer';
 import { vertexShader, fragmentShader } from '../shaders/box-shape-shader';
 
 const invMat = new Mat4();

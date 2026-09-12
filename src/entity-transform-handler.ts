@@ -1,7 +1,7 @@
 import { Mat4, Quat, Vec3 } from 'playcanvas';
 
-import { PlacePivotOp, EntityTransformOp, MultiOp } from './edit-ops';
-import { Events } from './events';
+import { PlacePivotOp, EntityTransformOp, MultiOp } from './core/edit-ops';
+import { Events } from './core/events';
 import { Pivot } from './scene/pivot';
 import { Splat } from './splat/splat';
 import { Transform } from './transform';

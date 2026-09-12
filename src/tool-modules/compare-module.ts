@@ -1,4 +1,4 @@
-import { Events } from '../events';
+import { Events } from '../core/events';
 
 /**
  * 对比工具模块（模块 1）— "高斯训练对比-飞羽实验室"

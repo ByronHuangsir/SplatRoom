@@ -1,7 +1,7 @@
 import { ReadFileSystem } from '@playcanvas/splat-transform';
 import { AppBase, Asset, GSplatData, GSplatResource } from 'playcanvas';
 
-import { Events } from './events';
+import { Events } from './core/events';
 import { defaultLodIndex, loadGSplatDataAsync, validateGSplatData } from './io';
 import { Splat } from './splat/splat';
 import { detectGiantGreySplats, removeGiantGreySplats, shrinkGiantGreySplats } from './splat/splat-sanitize';

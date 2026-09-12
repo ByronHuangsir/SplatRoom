@@ -1,7 +1,7 @@
 import { BoundingBox, Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
 import { Splat } from './splat';
+import { Events } from '../core/events';
 
 let _nextId = 0;
 

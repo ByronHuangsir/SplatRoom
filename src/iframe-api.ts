@@ -1,4 +1,4 @@
-import { Events } from './events';
+import { Events } from './core/events';
 
 const IS_SCENE_DIRTY = 'splatroom:is-scene-dirty';
 

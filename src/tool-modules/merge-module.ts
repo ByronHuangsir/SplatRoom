@@ -1,4 +1,4 @@
-import { Events } from '../events';
+import { Events } from '../core/events';
 
 /**
  * 高斯合并工具（模块 3）— 独立窗口合并工作台

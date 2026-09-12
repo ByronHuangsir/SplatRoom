@@ -1,8 +1,8 @@
 import { Button, BooleanInput, Container, Label, SliderInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
 import type { Tooltips } from './tooltips';
+import { Events } from '../core/events';
 import type { SurfaceRefineResult } from '../geometry/surface-refiner';
 
 /**

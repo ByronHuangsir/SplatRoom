@@ -1,7 +1,9 @@
 import { Button, Container, Label, SelectInput, SliderInput } from '@playcanvas/pcui';
 
+import { i18n } from './localization';
 import { DEFAULT_MOUSE_BINDINGS, MOUSE_ACTIONS, MouseAction, MouseBindingsState } from '../camera/mouse-bindings';
-import { Events } from '../events';
+import { Events } from '../core/events';
+import { ShortcutBinding } from '../core/shortcuts';
 import {
     DEFAULT_BINDINGS,
     GamepadConfig,
@@ -11,8 +13,6 @@ import {
     defaultConfig,
     presetConfig
 } from '../gamepad/gamepad-config';
-import { ShortcutBinding } from '../shortcuts';
-import { i18n } from './localization';
 
 /**
  * 自定义操控 (Customize Controls) dialog — reachable from 工具 → 自定义操控.

@@ -1,7 +1,7 @@
 import { Container, Element, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 import centersSvg from './svg/centers.svg';
 import ringsSvg from './svg/rings.svg';
 import { Tooltips } from './tooltips';

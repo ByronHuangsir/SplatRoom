@@ -6,7 +6,7 @@
 // renders small models but leaves a large one blank, because the backend keeps
 // the sort order in one u32-per-splat storage buffer that can exceed the
 // adapter's binding/buffer limits.
-import { renderDiagnostics } from '../../src/render-diagnostics.ts';
+import { renderDiagnostics } from '../../src/core/render-diagnostics.ts';
 
 const splat = (opts: {
     numSplats: number,

@@ -1,10 +1,10 @@
 import { Button, Container, Element, NumericInput, SelectInput, Label } from '@playcanvas/pcui';
 
-import { Events } from '../events';
-import { ShortcutManager } from '../shortcut-manager';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Events } from '../core/events';
+import { ShortcutManager } from '../core/shortcut-manager';
 
 /** Track metadata for lane display */
 interface TrackLaneDef {

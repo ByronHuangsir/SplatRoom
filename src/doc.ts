@@ -1,7 +1,7 @@
 import { ZipFileSystem, ZipReadFileSystem } from '@playcanvas/splat-transform';
 
 import { AnimationController } from './animation/animation-controller';
-import { Events } from './events';
+import { Events } from './core/events';
 import { BrowserFileSystem, BlobReadSource } from './io';
 import { recentFiles } from './recent-files';
 import { Scene } from './scene/scene';

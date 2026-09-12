@@ -17,19 +17,19 @@ import {
 
 import { AssetLoader } from '../asset-loader';
 import { Element, ElementType, ElementTypeList } from './element';
+import { InfiniteGrid as Grid } from './infinite-grid';
+import { Outline } from './outline';
+import { SceneConfig } from './scene-config';
+import { SceneState } from './scene-state';
+import { Underlay } from './underlay';
 import { Camera } from '../camera/camera';
 import { CameraPath3D } from '../camera/camera-path-3d';
 import { CameraPathControl } from '../camera/camera-path-control';
 import { CameraPreview } from '../camera/camera-preview';
-import { CommandQueue } from '../command-queue';
+import { CommandQueue } from '../core/command-queue';
+import { Events } from '../core/events';
 import { DataProcessor } from '../data-processor/index';
-import { Events } from '../events';
-import { InfiniteGrid as Grid } from './infinite-grid';
-import { Outline } from './outline';
 import { PCApp } from '../pc-app';
-import { SceneConfig } from './scene-config';
-import { SceneState } from './scene-state';
-import { Underlay } from './underlay';
 import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';

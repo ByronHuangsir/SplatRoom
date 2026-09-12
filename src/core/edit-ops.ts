@@ -1,14 +1,14 @@
 import { Asset, Color, Mat4, Quat, Vec3 } from 'playcanvas';
 
-import { AnimTrack } from './anim-track';
+import { AnimTrack } from '../anim-track';
 import { IndexRanges, sortedPredicate } from './index-ranges';
-import { BoxShape } from './scene/box-shape';
-import { Pivot } from './scene/pivot';
-import { Scene } from './scene/scene';
-import { SphereShape } from './scene/sphere-shape';
-import { Splat } from './splat/splat';
-import { State } from './splat/splat-state';
-import { Transform } from './transform';
+import { BoxShape } from '../scene/box-shape';
+import { Pivot } from '../scene/pivot';
+import { Scene } from '../scene/scene';
+import { SphereShape } from '../scene/sphere-shape';
+import { Splat } from '../splat/splat';
+import { State } from '../splat/splat-state';
+import { Transform } from '../transform';
 
 interface EditOp {
     name: string;

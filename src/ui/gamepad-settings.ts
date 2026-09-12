@@ -4,8 +4,8 @@
 
 import { Container } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 import {
     DEFAULT_BINDINGS,
     GamepadConfig,

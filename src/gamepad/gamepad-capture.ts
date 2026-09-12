@@ -1,7 +1,7 @@
 // gamepad-capture.ts - 手柄截屏 (PNG) + 视频录制 (WebM)。
 // 移植自 3DGS-Gamepad v3，toast 文案接入 i18n。
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 import { i18n } from '../ui/localization';
 

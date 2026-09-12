@@ -1,8 +1,6 @@
 import { Container, Label } from '@playcanvas/pcui';
 import { Mat4 } from 'playcanvas';
 
-import { DataPanel } from './data-panel';
-import { Events } from '../events';
 import { AboutPopup } from './about-popup';
 import { BottomToolbar } from './bottom-toolbar';
 import { CameraInfoOverlay } from './camera-info-overlay';
@@ -10,6 +8,7 @@ import { ColorPanel } from './color-panel';
 import { ContextMenu } from './context-menu';
 import { ControlCustomizeDialog } from './control-customize-dialog';
 import { CropBoxPanel } from './crop-box-panel';
+import { DataPanel } from './data-panel';
 import { ExportPopup } from './export-popup';
 import { ImageSettingsDialog } from './image-settings-dialog';
 import { i18n } from './localization';
@@ -34,6 +33,7 @@ import { VideoSettingsDialog } from './video-settings-dialog';
 import { ViewCube } from './view-cube';
 import { version } from '../../package.json';
 import { CameraTrajectory } from '../animation/camera-trajectory';
+import { Events } from '../core/events';
 
 // ts compiler and vscode find this type, but eslint does not
 type FilePickerAcceptType = unknown;

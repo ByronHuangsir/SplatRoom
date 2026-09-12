@@ -1,7 +1,7 @@
 import { Container } from '@playcanvas/pcui';
 import { Vec3 } from 'playcanvas';
 
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';
 

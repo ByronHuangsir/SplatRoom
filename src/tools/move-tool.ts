@@ -1,7 +1,7 @@
 import { TranslateGizmo } from 'playcanvas';
 
 import { TransformTool } from './transform-tool';
-import { Events } from '../events';
+import { Events } from '../core/events';
 import { Scene } from '../scene/scene';
 
 class MoveTool extends TransformTool {

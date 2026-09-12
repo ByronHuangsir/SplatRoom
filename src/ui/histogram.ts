@@ -1,6 +1,6 @@
-import { Events } from '../events';
-import { opFromModifiers } from '../select-op';
 import { applyOpCursor } from './select-cursor';
+import { Events } from '../core/events';
+import { opFromModifiers } from '../core/select-op';
 
 class HistogramData {
     bins: { selected: number, unselected: number }[];

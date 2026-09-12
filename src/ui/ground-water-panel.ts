@@ -1,7 +1,7 @@
 import { Button, Container, ContainerArgs, Label, SliderInput } from '@playcanvas/pcui';
 
-import { Events } from '../events';
 import { i18n } from './localization';
+import { Events } from '../core/events';
 
 /**
  * 地面/水域平整面板（左侧 ScenePanel 内嵌，可折叠，样式与"去浮云"一致）。
