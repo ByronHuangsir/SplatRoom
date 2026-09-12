@@ -1,5 +1,8 @@
 import {
+    ADDRESS_CLAMP_TO_EDGE,
     BLEND_NORMAL,
+    FILTER_NEAREST,
+    PIXELFORMAT_R32U,
     PRIMITIVE_POINTS,
     SEMANTIC_POSITION,
     TYPE_FLOAT32,
@@ -10,6 +13,7 @@ import {
     ShaderMaterial,
     Mesh,
     MeshInstance,
+    Texture,
     VertexBuffer,
     VertexFormat
 } from 'playcanvas';
@@ -36,6 +40,10 @@ class SplatOverlay extends Element {
     orderReady = false;
     // one-shot note so the WebGPU case is reported once, not every frame
     warnedNoOrderTexture = false;
+    // WebGPU only: the sort order lives in a storage buffer there, so the overlay keeps
+    // its own R32U order texture fed from the sorter's CPU-side order array
+    private gpuOrderTexture: Texture | null = null;
+    private gpuOrderDirty = true;
 
     constructor() {
         super(ElementType.debug);
@@ -50,6 +58,14 @@ class SplatOverlay extends Element {
             vertexGLSL: vertexShader,
             fragmentGLSL: fragmentShader
         });
+        // WGSL has no point size, and a vertex shader that assigns gl_PointSize loses
+        // its entry point when it is transpiled to WGSL (invalid pipeline on the WebGPU
+        // backend). Define the guard there so the shader compiles; centers then render as
+        // 1-pixel points on WebGPU until the overlay draws billboards instead.
+        if (device.isWebGPU) {
+            this.material.setDefine('GSPLAT_NO_POINTSIZE', '');
+        }
+
         this.material.blendType = BLEND_NORMAL;
         this.material.depthWrite = false;
         this.material.depthTest = true;
@@ -123,7 +139,31 @@ class SplatOverlay extends Element {
         // swapped in by replaceData). keep the splat and retry from
         // onPreRender instead of throwing on undefined.width, which would abort
         // the whole load.
-        if (!instance || !instance.sorter || !instance.orderTexture || !instance.resource || !splat.stateTexture) {
+        // TEMP-DIAG: WebGPU order mirror
+        let orderTexture: Texture = instance?.orderTexture ?? null;
+        if (!orderTexture && instance?.sorter?.orderData && (instance.resource as any)?.textureDimensions) {
+            const dims = (instance.resource as any).textureDimensions;
+            if (!this.gpuOrderTexture || this.gpuOrderTexture.width !== dims.x) {
+                this.gpuOrderTexture?.destroy();
+                this.gpuOrderTexture = new Texture(this.scene.graphicsDevice, {
+                    name: 'diagOrderOverlay',
+                    width: dims.x,
+                    height: dims.y,
+                    format: PIXELFORMAT_R32U,
+                    mipmaps: false,
+                    minFilter: FILTER_NEAREST,
+                    magFilter: FILTER_NEAREST,
+                    addressU: ADDRESS_CLAMP_TO_EDGE,
+                    addressV: ADDRESS_CLAMP_TO_EDGE
+                });
+                const buffer = this.gpuOrderTexture.lock() as Uint32Array;
+                buffer.set(new Uint32Array(instance.sorter.orderData as ArrayBuffer).subarray(0, dims.x * dims.y));
+                this.gpuOrderTexture.unlock();
+                this.gpuOrderDirty = false;
+            }
+            orderTexture = this.gpuOrderTexture;
+        }
+        if (!instance || !instance.sorter || !orderTexture || !instance.resource || !splat.stateTexture) {
             // on WebGPU the order data lives in a storage buffer, so this
             // overlay can never run there: say so once instead of leaving the
             // user wondering why centers are missing
@@ -135,8 +175,6 @@ class SplatOverlay extends Element {
             this.orderReady = false;
             return;
         }
-
-        const orderTexture = instance.orderTexture;
 
         // set up order texture uniforms
         material.setParameter('splatOrder', orderTexture);
@@ -170,6 +208,8 @@ class SplatOverlay extends Element {
         // detach() can unsubscribe from this exact instance
         this.onSorterUpdated = () => {
             mesh.primitive[0].count = instance.sorter.pendingSorted?.count ?? mesh.primitive[0].count;
+            // the mirrored order texture follows the sorter, so mark it for re-upload
+            this.gpuOrderDirty = true;
         };
         this.sorter = instance.sorter;
         this.sorter.on('updated', this.onSorterUpdated);

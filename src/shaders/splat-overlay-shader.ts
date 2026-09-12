@@ -1,3 +1,7 @@
+// NOTE: WGSL has no point size and glslang/twgsl silently drops the entry point of a
+// vertex shader that assigns gl_PointSize, which produced an invalid pipeline on the
+// WebGPU backend. The WebGPU path therefore defines GSPLAT_NO_POINTSIZE (see
+// splat-overlay.ts) and the overlay renders 1-pixel points there for now.
 const vertexShader = /* glsl */ `
     uniform mat4 matrix_model;
     uniform mat4 matrix_viewProjection;
@@ -102,7 +106,9 @@ const vertexShader = /* glsl */ `
         if ((splatState & 2u) != 0u) {
             // locked
             gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-            gl_PointSize = 0.0;
+            #ifndef GSPLAT_NO_POINTSIZE
+                gl_PointSize = 0.0;
+            #endif
         } else {
             mat4 model = matrix_model;
 
@@ -155,7 +161,9 @@ const vertexShader = /* glsl */ `
             // disable depth clipping
             gl_Position.z = 0.0;
 
-            gl_PointSize = splatSize;
+            #ifndef GSPLAT_NO_POINTSIZE
+                gl_PointSize = splatSize;
+            #endif
         }
     }
 `;

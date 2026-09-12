@@ -379,3 +379,21 @@ warn: Entry point ""main"" doesn't exist in the shader module (vertex stage)
 WGSL 方言下写（`varying` / 松散 `uniform name: type` / `var tex: texture_2d<f32>`，入口点 `vertexMain`
 /`fragmentMain`；顶点着色器还要用引擎的 `gsplatEvalSHVS`（WGSL 版已存在）以及 `vertex_index` 代替 `gl_VertexID`）。
 完成后与"自建 R32U 顺序纹理"一起恢复，并用 `verify-centers-overlay.cjs` 断言覆盖层真的画出来。
+### 6.15 第十二轮：覆盖层管线在 WebGPU 下**合法了**（但还没画出东西）
+
+两个确定结论（都已实测）：
+
+1. **`gl_PointSize` 就是转译失败的元凶**：WGSL 没有点尺寸，GLSL 顶点着色器只要给 `gl_PointSize` 赋值，
+   glslang/twgsl 转译后的模块就**丢掉入口点**（只剩 `calcSplatUV_u1_u1_`），管线取 `main` 失败 → 整帧被丢弃。
+   现已把两处赋值包进 `#ifndef GSPLAT_NO_POINTSIZE`，WebGPU 路径定义该宏；此后模块转译正常、顶点管线合法
+   （**GPU 错误全部消失**）。
+2. **顺序纹理镜像方案可用**：`SplatOverlay` 在 WebGPU 下自建 R32U 顺序纹理、从 sorter 的 CPU 侧 `orderData`
+   上传，并在 sorter 报告新顺序时重传；覆盖层现在在 WebGPU 上 `orderReady=true` / `enabled=true`。
+
+**剩余**：覆盖层仍然**改变 0 像素**（像素级 diff 实测），即它的 draw 落不到有效位置。首要嫌疑与 splat 材质当初同一类：
+引擎的 view uniform buffer 在这些自研材质上**没有正确绑定**（`matrix_view` 曾读出单位矩阵），而覆盖层顶点着色器正是
+从 `matrix_model` / `matrix_viewProjection` 取变换。下一轮照 splat 材质的办法把它们改成**材质参数**上传后复测；
+另外要决定 centers 是否改成**画 billboard**（WGSL 的 point-list 永远只有 1px，`camera.splatSize` 会失效）。
+
+**无回归**：`npm run check` 全绿、`verify-model-renders` 0 失败、`verify-centers-overlay` 双后端通过（centers 模式
+不破坏渲染、且 GPU 错误为空）。
