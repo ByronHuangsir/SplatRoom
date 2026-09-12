@@ -1,7 +1,7 @@
 import { Vec3, math } from 'playcanvas';
 
-import { Camera } from './camera';
-import { Events } from './events';
+import { Camera } from '../camera/camera';
+import { Events } from '../events';
 import {
     GamepadConfig,
     defaultConfig,

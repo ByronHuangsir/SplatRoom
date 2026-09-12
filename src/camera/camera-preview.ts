@@ -16,10 +16,10 @@ import {
     Mat4
 } from 'playcanvas';
 
-import { AnimationController } from './animation/animation-controller';
-import { TrackId } from './animation/animation-data';
-import { Element, ElementType } from './element';
-import { Splat } from './splat';
+import { AnimationController } from '../animation/animation-controller';
+import { TrackId } from '../animation/animation-data';
+import { Element, ElementType } from '../element';
+import { Splat } from '../splat';
 
 /**
  * CameraPreview renders a picture-in-picture view showing what the

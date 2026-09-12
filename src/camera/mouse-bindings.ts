@@ -1,4 +1,4 @@
-import { Events } from './events';
+import { Events } from '../events';
 
 /**
  * Mouse drag actions available for customization.

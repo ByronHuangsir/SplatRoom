@@ -1,6 +1,6 @@
 import { BooleanInput, Button, ColorPicker, Container, Element, Label, SelectInput, SliderInput, TextAreaInput, TextInput } from '@playcanvas/pcui';
 
-import { Pose } from '../camera-poses';
+import { Pose } from '../camera/camera-poses';
 import { Events } from '../events';
 import { i18n } from './localization';
 import { PublishSettings, UserStatus } from '../publish';

@@ -2,7 +2,7 @@
 // (manual) → DataTable → decimate → GSplatData, checking row/col fidelity.
 import { readFileSync } from 'fs';
 import { GSplatData } from 'playcanvas';
-import { gsplatDataToDataTable, dataTableToGsplatData, decimateGsplatData, planLodFractions } from '../src/lod/lod.ts';
+import { gsplatDataToDataTable, dataTableToGsplatData, decimateGsplatData, planLodFractions } from '../../../src/lod/lod.ts';
 
 // minimal PLY reader to build a GSplatData exactly like the app's vertex set
 const bytes = readFileSync('D:/DeepSeek/SplatRoomV2/SplatRoom/dist.bak/test-bump.ply');

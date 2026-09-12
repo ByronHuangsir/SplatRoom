@@ -29,13 +29,13 @@ import {
 } from 'playcanvas';
 
 import { PointerController } from './controllers';
-import { Element, ElementType } from './element';
-import { Picker } from './picker';
-import { Serializer } from './serializer';
-import { vertexShader, fragmentShader } from './shaders/blit-shader';
-import { Splat } from './splat';
+import { Element, ElementType } from '../element';
+import { Picker } from '../picker';
+import { Serializer } from '../serializer';
+import { vertexShader, fragmentShader } from '../shaders/blit-shader';
+import { Splat } from '../splat';
 import { TweenValue } from './tween-value';
-import { ShaderQuad, SimpleRenderPass } from './utils/simple-render-pass';
+import { ShaderQuad, SimpleRenderPass } from '../utils/simple-render-pass';
 
 // work globals
 const forwardVec = new Vec3();

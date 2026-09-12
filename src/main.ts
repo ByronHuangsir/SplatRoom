@@ -3,7 +3,8 @@ import { Color, createGraphicsDevice } from 'playcanvas';
 
 import { registerAnimationControllerEvents } from './animation/animation-controller';
 import { registerAudioEvents } from './audio/audio-manager';
-import { registerCameraPosesEvents } from './camera-poses';
+import { registerCameraPosesEvents } from './camera/camera-poses';
+import { MouseBindings } from './camera/mouse-bindings';
 import { CommandQueue } from './command-queue';
 import { startCompareApp } from './compare/compare-app';
 import { registerDocEvents } from './doc';
@@ -12,13 +13,12 @@ import { registerEditorEvents, registerCropBoxEvents, registerSurfaceRefineEvent
 import { registerEffectsEvents } from './effects/effects-manager';
 import { Events } from './events';
 import { initFileHandler } from './file-handler';
-import { GamepadCapture } from './gamepad-capture';
-import { GamepadController } from './gamepad-controller';
+import { GamepadCapture } from './gamepad/gamepad-capture';
+import { GamepadController } from './gamepad/gamepad-controller';
 import { getGpuBackendPref } from './gpu-backend';
 import { registerIframeApi } from './iframe-api';
 import { registerLodEvents } from './lod/editor-lod';
 import { startMergeApp } from './merge/merge-app';
-import { MouseBindings } from './mouse-bindings';
 import { registerPreferences } from './preferences';
 import { registerPublishEvents } from './publish';
 import { registerRenderEvents } from './render';

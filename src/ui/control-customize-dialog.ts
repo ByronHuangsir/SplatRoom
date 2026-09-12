@@ -1,5 +1,6 @@
 import { Button, Container, Label, SelectInput, SliderInput } from '@playcanvas/pcui';
 
+import { DEFAULT_MOUSE_BINDINGS, MOUSE_ACTIONS, MouseAction, MouseBindingsState } from '../camera/mouse-bindings';
 import { Events } from '../events';
 import {
     DEFAULT_BINDINGS,
@@ -9,8 +10,7 @@ import {
     bindingName,
     defaultConfig,
     presetConfig
-} from '../gamepad-config';
-import { DEFAULT_MOUSE_BINDINGS, MOUSE_ACTIONS, MouseAction, MouseBindingsState } from '../mouse-bindings';
+} from '../gamepad/gamepad-config';
 import { ShortcutBinding } from '../shortcuts';
 import { i18n } from './localization';
 

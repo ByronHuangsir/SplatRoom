@@ -16,10 +16,10 @@ import {
 } from 'playcanvas';
 
 import { AssetLoader } from './asset-loader';
-import { Camera } from './camera';
-import { CameraPath3D } from './camera-path-3d';
-import { CameraPathControl } from './camera-path-control';
-import { CameraPreview } from './camera-preview';
+import { Camera } from './camera/camera';
+import { CameraPath3D } from './camera/camera-path-3d';
+import { CameraPathControl } from './camera/camera-path-control';
+import { CameraPreview } from './camera/camera-preview';
 import { CommandQueue } from './command-queue';
 import { DataProcessor } from './data-processor';
 import { Element, ElementType, ElementTypeList } from './element';
