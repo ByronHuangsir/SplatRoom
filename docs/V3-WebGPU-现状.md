@@ -261,3 +261,19 @@ pass 描述，确认是不是 `discard`；若是，则在 `Picker.prepareId` 里
 `verify-edit-hide.cjs` 已作为长期验证脚本入库（它的脚本内断言计数还在修，功能读数已双后端一致）。
 
 剩余验证项：颜色分级 / 裁剪盒 / 粒子特效 / 变换调色板 / 选中描边（RT1）/ 居中点覆盖层（orderBuffer）/ PiP / 导出。
+### 6.9 第六轮：颜色分级在 WebGPU 上验证通过；裁剪盒验证脚本待修
+
+| 验证 | 命令 | WebGPU | WebGL2 对照 |
+| --- | --- | --- | --- |
+| 颜色分级（饱和度 0） | `node docs/verify/verify-edit-grade-crop.cjs "http://localhost:3621/?gpu=webgpu"` | 彩色像素 **99.3% → 2.1%**（恢复 99.3%） | 99.3% → 3.0%（恢复 99.3%） |
+| 裁剪盒（信息项，未断言） | 同上 | 98.6% → 98.9%（无变化） | 99.7% → 99.8%（**同样无变化**） |
+
+- **颜色分级**：WGSL 侧饱和度/HSL 通道 + 每帧材质 uniform 更新链路在 WebGPU 下与 WebGL2 表现一致 ✓
+- **裁剪盒**：脚本在**两个后端**都没有产生裁剪 → 说明是**验证脚本自身的步骤不完整**（不是 WebGPU 的 bug）。
+  已确认的部分：`cropBox` 能初始化、`enabled=true`、形状/半径/缩放可设置，且 `uCropBox*` / `uViewToBoxLocal`
+  **确实出现在 splat 材质的参数里**（说明 uniform 管线是通的）。缺的是让盒子真正小于模型的那一步
+  （box 模式的 `dist` 只看盒子的世界尺寸 `uViewToBoxLocal`，半径只作用于圆柱/球形状）。
+  该检查已降级为"仅报告不断言"，避免脚本长期假红；下一轮补齐后再恢复断言。
+
+**下一轮待办**：修 `verify-edit-grade-crop.cjs` 的裁剪步骤（用 pivot 缩放/切换形状 + 触发 `cropBox.changed`），
+然后逐项验证：粒子特效、变换调色板、选中描边（RT1）、居中点覆盖层（orderBuffer）、PiP、导出/快照。
