@@ -165,7 +165,20 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
   本仓库的自研相机路径下这个懒重算在 `onPreRender` 时机没有发生，因此**必须自己算投影矩阵**（或调用引擎的
   `updateProjection`/`_updateViewProjMat` 等入口）后再上传。
 
-### 6.4 复现用的调试工具（`_tmp/`，未入库）
+### 6.5 下一轮的第一件事（2026-09-12 收尾时的确切状态）
+
+当前提交 `a5ce94b`。已经确认的事实链：
+
+1. WGSL 移植完成、注入生效、MRT 管线合法、draw 正常、流数据可读（6.2 全部为 ✅）。
+2. `uSplatView`（材质参数、mat4）在着色器里**读出正确值**；`uSplatProj`（紧邻声明的第二个 mat4 参数）**读出垃圾值**——
+   即使用 `Mat4.setPerspective(...)` 在本仓库侧自算（与引擎 `Camera._evaluateProjectionMatrix` 同调用）也一样。
+3. 因此怀疑点已经从"取不到相机矩阵"收敛到**材质 UB 里两个 mat4 参数的落位/上传**：
+   下一步优先做的是把 `ub_mesh_ub` 的实际布局 dump 出来（或在 `setParameter` 前后读回参数值），
+   确认第二个 mat4 是否被写到错误偏移；若确认是引擎侧限制，就换条路：把相机矩阵改成
+   `device.scope.resolve('...')` 全局 uniform，或用 4 个 `vec4` 参数拼一个 mat4（避开第二 mat4 槽位）。
+4. 判别方法仍是 6.2/6.4 的读数法：给 instance 0 画一个全屏三角形，把待测值编码进 RGB，
+   用 `_tmp/map.cjs` 读画布中央像素反解（**不要**用 `verify-large-model-backend.cjs` 的 `shot` 比例）。
+
 
 - `map.cjs`：截取画布区域 → 解码 PNG → 输出**精确颜色直方图 + 均值 + 粗粒度 ASCII 色块图 + 三条带像素读数**（排除"截图整体比例"这类不敏感指标）。
 - `pass-probe.cjs`：拦截 `beginRenderPass` / `setViewport` / `setScissorRect` / `draw*`，打印每个 pass 的附件纹理 id、loadOp 与实际 draw。
