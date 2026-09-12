@@ -18,8 +18,8 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from './serializer';
-import { vertexShader, fragmentShader } from './shaders/infinite-grid-shader';
+import { Serializer } from '../serializer';
+import { vertexShader, fragmentShader } from '../shaders/infinite-grid-shader';
 
 const resolve = (scope: ScopeSpace, values: any) => {
     for (const key in values) {

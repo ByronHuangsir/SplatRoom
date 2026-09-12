@@ -4,7 +4,7 @@ import { AnimationController } from './animation/animation-controller';
 import { Events } from './events';
 import { BrowserFileSystem, BlobReadSource } from './io';
 import { recentFiles } from './recent-files';
-import { Scene } from './scene';
+import { Scene } from './scene/scene';
 import { Splat } from './splat/splat';
 import { writeSplatFile } from './splat/splat-serialize';
 import { Transform } from './transform';

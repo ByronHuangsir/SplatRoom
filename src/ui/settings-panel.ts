@@ -3,7 +3,7 @@ import { Color } from 'playcanvas';
 
 import { Events } from '../events';
 import { getGpuBackendPref, setGpuBackendPref } from '../gpu-backend';
-import type { GridPlane } from '../infinite-grid';
+import type { GridPlane } from '../scene/infinite-grid';
 import { ShortcutManager } from '../shortcut-manager';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';

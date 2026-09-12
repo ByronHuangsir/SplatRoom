@@ -1,6 +1,6 @@
-import { ElementType } from '../element';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { ElementType } from '../scene/element';
+import { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';
 
 /**

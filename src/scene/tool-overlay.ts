@@ -18,7 +18,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from './serializer';
+import { Serializer } from '../serializer';
 import {
     dotVertexShader,
     dotFragmentShader,
@@ -26,7 +26,7 @@ import {
     lineFragmentShader,
     fillVertexShader,
     fillFragmentShader
-} from './shaders/tool-overlay-shader';
+} from '../shaders/tool-overlay-shader';
 
 // screen-space sizes in pixels
 const DOT_SIZE = 12;

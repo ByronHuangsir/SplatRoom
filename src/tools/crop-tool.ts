@@ -3,10 +3,10 @@ import { Quat, Vec3 } from 'playcanvas';
 
 import { CropBoxFaceHandles } from './crop-box-face-handles';
 import { CropBoxShapeHandles } from './crop-box-shape-handles';
-import { CropBox } from '../crop-box';
 import { EditOp } from '../edit-ops';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { CropBox } from '../scene/crop-box';
+import { Scene } from '../scene/scene';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';
 import { i18n } from '../ui/localization';
 

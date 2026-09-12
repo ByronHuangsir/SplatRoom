@@ -6,7 +6,7 @@ import {
 import { CameraPath3D } from './camera-path-3d';
 import { AnimationController } from '../animation/animation-controller';
 import { TrackId } from '../animation/animation-data';
-import { Element, ElementType } from '../element';
+import { Element, ElementType } from '../scene/element';
 
 // Temp vectors (module-scope to avoid per-frame allocations)
 const _ray = new Ray();

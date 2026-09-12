@@ -2,9 +2,9 @@ import { Mat4, Vec3 } from 'playcanvas';
 
 import { PlacePivotOp, SplatsTransformOp, MultiOp } from '../edit-ops';
 import { Events } from '../events';
-import { Pivot } from '../pivot';
 import { Splat } from './splat';
 import { State } from './splat-state';
+import { Pivot } from '../scene/pivot';
 import { Transform } from '../transform';
 import { TransformHandler } from '../transform-handler';
 

@@ -1,7 +1,7 @@
 import { Color } from 'playcanvas';
 
 import { Events } from './events';
-import { SceneConfig } from './scene-config';
+import { SceneConfig } from './scene/scene-config';
 import { i18n } from './ui/localization';
 
 const storageKey = 'splatroom:preferences';

@@ -7,8 +7,8 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { vertexShader, fragmentShader } from './shaders/blit-shader';
-import { ShaderQuad, SimpleRenderPass } from './utils/simple-render-pass';
+import { vertexShader, fragmentShader } from '../shaders/blit-shader';
+import { ShaderQuad, SimpleRenderPass } from '../utils/simple-render-pass';
 
 class Underlay extends Element {
     shaderQuad: ShaderQuad;

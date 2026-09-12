@@ -14,8 +14,8 @@ import {
     VertexFormat
 } from 'playcanvas';
 
-import { ElementType, Element } from '../element';
 import { Splat } from './splat';
+import { ElementType, Element } from '../scene/element';
 import { vertexShader, fragmentShader } from '../shaders/splat-overlay-shader';
 
 const nullClr = new Color(0, 0, 0, 0);

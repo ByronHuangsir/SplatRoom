@@ -4,8 +4,8 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { vertexShader, fragmentShader } from './shaders/outline-shader';
-import { ShaderQuad, SimpleRenderPass } from './utils/simple-render-pass';
+import { vertexShader, fragmentShader } from '../shaders/outline-shader';
+import { ShaderQuad, SimpleRenderPass } from '../utils/simple-render-pass';
 
 class Outline extends Element {
     shaderQuad: ShaderQuad;

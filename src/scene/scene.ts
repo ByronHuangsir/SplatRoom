@@ -15,26 +15,26 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { AssetLoader } from './asset-loader';
-import { Camera } from './camera/camera';
-import { CameraPath3D } from './camera/camera-path-3d';
-import { CameraPathControl } from './camera/camera-path-control';
-import { CameraPreview } from './camera/camera-preview';
-import { CommandQueue } from './command-queue';
-import { DataProcessor } from './data-processor';
+import { AssetLoader } from '../asset-loader';
 import { Element, ElementType, ElementTypeList } from './element';
-import { Events } from './events';
+import { Camera } from '../camera/camera';
+import { CameraPath3D } from '../camera/camera-path-3d';
+import { CameraPathControl } from '../camera/camera-path-control';
+import { CameraPreview } from '../camera/camera-preview';
+import { CommandQueue } from '../command-queue';
+import { DataProcessor } from '../data-processor/index';
+import { Events } from '../events';
 import { InfiniteGrid as Grid } from './infinite-grid';
 import { Outline } from './outline';
-import { PCApp } from './pc-app';
+import { PCApp } from '../pc-app';
 import { SceneConfig } from './scene-config';
 import { SceneState } from './scene-state';
-import { GroupRenderer } from './splat/group-renderer';
-import { Splat } from './splat/splat';
-import { GroupManager } from './splat/splat-group';
-import { SplatOverlay } from './splat/splat-overlay';
-import { i18n } from './ui/localization';
 import { Underlay } from './underlay';
+import { GroupRenderer } from '../splat/group-renderer';
+import { Splat } from '../splat/splat';
+import { GroupManager } from '../splat/splat-group';
+import { SplatOverlay } from '../splat/splat-overlay';
+import { i18n } from '../ui/localization';
 
 // sort meshInstances by the aabb corner furthest from the camera
 const corner = new Vec3();

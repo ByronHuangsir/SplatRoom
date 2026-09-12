@@ -1,11 +1,11 @@
 import { Asset, Color, Mat4, Quat, Vec3 } from 'playcanvas';
 
 import { AnimTrack } from './anim-track';
-import { BoxShape } from './box-shape';
 import { IndexRanges, sortedPredicate } from './index-ranges';
-import { Pivot } from './pivot';
-import { Scene } from './scene';
-import { SphereShape } from './sphere-shape';
+import { BoxShape } from './scene/box-shape';
+import { Pivot } from './scene/pivot';
+import { Scene } from './scene/scene';
+import { SphereShape } from './scene/sphere-shape';
 import { Splat } from './splat/splat';
 import { State } from './splat/splat-state';
 import { Transform } from './transform';

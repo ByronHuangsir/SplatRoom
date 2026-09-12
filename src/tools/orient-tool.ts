@@ -3,12 +3,12 @@ import { Entity, Mat4, Quat, TranslateGizmo, Vec3, math } from 'playcanvas';
 
 import { EntityTransformOp, MultiOp, PlacePivotOp } from '../edit-ops';
 import { Events } from '../events';
-import type { GridPlane } from '../infinite-grid';
-import { Pivot } from '../pivot';
-import { Scene } from '../scene';
+import type { GridPlane } from '../scene/infinite-grid';
+import { Pivot } from '../scene/pivot';
+import { Scene } from '../scene/scene';
+import { ToolOverlay, OverlayWriter } from '../scene/tool-overlay';
 import { Splat } from '../splat/splat';
 import { pickSplatSurfacePoint } from '../splat/splat-pick';
-import { ToolOverlay, OverlayWriter } from '../tool-overlay';
 import { Transform } from '../transform';
 import { i18n } from '../ui/localization';
 

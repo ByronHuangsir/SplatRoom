@@ -9,7 +9,7 @@ import {
 
 import { AnimationController } from '../animation/animation-controller';
 import { TrackId } from '../animation/animation-data';
-import { Element, ElementType } from '../element';
+import { Element, ElementType } from '../scene/element';
 import { vertexShader, fragmentShader } from '../shaders/debug-shader';
 
 // Temp vectors for geometry calculation (module-scope to avoid allocations)

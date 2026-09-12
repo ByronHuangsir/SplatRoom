@@ -9,9 +9,9 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { CropBox } from '../crop-box';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { CropBox } from '../scene/crop-box';
+import { Scene } from '../scene/scene';
 
 // Drag handles for the crop cylinder / sphere shapes. The box shape uses
 // CropBoxFaceHandles (six face capsules); cylinder/sphere have no faces, so

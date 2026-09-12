@@ -1,9 +1,9 @@
 import { Mat4, Ray, Vec3, Vec4 } from 'playcanvas';
 
 import { sigmoid } from '../color-grade';
-import { Scene } from '../scene';
 import { Splat } from './splat';
 import { State } from './splat-state';
+import { Scene } from '../scene/scene';
 
 // clicked points gather the gaussians whose centers project within this many
 // pixels of the cursor (falling back to the larger radius on sparse surfaces)

@@ -14,11 +14,11 @@
  * are generated automatically a moment after load so the viewport isn't
  * blocked during the initial focus/import.
  */
-import { Element, ElementType } from '../element';
 import { buildLodAssets, planLodFractions, setLodDistances, getLodDistances } from './lod';
 import { EditHistory } from '../edit-history';
 import { Events } from '../events';
-import type { Scene } from '../scene';
+import { Element, ElementType } from '../scene/element';
+import type { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';
 
 const LOD_GENERATE_MIN = 900_000; // splats

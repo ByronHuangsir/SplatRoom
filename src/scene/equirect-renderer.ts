@@ -14,7 +14,7 @@ import {
     Texture
 } from 'playcanvas';
 
-import { faceFov, vertexShader, fragmentShader } from './shaders/equirect-shader';
+import { faceFov, vertexShader, fragmentShader } from '../shaders/equirect-shader';
 
 // renders the six cube faces of a panorama to individual 2d textures and
 // projects them to an equirectangular target. faces are rendered wider than

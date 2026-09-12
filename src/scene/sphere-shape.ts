@@ -7,41 +7,36 @@ import {
     BlendState,
     BoundingBox,
     Entity,
-    Mat4,
     ShaderMaterial,
     Vec3
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
-import { Serializer } from './serializer';
-import { vertexShader, fragmentShader } from './shaders/box-shape-shader';
+import { Serializer } from '../serializer';
+import { vertexShader, fragmentShader } from '../shaders/sphere-shape-shader';
 
-const invMat = new Mat4();
+const v = new Vec3();
 const bound = new BoundingBox();
 
-// the pivot's local scale carries the box lengths, so in the pivot's local
-// space the box is the unit cube
-const unitBound = new BoundingBox(new Vec3(0, 0, 0), new Vec3(0.5, 0.5, 0.5));
-
-class BoxShape extends Element {
-    _lenX = 2;
-    _lenY = 2;
-    _lenZ = 2;
+class SphereShape extends Element {
+    _radius = 1;
     pivot: Entity;
     material: ShaderMaterial;
 
     constructor() {
         super(ElementType.debug);
 
-        this.pivot = new Entity('boxPivot');
+        this.pivot = new Entity('spherePivot');
         this.pivot.addComponent('render', {
             type: 'box'
         });
+        const r = this._radius * 2;
+        this.pivot.setLocalScale(r, r, r);
     }
 
     add() {
         const material = new ShaderMaterial({
-            uniqueName: 'boxShape',
+            uniqueName: 'sphereShape',
             vertexGLSL: vertexShader,
             fragmentGLSL: fragmentShader
         });
@@ -74,16 +69,12 @@ class BoxShape extends Element {
 
     serialize(serializer: Serializer): void {
         serializer.packa(this.pivot.getWorldTransform().data);
-        serializer.pack(this.lenX);
-        serializer.pack(this.lenY);
-        serializer.pack(this.lenZ);
+        serializer.pack(this.radius);
     }
 
     onPreRender() {
-        this.pivot.setLocalScale(this._lenX, this._lenY, this._lenZ);
-        invMat.copy(this.pivot.getWorldTransform()).invert();
-        this.material.setParameter('boxInvMat', invMat.data);
-        this.material.setParameter('boxLen', [this._lenX * 0.5, this._lenY * 0.5, this._lenZ  * 0.5]);
+        this.pivot.getWorldTransform().getTranslation(v);
+        this.material.setParameter('sphere', [v.x, v.y, v.z, this.radius]);
 
         const device = this.scene.graphicsDevice;
         device.scope.resolve('targetSize').setValue([device.width, device.height]);
@@ -94,10 +85,8 @@ class BoxShape extends Element {
     }
 
     updateBound() {
-        // keep the pivot's scale in sync immediately (not just at the next
-        // prerender) so world-transform reads are never stale
-        this.pivot.setLocalScale(this._lenX, this._lenY, this._lenZ);
-        bound.setFromTransformedAabb(unitBound, this.pivot.getWorldTransform());
+        bound.center.copy(this.pivot.getPosition());
+        bound.halfExtents.set(this.radius, this.radius, this.radius);
 
         // undo/redo can change the volume while it's not in the scene
         if (this.scene) {
@@ -109,32 +98,18 @@ class BoxShape extends Element {
         return bound;
     }
 
-    set lenX(lenX: number) {
-        this._lenX = lenX;
+    set radius(radius: number) {
+        this._radius = radius;
+
+        const r = this._radius * 2;
+        this.pivot.setLocalScale(r, r, r);
+
         this.updateBound();
     }
 
-    get lenX() {
-        return this._lenX;
-    }
-
-    set lenY(lenY: number) {
-        this._lenY = lenY;
-        this.updateBound();
-    }
-
-    get lenY() {
-        return this._lenY;
-    }
-
-    set lenZ(lenZ: number) {
-        this._lenZ = lenZ;
-        this.updateBound();
-    }
-
-    get lenZ() {
-        return this._lenZ;
+    get radius() {
+        return this._radius;
     }
 }
 
-export { BoxShape };
+export { SphereShape };

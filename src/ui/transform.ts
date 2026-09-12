@@ -2,9 +2,9 @@ import { Button, Container, ContainerArgs, Label, NumericInput, VectorInput } fr
 import { Quat, Vec3 } from 'playcanvas';
 
 import { Events } from '../events';
-import { i18n } from './localization';
-import { Pivot } from '../pivot';
 import { enableReliableInputDrag } from './input-drag';
+import { i18n } from './localization';
+import { Pivot } from '../scene/pivot';
 
 const v = new Vec3();
 

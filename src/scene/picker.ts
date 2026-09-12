@@ -13,7 +13,7 @@ import {
 
 import { ElementType } from './element';
 import { Scene } from './scene';
-import { Splat } from './splat/splat';
+import { Splat } from '../splat/splat';
 
 const idClearColor = new Color(1, 1, 1, 1);
 const depthClearColor = new Color(0, 0, 0, 1);

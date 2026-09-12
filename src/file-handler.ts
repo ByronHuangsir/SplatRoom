@@ -1,14 +1,14 @@
 import { Mat4, path, Quat, Vec3 } from 'playcanvas';
 
 import { deserializeGrade, serializeGrade, sidecarFilename } from './color-grade-file';
-import { CropBox } from './crop-box';
 import { CreateDropHandler } from './drop-handler';
-import { ElementType } from './element';
 import { Events } from './events';
 import { BrowserFileSystem, MappedReadFileSystem } from './io';
 import { attachLodFromFile } from './lod/lod-file';
 import { renderDiagnostics } from './render-diagnostics';
-import { Scene } from './scene';
+import { CropBox } from './scene/crop-box';
+import { ElementType } from './scene/element';
+import { Scene } from './scene/scene';
 import { Splat } from './splat/splat';
 import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat/splat-serialize';
 import { State } from './splat/splat-state';

@@ -1,7 +1,7 @@
 import { SelectOp } from '../edit-ops';
 import { Events } from '../events';
 import { semanticSelect } from '../geometry/semantic-select';
-import { Scene } from '../scene';
+import { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';
 
 /**

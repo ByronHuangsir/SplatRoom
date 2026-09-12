@@ -3,11 +3,11 @@ import { AudioBufferSource, BufferTarget, EncodedPacket, EncodedVideoPacketSourc
 import { Color, path, Quat, Vec3 } from 'playcanvas';
 
 import { buildMixBuffer } from './audio/audio-mix';
-import { ElementType } from './element';
-import { EquirectRenderer } from './equirect-renderer';
 import { Events } from './events';
 import { encodePng } from './png-writer';
-import { Scene } from './scene';
+import { ElementType } from './scene/element';
+import { EquirectRenderer } from './scene/equirect-renderer';
+import { Scene } from './scene/scene';
 import { injectSphericalMetadata } from './splat/spherical-metadata';
 import { Splat } from './splat/splat';
 import { i18n } from './ui/localization';

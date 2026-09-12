@@ -1,11 +1,11 @@
 import { BooleanInput, Container, Label } from '@playcanvas/pcui';
 import { Mat4 } from 'playcanvas';
 
-import { Element } from '../element';
 import { Events } from '../events';
 import { Histogram } from './histogram';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Element } from '../scene/element';
 import { Splat } from '../splat/splat';
 
 // gpu propMode constants. these must match the propMode dispatch in

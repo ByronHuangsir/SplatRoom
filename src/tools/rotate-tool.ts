@@ -2,7 +2,7 @@ import { RotateGizmo } from 'playcanvas';
 
 import { TransformTool } from './transform-tool';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { Scene } from '../scene/scene';
 
 class RotateTool extends TransformTool {
     constructor(events: Events, scene: Scene) {

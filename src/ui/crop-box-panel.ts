@@ -1,12 +1,12 @@
 import { BooleanInput, Button, Container, Label, NumericInput, SliderInput } from '@playcanvas/pcui';
 import { Vec3 } from 'playcanvas';
 
-import { CropBox } from '../crop-box';
-import { ElementType } from '../element';
 import { Events } from '../events';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { CropBox } from '../scene/crop-box';
+import { ElementType } from '../scene/element';
 
 // local-axis scratch vectors for face-coordinate math
 const axisX = new Vec3();

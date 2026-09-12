@@ -29,8 +29,8 @@ import {
 } from 'playcanvas';
 
 import { PointerController } from './controllers';
-import { Element, ElementType } from '../element';
-import { Picker } from '../picker';
+import { Element, ElementType } from '../scene/element';
+import { Picker } from '../scene/picker';
 import { Serializer } from '../serializer';
 import { TweenValue } from './tween-value';
 import { vertexShader, fragmentShader } from '../shaders/blit-shader';

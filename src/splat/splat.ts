@@ -15,8 +15,8 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { Element, ElementType } from '../element';
 import { suggestLodLevel } from '../lod/lod';
+import { Element, ElementType } from '../scene/element';
 import { Serializer } from '../serializer';
 import { State, SplatState } from './splat-state';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';

@@ -2,9 +2,9 @@ import { Button, Container, Label, NumericInput } from '@playcanvas/pcui';
 import { Entity, Mat4, Quat, TranslateGizmo, Vec3 } from 'playcanvas';
 
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { Scene } from '../scene/scene';
+import { ToolOverlay, OverlayWriter } from '../scene/tool-overlay';
 import { Splat } from '../splat/splat';
-import { ToolOverlay, OverlayWriter } from '../tool-overlay';
 import { Transform } from '../transform';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';
 import { i18n } from '../ui/localization';

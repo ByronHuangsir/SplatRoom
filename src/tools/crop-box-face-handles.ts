@@ -9,9 +9,9 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { CropBox } from '../crop-box';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { CropBox } from '../scene/crop-box';
+import { Scene } from '../scene/scene';
 
 // face index → local-space position, axis index, sign
 // the 6 faces of the unit cube [-0.5, 0.5]^3

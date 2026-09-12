@@ -2,10 +2,10 @@ import { Button, Container, Element, Label, VectorInput } from '@playcanvas/pcui
 import { Vec3 } from 'playcanvas';
 
 import { ShapeGizmoMode, ShapeTransformGizmo } from './shape-transform-gizmo';
-import { BoxShape } from '../box-shape';
 import { ShapeTransformOp } from '../edit-ops';
 import { Events } from '../events';
-import { Scene } from '../scene';
+import { BoxShape } from '../scene/box-shape';
+import { Scene } from '../scene/scene';
 import { ShortcutManager } from '../shortcut-manager';
 import { Splat } from '../splat/splat';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';

@@ -18,7 +18,7 @@ import {
 
 import { AnimationController } from '../animation/animation-controller';
 import { TrackId } from '../animation/animation-data';
-import { Element, ElementType } from '../element';
+import { Element, ElementType } from '../scene/element';
 import { Splat } from '../splat/splat';
 
 /**
