@@ -1,12 +1,10 @@
-// WebGPU preference safety check.
+// Graphics-backend preference check.
 //
-// The WebGPU backend cannot render splats in this build (see
-// docs/V3-WebGPU-现状.md), so a stored WebGPU preference must never put the user
-// in front of a black viewport: the app has to refuse it, fall back to WebGL2,
-// reset the stored preference and explain itself in a popup. `?gpu=webgpu` stays
-// available for backend development.
+// Both backends render splats now, so the stored preference must be HONOURED: a stored
+// 'webgpu' has to reach the WebGPU device (no silent fallback), the settings panel has to
+// persist a change, and `?gpu=…` must still win over the stored value for the harnesses.
 //
-// usage: node docs/verify/verify-webgpu-fallback.cjs [url]
+// usage: node docs/verify/verify-webgpu-fallback.cjs [url] [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 const { decodePng } = require('./lib/png.cjs');
 
@@ -47,6 +45,17 @@ const viewportStats = async (page) => {
     return +(colourful / (width * height)).toFixed(4);
 };
 
+const loadModel = async (page) => {
+    await page.evaluate(async (model) => {
+        const buf = await (await fetch('./' + model)).arrayBuffer();
+        await window.scene.events.invoke('import', [{ filename: model, contents: new File([buf], model) }]);
+    }, MODEL);
+    await page.waitForFunction("window.scene.getElementsByType('splat').length > 0", { timeout: 120000 });
+    await sleep(4000);
+    await page.evaluate(() => { window.scene.forceRender = true; window.scene.app.renderNextFrame = true; });
+    await sleep(1000);
+};
+
 (async () => {
     const checks = [];
     const errors = [];
@@ -59,7 +68,7 @@ const viewportStats = async (page) => {
             if (m.type() === 'error') errors.push('console: ' + m.text().slice(0, 300));
         });
 
-        // 1. a stored WebGPU preference must be refused
+        // 1. a stored WebGPU preference must be honoured on the next start
         await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
         await page.waitForFunction('!!window.scene', { timeout: 90000 });
         await page.evaluate(() => window.localStorage.setItem('splatroom.gpuBackend', 'webgpu'));
@@ -67,49 +76,54 @@ const viewportStats = async (page) => {
         await page.waitForFunction('!!window.scene', { timeout: 90000 });
         await sleep(3000);
 
-        const fallback = await page.evaluate(() => {
+        const stored = await page.evaluate(() => {
             const popup = document.querySelector('#popup');
             return {
                 backend: window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2',
-                stored: window.localStorage.getItem('splatroom.gpuBackend'),
+                pref: window.localStorage.getItem('splatroom.gpuBackend'),
                 popupVisible: !!popup && !popup.classList.contains('pcui-hidden'),
-                popupText: (popup?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 220)
+                popupText: (popup?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
             };
         });
-        const t = fallback.popupText.toLowerCase();
-        checks.push({ name: 'stored WebGPU preference is refused', pass: fallback.backend === 'webgl2', detail: fallback.backend });
-        checks.push({ name: 'stored preference reset to webgl2', pass: fallback.stored === 'webgl2', detail: String(fallback.stored) });
-        checks.push({ name: 'popup explains the fallback', pass: fallback.popupVisible && /webgpu/i.test(t) && /webgl2/i.test(t), detail: fallback.popupText.slice(0, 120) });
+        checks.push({ name: 'stored WebGPU preference is honoured', pass: stored.backend === 'webgpu', detail: stored.backend });
+        checks.push({ name: 'stored preference is left untouched', pass: stored.pref === 'webgpu', detail: String(stored.pref) });
+        checks.push({ name: 'no fallback popup while WebGPU works', pass: !stored.popupVisible, detail: stored.popupText });
 
-        // a model still displays after the fallback
-        await page.evaluate(async (model) => {
-            const buf = await (await fetch('./' + model)).arrayBuffer();
-            await window.scene.events.invoke('import', [{ filename: model, contents: new File([buf], model) }]);
-        }, MODEL);
-        await page.waitForFunction("window.scene.getElementsByType('splat').length > 0", { timeout: 120000 });
-        await sleep(4000);
-        await page.evaluate(() => { window.scene.forceRender = true; window.scene.app.renderNextFrame = true; });
-        await sleep(1000);
-        const ratio = await viewportStats(page);
-        checks.push({ name: 'model renders after the fallback', pass: ratio > 0.05, detail: `${(ratio * 100).toFixed(1)}% of the sampled viewport is coloured` });
+        await loadModel(page);
+        const ratioGpu = await viewportStats(page);
+        checks.push({ name: 'model renders on the stored WebGPU backend', pass: ratioGpu > 0.05, detail: `${(ratioGpu * 100).toFixed(1)}% of the sampled viewport is coloured` });
 
-        // 2. the development override still reaches the WebGPU device
+        // 2. a stored WebGL2 preference reaches the WebGL2 device
+        await page.evaluate(() => window.localStorage.setItem('splatroom.gpuBackend', 'webgl2'));
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.waitForFunction('!!window.scene', { timeout: 90000 });
+        await sleep(2500);
+        const storedGl = await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2'));
+        checks.push({ name: 'stored WebGL2 preference is honoured', pass: storedGl === 'webgl2', detail: storedGl });
+
+        // 3. the URL override still wins over the stored value (harnesses rely on it)
         await page.goto(`${URL}?gpu=webgpu`, { waitUntil: 'domcontentloaded', timeout: 90000 });
         await page.waitForFunction('!!window.scene', { timeout: 90000 });
         await sleep(1500);
         const override = await page.evaluate(() => ({
             backend: window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2',
-            stored: window.localStorage.getItem('splatroom.gpuBackend'),
+            pref: window.localStorage.getItem('splatroom.gpuBackend'),
             popupVisible: (() => {
                 const popup = document.querySelector('#popup');
                 return !!popup && !popup.classList.contains('pcui-hidden');
             })()
         }));
-        checks.push({ name: '?gpu=webgpu still selects the WebGPU device', pass: override.backend === 'webgpu', detail: override.backend });
-        checks.push({ name: 'override does not rewrite the stored preference', pass: override.stored === 'webgl2', detail: String(override.stored) });
-        checks.push({ name: 'override shows no fallback popup', pass: !override.popupVisible });
+        checks.push({ name: '?gpu=webgpu overrides the stored preference', pass: override.backend === 'webgpu', detail: override.backend });
+        checks.push({ name: 'override does not rewrite the stored preference', pass: override.pref === 'webgl2', detail: String(override.pref) });
+        checks.push({ name: 'override shows no popup', pass: !override.popupVisible });
 
-        console.log(JSON.stringify({ fallback, ratio, override, checks, failed: checks.filter(c => !c.pass).length, errors }, null, 2));
+        await page.goto(`${URL}?gpu=webgl2`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+        await page.waitForFunction('!!window.scene', { timeout: 90000 });
+        await sleep(1500);
+        const overrideGl = await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2'));
+        checks.push({ name: '?gpu=webgl2 overrides the stored WebGPU preference', pass: overrideGl === 'webgl2', detail: overrideGl });
+
+        console.log(JSON.stringify({ stored, ratioGpu, storedGl, override, overrideGl, checks, failed: checks.filter(c => !c.pass).length, errors }, null, 2));
         if (checks.some(c => !c.pass) || errors.length) process.exitCode = 1;
     } catch (err) {
         console.log(JSON.stringify({ fatal: String(err).slice(0, 700), errors }, null, 2));

@@ -114,7 +114,7 @@ const renderDiagnostics = (splat: Splat) => {
 
     // advisory, never a failure on its own
     const warnings = facts.backend === 'webgpu' ? [
-        'The WebGPU backend cannot render splats in this build (the engine uses its own WGSL splat material there, so the custom GLSL splat shader — colour grading, hidden/deleted state, crop, effects — is ignored, and the two-attachment splat pass is an invalid pipeline). The app refuses a stored WebGPU preference and runs on WebGL2 instead; see docs/V3-WebGPU-现状.md.'
+        'The WebGPU backend sorts splats into a storage buffer (no order texture), and the centers overlay keeps its own mirror of the sort order; the picture-in-picture preview falls back to the engine sort order there.'
     ] : [];
 
     const summary = ok ?

@@ -438,3 +438,38 @@ clip 空间（`uOverlayViewportSize` 由 `scene.camera.targetSize` 每帧上传�
 **验证脚本**：`verify-centers-overlay.cjs` 增加了前后两帧的像素 diff 与连通域统计（点数量、点尺寸、
 质心位置），不再接受"没崩就算过"。新增 `order-read-probe` / `mirror-vs-sorter-probe` / `predict-probe`
 等一次性探针留在 `_tmp/`，不进仓库。
+
+### 6.17 第十四轮：WebGPU 回退已移除，设置面板恢复后端选择
+
+**改动**：
+
+- `src/main.ts`：不再拒绝持久化的 WebGPU 偏好。优先级改为 `?gpu=webgpu|webgl2` > 设置面板偏好 > 默认 WebGL2；
+  请求 WebGPU 时设备类型仍是 `['webgpu', 'webgl2']`，所以浏览器/机器不支持 WebGPU 时会正常退到 WebGL2，
+  此时才弹一次提示（locale 文案已改写为"此浏览器或显卡不支持 WebGPU"）。
+- `src/ui/settings-panel.ts`：原来那行只读的"WebGL2（本版本不支持 WebGPU）"改成真正的下拉选择
+  （WebGL2 / WebGPU），选择后写入偏好并弹"需要重启"提示（后端在设备创建时确定，无法热切换）。
+- 9 份 locale 同步新增 `panel.settings.gpu-backend`、`popup.gpu-backend-restart.*` 并改写
+  `popup.webgpu-backend.*`（`npm run lint:locales` 666 键全同步）。
+- `src/core/render-diagnostics.ts`：删掉"WebGPU 无法渲染 splat"的告警（已不成立），改为说明
+  WebGPU 的排序存储在 storage buffer 里、居中点覆盖层自带镜像、PiP 预览使用引擎排序。
+
+**新增验证脚本**（都支持双后端对比）：
+
+| 脚本 | 覆盖内容 | WebGPU 实测 |
+| --- | --- | --- |
+| `verify-effects.cjs` | 散射 / 波纹开场 / 飘散散场（顶点着色器特效分支 + `uEffectMode` / `uEffectTime` / `uEffectFade`） | 散射 236034 px、波纹 245650/244316/133362 px（波形推进）、飘散 242193/245650/245650 px、progress 归零后 0 px 差异 |
+| `verify-transform-palette.cjs` | 变换调色板（调色板纹理 + 每 splat 变换索引 + WGSL 的 `transpose(t)` 分支） | 缩放后 212030 px 变化，恢复后 0 px |
+| `verify-ortho-camera.cjs` | 正交/透视切换（`buildGpuProjection` 的 ortho 分支，此前 WebGPU 上完全没实现） | 切换 204852 px 变化、模型正常、切回 0 px |
+| `verify-gpu-backend-setting.cjs` | 设置面板后端选择 + 偏好持久化 + 重启提示 | 4/4 通过 |
+| `verify-webgpu-fallback.cjs`（重写） | 偏好被**采纳**（不再是"被拒绝"）、`?gpu=` 仍可覆盖 | 9/9 通过，模型在存储偏好下渲染 100% |
+
+**双后端数值对照**（同一 test-model.ply）：散射 236034 / 230095 px、波纹 245650 / 239691 px、
+调色板变换 212030 / 208894 px、正交切换 204852 / 204589 px、居中点 2250 / 2250 px（逐像素相同）。
+
+**仍未覆盖 / 已知降级**：
+
+- **PiP 预览**：`CameraPreview._ensurePipSort()` 在 WebGPU 上直接返回 null（引擎那边没有 order texture，
+  只有 storage buffer），所以 PiP 用引擎的排序结果渲染——预览仍然出图，只是深度顺序来自主相机而非 PiP 相机。
+  这是设计内的降级（代码里原本就写着 `if (device.isWebGPU) return null;`），尚未做像素级验证。
+- **导出/快照**：`render.image`（旋转台/视频导出）尚未在 WebGPU 上验证。
+

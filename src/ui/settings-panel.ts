@@ -4,6 +4,7 @@ import { Color } from 'playcanvas';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
 import { Events } from '../core/events';
+import { getGpuBackendPref, setGpuBackendPref } from '../core/gpu-backend';
 import { ShortcutManager } from '../core/shortcut-manager';
 import type { GridPlane } from '../scene/infinite-grid';
 
@@ -473,26 +474,37 @@ class SettingsPanel extends Container {
             events.invoke('lod.generateForAll');
         });
 
-        // graphics backend: WebGL2 only. The WebGPU backend cannot render splats
-        // in this build (the engine renders splats with its own WGSL material,
-        // which ignores the GLSL splat chunks this project injects, and the
-        // two-attachment splat pass is an invalid pipeline there — the viewport
-        // stays black for every model). The row therefore reports the backend
-        // instead of offering a choice; `?gpu=webgpu` still selects it for
-        // development. See docs/V3-WebGPU-现状.md.
+        // graphics backend: WebGL2 or WebGPU. Both render splats (the WebGPU path uses
+        // WGSL twins of the custom splat/overlay shaders, see splat-shader-wgsl.ts), so
+        // this is a real choice; the device is created on the next start, because the
+        // backend cannot be switched on a live graphics device.
         const gpuRow = new Container({
             class: 'settings-panel-row'
         });
         const gpuLabel = new Label({
-            class: 'settings-panel-row-label',
-            text: 'Graphics backend'
+            class: 'settings-panel-row-label'
         });
-        const gpuValue = new Label({
-            class: 'settings-panel-row-hint',
-            text: 'WebGL2 (WebGPU unavailable in this build)'
+        i18n.bindText(gpuLabel, 'panel.settings.gpu-backend');
+
+        const gpuSelection = new SelectInput({
+            class: 'settings-panel-row-select',
+            defaultValue: getGpuBackendPref() ?? 'webgl2',
+            options: [
+                { v: 'webgl2', t: 'WebGL2' },
+                { v: 'webgpu', t: 'WebGPU' }
+            ]
         });
+        gpuSelection.on('change', (value: string) => {
+            setGpuBackendPref(value === 'webgpu' ? 'webgpu' : 'webgl2');
+            events.invoke('showPopup', {
+                type: 'info',
+                header: i18n.t('popup.gpu-backend-restart.header'),
+                message: i18n.t('popup.gpu-backend-restart.message')
+            });
+        });
+
         gpuRow.append(gpuLabel);
-        gpuRow.append(gpuValue);
+        gpuRow.append(gpuSelection);
 
         // selection depth / footprint (V3, SuperSplat 3 semantics):
         // "depth" = only splats visible on the surface can be selected,
