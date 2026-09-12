@@ -17,6 +17,7 @@ import {
     Vec3
 } from 'playcanvas';
 
+import { buildGpuProjection } from './gpu-projection';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { Serializer } from '../core/serializer';
@@ -685,14 +686,13 @@ class Splat extends Element {
         const far = cam.farClip;
         const isOrtho = cam.projection === PROJECTION_ORTHOGRAPHIC;
         const { width, height } = wrapper.targetSize ?? { width: 1, height: 1 };
-        const aspect = height > 0 ? width / height : 1;
 
         // The camera component's own projection matrix is not usable here: the engine
         // refreshes it lazily only while it syncs the render view for a frame, which our
         // custom pass pipeline does after onPreRender runs — reading it here returns
-        // zeros. Build the matrix ourselves with the same call the engine makes in
-        // Camera._evaluateProjectionMatrix().
-        this._gpuProjMat.setPerspective(cam.fov, aspect, near, far, false);
+        // zeros. Build the matrix ourselves the way the engine does, including its
+        // horizontalFov and orthographic cases (see src/splat/gpu-projection.ts).
+        buildGpuProjection(this._gpuProjMat, cam);
         this._gpuViewProjMat.mul2(this._gpuProjMat, cam.viewMatrix);
 
         material.setParameter('uSplatView', cam.viewMatrix.data);

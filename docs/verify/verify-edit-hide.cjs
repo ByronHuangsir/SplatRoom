@@ -59,13 +59,13 @@ const stats = async (page) => {
             scene.events.fire('select.all');
             await new Promise(r => setTimeout(r, 1200));
             const splat = scene.getElementsByType('splat')[0];
-            const selected = splat.state.selectedCount ?? null;
+            const selected = splat.numSelected ?? null;
             scene.events.fire('select.hide');
             await new Promise(r => setTimeout(r, 1500));
             scene.forceRender = true;
             scene.app.renderNextFrame = true;
             await new Promise(r => setTimeout(r, 900));
-            return { backend: scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2' };
+            return { backend: scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2', selected };
         });
         const after = await stats(page);
 

@@ -11,7 +11,9 @@ const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const stats = async (page) => {
+// grab the same crop of the viewport (away from the UI panels) and report both its
+// statistics and the decoded pixels, so two grabs can be compared pixel by pixel
+const grab = async (page) => {
     const rect = await page.evaluate(() => {
         const c = document.querySelector('canvas').getBoundingClientRect();
         return { x: Math.round(c.x), y: Math.round(c.y), w: Math.round(c.width), h: Math.round(c.height) };
@@ -34,7 +36,27 @@ const stats = async (page) => {
         sum += l;
         if (l > 40) lum++;
     }
-    return { meanLum: Math.round(sum / n), litPct: +((lum / n) * 100).toFixed(1) };
+    return {
+        meanLum: Math.round(sum / n),
+        litPct: +((lum / n) * 100).toFixed(1),
+        px: n,
+        img
+    };
+};
+
+// how many pixels differ between two grabs of the same static camera
+const diffPx = (a, b, threshold = 8) => {
+    let changed = 0;
+    const n = Math.min(a.img.data.length, b.img.data.length);
+    const ch = a.img.channels;
+    for (let i = 0; i < n; i += ch) {
+        if (Math.abs(a.img.data[i] - b.img.data[i]) > threshold ||
+            Math.abs(a.img.data[i + 1] - b.img.data[i + 1]) > threshold ||
+            Math.abs(a.img.data[i + 2] - b.img.data[i + 2]) > threshold) {
+            changed++;
+        }
+    }
+    return changed;
 };
 
 const settle = async (page) => {
@@ -68,17 +90,20 @@ const settle = async (page) => {
         const overlayHandle = await page.evaluate(() => {
             const scene = window.scene;
             const splat = scene.getElementsByType('splat')[0];
+            const instance = splat.entity.gsplat.instance;
             return {
                 hasOverlay: !!scene.splatOverlay,
                 orderReady: scene.splatOverlay ? scene.splatOverlay.orderReady : null,
-                hasOrderTexture: !!splat.entity.gsplat.instance.orderTexture,
-                hasOrderBuffer: !!splat.entity.gsplat.instance.orderBuffer,
-                sorterOrderBytes: splat.entity.gsplat.instance.sorter?.orderData?.byteLength ?? null
+                hasOrderTexture: !!instance.orderTexture,
+                hasOrderBuffer: !!instance.orderBuffer,
+                hasMirrorTexture: !!(scene.splatOverlay && scene.splatOverlay.gpuOrderTexture),
+                sorterOrderBytes: instance.sorter?.orderData?.byteLength ?? null,
+                drawCount: scene.splatOverlay ? scene.splatOverlay.mesh.primitive[0].count : null
             };
         });
 
         await settle(page);
-        const splats = await stats(page);
+        const splats = await grab(page);
 
         const after = await page.evaluate(async () => {
             const scene = window.scene;
@@ -92,23 +117,36 @@ const settle = async (page) => {
                 mode: scene.events.invoke('camera.mode'),
                 overlay: scene.events.invoke('camera.overlay'),
                 splatSize: scene.events.invoke('camera.splatSize'),
-                orderReady: scene.splatOverlay ? scene.splatOverlay.orderReady : null
+                orderReady: scene.splatOverlay ? scene.splatOverlay.orderReady : null,
+                enabled: scene.splatOverlay ? scene.splatOverlay.enabled : null,
+                drawCount: scene.splatOverlay ? scene.splatOverlay.mesh.primitive[0].count : null,
+                mirrorHead: (() => {
+                    const t = scene.splatOverlay && scene.splatOverlay.gpuOrderTexture;
+                    if (!t) return null;
+                    const d = t.lock();
+                    const head = Array.from(d.slice(0, 8));
+                    t.unlock();
+                    return head;
+                })()
             };
         });
-        const centers = await stats(page);
+        const centers = await grab(page);
+
+        // with the order data in place, the dots must actually land on screen
+        const changed = diffPx(splats, centers);
+        const changedPct = +((changed / splats.px) * 100).toFixed(2);
 
         const checks = [
             { name: 'model visible', pass: splats.litPct > 20, detail: `${splats.litPct}% lit` },
             { name: 'overlay handle attached', pass: overlayHandle.hasOverlay, detail: JSON.stringify(overlayHandle) },
             { name: 'centers mode enabled', pass: after.mode === 'centers' && after.overlay === true, detail: `mode=${after.mode} overlay=${after.overlay} size=${after.splatSize}` },
-            // Regression guard: switching to centers mode must never break the frame. The
-            // overlay itself is still unavailable on WebGPU (docs/V3-WebGPU-现状.md 6.13):
-            // feeding it an order texture made its material fail to build a pipeline and
-            // blacked out the whole viewport, so that change was reverted.
+            // Regression guard: switching to centers mode must never break the frame. Feeding
+            // the overlay a bad order texture used to fail its pipeline and black out the
+            // whole viewport (docs/V3-WebGPU-现状.md 6.13).
             { name: 'centers mode keeps the model rendered', pass: centers.litPct > splats.litPct * 0.5, detail: `lit ${splats.litPct}% -> ${centers.litPct}%, mean ${splats.meanLum} -> ${centers.meanLum}` },
-            { name: 'centers overlay draws (not yet supported on WebGPU)', pass: true, detail: `orderReady=${after.orderReady} orderTexture=${overlayHandle.hasOrderTexture} orderBuffer=${overlayHandle.hasOrderBuffer}` }
+            { name: 'centers overlay draws points', pass: after.orderReady === true && after.enabled === true && changed > 200, detail: `orderReady=${after.orderReady} drawCount=${after.drawCount} changedPx=${changed} (${changedPct}%)` }
         ];
-        console.log(JSON.stringify({ backend, overlayHandle, splats, after, centers, checks, failed: checks.filter(c => !c.pass).length, logs }, null, 2));
+        console.log(JSON.stringify({ backend, overlayHandle, splats: { meanLum: splats.meanLum, litPct: splats.litPct }, after, centers: { meanLum: centers.meanLum, litPct: centers.litPct }, changed, changedPct, checks, failed: checks.filter(c => !c.pass).length, logs }, null, 2));
         if (checks.some(c => !c.pass)) process.exitCode = 1;
     } catch (e) {
         console.log(JSON.stringify({ fatal: String(e).slice(0, 400), logs }, null, 2));

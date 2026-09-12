@@ -1,10 +1,30 @@
-// NOTE: WGSL has no point size and glslang/twgsl silently drops the entry point of a
+// NOTE: WGSL has no point size, and glslang/twgsl silently drops the entry point of a
 // vertex shader that assigns gl_PointSize, which produced an invalid pipeline on the
-// WebGPU backend. The WebGPU path therefore defines GSPLAT_NO_POINTSIZE (see
-// splat-overlay.ts) and the overlay renders 1-pixel points there for now.
+// WebGPU backend. The WebGPU path therefore defines GSPLAT_QUAD_SPRITES (see
+// splat-overlay.ts) and expands every splat center into a screen-space quad there, which
+// gives the overlay the same pixel size as gl_PointSize does on WebGL2.
+//
+// The WebGPU path also defines GSPLAT_OVERLAY_PARAM_MATRICES: it takes the model and
+// view-projection matrices from material parameters instead of the engine's mesh/view
+// uniform buffers, which are not bound correctly for these custom materials on WebGPU
+// (the same issue the splat material solves with uSplatView/uSplatViewProj).
 const vertexShader = /* glsl */ `
-    uniform mat4 matrix_model;
-    uniform mat4 matrix_viewProjection;
+    #ifdef GSPLAT_OVERLAY_PARAM_MATRICES
+        uniform mat4 uOverlayModel;
+        uniform mat4 uOverlayViewProj;
+        #define OV_MODEL uOverlayModel
+        #define OV_VIEWPROJ uOverlayViewProj
+    #else
+        uniform mat4 matrix_model;
+        uniform mat4 matrix_viewProjection;
+        #define OV_MODEL matrix_model
+        #define OV_VIEWPROJ matrix_viewProjection
+    #endif
+
+    #ifdef GSPLAT_QUAD_SPRITES
+    // size of the render target in pixels, used to place the sprite corners
+    uniform vec2 uOverlayViewportSize;
+    #endif
 
     uniform highp usampler2D splatOrder;            // order texture mapping render order to splat ID
     uniform uint splatTextureSize;                  // width of order texture
@@ -95,8 +115,16 @@ const vertexShader = /* glsl */ `
     #endif
 
     void main(void) {
-        // look up splat ID from order texture using gl_VertexID
-        ivec2 orderUV = ivec2(gl_VertexID % int(splatTextureSize), gl_VertexID / int(splatTextureSize));
+        // WebGPU: one quad per splat (six vertices), WebGL2: one point per splat
+        #ifdef GSPLAT_QUAD_SPRITES
+            uint splatIndex = uint(gl_VertexID) / 6u;
+            uint splatCorner = uint(gl_VertexID) - splatIndex * 6u;
+        #else
+            uint splatIndex = uint(gl_VertexID);
+        #endif
+
+        // look up splat ID from order texture using the splat index
+        ivec2 orderUV = ivec2(int(splatIndex % splatTextureSize), int(splatIndex / splatTextureSize));
         uint splatId = texelFetch(splatOrder, orderUV, 0).r;
 
         ivec2 splatUV = calcSplatUV(splatId, texParams.x);
@@ -106,11 +134,11 @@ const vertexShader = /* glsl */ `
         if ((splatState & 2u) != 0u) {
             // locked
             gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-            #ifndef GSPLAT_NO_POINTSIZE
+            #ifndef GSPLAT_QUAD_SPRITES
                 gl_PointSize = 0.0;
             #endif
         } else {
-            mat4 model = matrix_model;
+            mat4 model = OV_MODEL;
 
             // handle per-splat transform
             uint transformIndex = texelFetch(splatTransform, splatUV, 0).r;
@@ -125,7 +153,7 @@ const vertexShader = /* glsl */ `
                 t[2] = texelFetch(transformPalette, ivec2(u + 2, v), 0);
                 t[3] = vec4(0.0, 0.0, 0.0, 1.0);
 
-                model = matrix_model * transpose(t);
+                model = OV_MODEL * transpose(t);
             }
 
             vec3 center = uintBitsToFloat(texelFetch(splatPosition, splatUV, 0).xyz);
@@ -156,12 +184,30 @@ const vertexShader = /* glsl */ `
             // choose between selection colors and gaussian color
             varying_color = vec4(mix(gaussianClr, selectedClr.xyz, (splatState == 1u) ? selectedClr.w : 0.0), unselectedClr.w);
 
-            gl_Position = matrix_viewProjection * model * vec4(center, 1.0);
+            gl_Position = OV_VIEWPROJ * model * vec4(center, 1.0);
 
-            // disable depth clipping
-            gl_Position.z = 0.0;
+            // disable depth clipping so the centers always draw on top of the model. the
+            // nearest clip-space z differs per backend: GL's clip space is [-1, 1] (so
+            // z = -w is the near plane, z = 0 would land in the middle of the depth range
+            // and let the model occlude the dots), WebGPU's is [0, 1] where 0 is nearest.
+            #ifdef GSPLAT_QUAD_SPRITES
+                gl_Position.z = 0.0;
+            #else
+                gl_Position.z = -gl_Position.w;
+            #endif
 
-            #ifndef GSPLAT_NO_POINTSIZE
+            #ifdef GSPLAT_QUAD_SPRITES
+                // expand the center into a screen-space quad of splatSize pixels: the corner
+                // offset is converted from pixels to clip space and scaled by w, so the
+                // perspective divide keeps the sprite a constant size on screen. corner
+                // order is (0,0) (1,0) (0,1) / (0,1) (1,0) (1,1) — two counter-clockwise
+                // triangles in clip space.
+                vec2 corner = vec2(
+                    (splatCorner == 1u || splatCorner == 4u || splatCorner == 5u) ? 1.0 : 0.0,
+                    (splatCorner == 2u || splatCorner == 3u || splatCorner == 5u) ? 1.0 : 0.0
+                );
+                gl_Position.xy += (corner * 2.0 - 1.0) * splatSize / uOverlayViewportSize * gl_Position.w;
+            #else
                 gl_PointSize = splatSize;
             #endif
         }

@@ -397,3 +397,44 @@ WGSL 方言下写（`varying` / 松散 `uniform name: type` / `var tex: texture_
 
 **无回归**：`npm run check` 全绿、`verify-model-renders` 0 失败、`verify-centers-overlay` 双后端通过（centers 模式
 不破坏渲染、且 GPU 错误为空）。
+
+### 6.16 第十三轮：居中点覆盖层在 WebGPU 上**画出来了**，并且查出两个真实缺陷
+
+三个独立缺陷，逐个实测定位：
+
+**（1）顺序纹理镜像只上传了一次，而且是在排序完成之前。**
+`GSplatSorter` 的顺序数组在第一次排序消息到达前是**全 0**（`init()` 里 `new ArrayBuffer(numSplats * 4)`），
+而覆盖层原来在 `attach()` 时读一次就再也不更新（`gpuOrderDirty` 置了位但没有消费方）。
+拦截 `GPUQueue.writeTexture` 抓到两次 45×45 R32U 上传，**两次数据全是 0** → 每个点都读到 `splatId = 0`，
+于是 2000 个点全部落在同一个 splat 上（若该 splat 被标记删除，`gl_Position.z = 2` 直接被裁掉 → 0 像素）。
+修法：改用 sorter 的 `pendingSorted.data`（引擎 `applyPendingSorted()` 之前那一刻仍然有效）在 `updated` 事件里重传，
+并把镜像纹理初始化成**恒等映射**（`data[i] = i`），这样第一次排序到达前也能正常画。
+
+**（2）覆盖层与 splat 两条 WebGPU 路径的投影矩阵都算错了（视角缩放 1/纵横比）。**
+应用在**宽高比 > 1** 时把 `camera.horizontalFov` 置为 true（`Camera.rebuildRenderTargets()`：
+`horizontalFov = width > height`），而 `setPerspective(fov, aspect, near, far, false)` 会把 75° 当成**垂直** FOV：
+引擎的投影是 `m00 = 1/tan(fov/2)`、`m11 = m00 * aspect`，我们算成 `m00 = 1/(tan*aspect)`、`m11 = 1/tan`，
+整体小 `1/aspect`（1280×767 时正好 0.599）。后果不只是覆盖层点位不对，**模型本身在 WebGPU 上也一直被缩小渲染**。
+现在统一走 `src/splat/gpu-projection.ts` 的 `buildGpuProjection()`，完全复刻 `Camera._evaluateProjectionMatrix()`
+（含 `horizontalFov` 与 `PROJECTION_ORTHOGRAPHIC` 两种模式——后者原先在 WebGPU 上完全没实现，正交视图会画成透视）。
+实测：`uOverlayViewProj` 与引擎的 `matrix_viewProjection` **16 个元素逐一相等**；把 2000 个 center 投影到
+验证脚本的裁剪区，两个后端都是 566 个点，且 **565/566 落在完全相同的像素上**。
+
+**（3）WGSL 没有点尺寸，所以改成画屏幕空间四边形。**
+`GSPLAT_NO_POINTSIZE`（1px 点）不再需要：WebGPU 路径改定义 `GSPLAT_QUAD_SPRITES`，顶点着色器用
+`gl_VertexID / 6` 取 splat 下标、`gl_VertexID % 6` 取角点，按 `splatSize / uOverlayViewportSize * w` 偏移到
+clip 空间（`uOverlayViewportSize` 由 `scene.camera.targetSize` 每帧上传），网格拓扑改成 `PRIMITIVE_TRIANGLES`、
+绘制数量 ×6，并 `cull = CULLFACE_NONE`（四边形在 clip 空间里绕序无意义）。
+
+**双后端像素级一致性（本次最有力的证据）**：`camera.splatSize = 8` 时，两个后端的覆盖层都是
+**419 个连通点、中位数 64 像素（= 8×8）**，其中 401/402 个大点的质心落在**完全相同的像素**上
+（最近邻距离中位数 0）；`verify-centers-overlay.cjs` 在 WebGPU 上改变 **2250 px（0.92%）**，与 WebGL2 的
+2250 px（0.92%）**逐像素相同**（此前是 0 px）。模型渲染的裁剪区亮度也从 98.4% 回到 100%（与 WebGL2 一致）。
+
+**顺带修正的结论**：上一轮把"0 像素"归因于"引擎 view uniform buffer 在这些自研材质上没绑定"是**错的**——
+真正原因是（1）。材质参数矩阵（`uOverlayModel`/`uOverlayViewProj`）保留下来是因为它们现在**算对了**，
+而不是因为它们比引擎的 uniform 更可靠。
+
+**验证脚本**：`verify-centers-overlay.cjs` 增加了前后两帧的像素 diff 与连通域统计（点数量、点尺寸、
+质心位置），不再接受"没崩就算过"。新增 `order-read-probe` / `mirror-vs-sorter-probe` / `predict-probe`
+等一次性探针留在 `_tmp/`，不进仓库。
