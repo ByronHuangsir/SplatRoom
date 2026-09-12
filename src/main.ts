@@ -14,7 +14,7 @@ import { startCompareApp } from './compare/compare-app';
 import { CommandQueue } from './core/command-queue';
 import { EditHistory } from './core/edit-history';
 import { Events } from './core/events';
-import { getGpuBackendPref } from './core/gpu-backend';
+import { getGpuBackendPref, setGpuBackendPref, webgpuTranspilerUrls } from './core/gpu-backend';
 import { registerPreferences } from './core/preferences';
 import { registerSelectionEvents } from './core/selection';
 import { registerSelectionFlags } from './core/selection-flags';
@@ -190,16 +190,29 @@ const main = async () => {
     // editor ui
     const editorUI = new EditorUI(events);
 
-    // V3 WebGPU support: the main renderer can run on WebGPU with automatic
-    // WebGL2 fallback (createGraphicsDevice tries deviceTypes in order).
-    // Default stays WebGL2 — several GPU readback/data-processor paths and the
-    // PiP preview need per-host WebGPU verification before it can be default.
-    // Precedence: URL override (?gpu=) > settings-panel preference > WebGL2.
+    // Graphics backend. WebGL2 is the only backend that can render splats in this
+    // build: on WebGPU the engine renders splats with its own WGSL material, which
+    // ignores the GLSL splat chunks this project injects (colour grading, hidden /
+    // deleted state, crop, effects, transform palette) and, with our two-attachment
+    // splat pass, produces an invalid render pipeline — the viewport stays black for
+    // every model, large or small. See docs/V3-WebGPU-现状.md for the evidence.
+    //
+    // A persisted WebGPU preference is therefore refused (and reset, with a popup
+    // explaining why) instead of silently showing a black viewport. The URL override
+    // (?gpu=webgpu) still selects it, which is how the backend is developed/measured.
     const urlArgs = getURLArgs();
     const gpuOverride = (urlArgs as any)?.gpu;
-    const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
+    const gpuRequested = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
         gpuOverride :
         getGpuBackendPref();
+    const webgpuRefused = gpuRequested === 'webgpu' && gpuOverride !== 'webgpu';
+    const gpuBackend = webgpuRefused ? 'webgl2' : (gpuRequested ?? 'webgl2');
+
+    if (webgpuRefused) {
+        setGpuBackendPref('webgl2');
+        console.warn('[main] the WebGPU backend cannot render splats in this build — falling back to WebGL2 ' +
+            '(see docs/V3-WebGPU-现状.md). Use ?gpu=webgpu only for backend development.');
+    }
 
     // create the graphics device
     const graphicsDevice = await createGraphicsDevice(editorUI.canvas, {
@@ -208,7 +221,11 @@ const main = async () => {
         depth: false,
         stencil: false,
         xrCompatible: false,
-        powerPreference: 'high-performance'
+        powerPreference: 'high-performance',
+        // WebGPU needs the GLSL→WGSL transpilers: every custom pass in this
+        // project is GLSL, and without them each one fails to compile. Ignored by
+        // the WebGL2 device.
+        ...(gpuBackend === 'webgpu' ? webgpuTranspilerUrls() : {})
     });
 
     const overrides = [
@@ -226,6 +243,20 @@ const main = async () => {
         graphicsDevice,
         commandQueue
     );
+
+    // tell the user why their stored WebGPU preference was not used, once the UI
+    // can show a popup (deferred so startup stays responsive)
+    if (webgpuRefused) {
+        // note: popups are registered as an event *function* (Events.function),
+        // so they must be invoked, not fired
+        setTimeout(() => {
+            events.invoke('showPopup', {
+                type: 'info',
+                header: i18n.t('popup.webgpu-backend.header'),
+                message: i18n.t('popup.webgpu-backend.message')
+            });
+        }, 1500);
+    }
 
     // colors
     const bgClr = new Color();

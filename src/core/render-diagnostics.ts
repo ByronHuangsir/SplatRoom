@@ -112,9 +112,9 @@ const renderDiagnostics = (splat: Splat) => {
         }
     }
 
-    // advisory, never a failure on its own (small models render fine here)
+    // advisory, never a failure on its own
     const warnings = facts.backend === 'webgpu' ? [
-        'WebGPU is an experimental backend in this build: large models, 8K export, the centers overlay and some readback paths may not work. Switch Graphics backend to WebGL2 in Settings and restart if this model does not display.'
+        'The WebGPU backend cannot render splats in this build (the engine uses its own WGSL splat material there, so the custom GLSL splat shader — colour grading, hidden/deleted state, crop, effects — is ignored, and the two-attachment splat pass is an invalid pipeline). The app refuses a stored WebGPU preference and runs on WebGL2 instead; see docs/V3-WebGPU-现状.md.'
     ] : [];
 
     const summary = ok ?

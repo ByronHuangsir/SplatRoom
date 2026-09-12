@@ -11,6 +11,8 @@ import {
 } from '@playcanvas/splat-transform';
 import { createGraphicsDevice } from 'playcanvas';
 
+import { webgpuTranspilerUrls } from '../core/gpu-backend';
+
 /**
  * 格式工厂（邵青）— SplatRoom 工具菜单模块 2。
  *
@@ -280,7 +282,10 @@ const createGpuDevice = async (): Promise<GpuDevice> => {
             return await createGraphicsDevice(c, {
                 deviceTypes: ['webgpu'],
                 antialias: false,
-                preserveDrawingBuffer: true
+                preserveDrawingBuffer: true,
+                // same requirement as the main renderer: our passes are GLSL, so
+                // the WebGPU device needs the transpilers to compile them
+                ...webgpuTranspilerUrls()
             } as any);
         } catch { /* fall through to WebGL2 */ }
     }

@@ -10,6 +10,7 @@
 | `V3-开发存档-*.md` | **会话存档/续接文档**（当前最新：`V3-开发存档-2026-09-11.md`，含未解决问题与下一步）|
 | `V3-选择深度覆盖-2026-09-09.md` | 选择深度/覆盖/球刷的实现与上游语义对照记录 |
 | `V3-选择工具对齐-SuperSplat3-2026-09-11.md` | 选择工具面逐项对齐记录 |
+| `V3-WebGPU-现状.md` | **WebGPU 后端为何不可用**（黑屏两个成因、实测证据、启动回退策略、完整移植的清单）|
 | `verify/` | **现行无头验证脚本**（Puppeteer + Edge swiftshader 软件 GL）|
 | `archive/` | 历史专项记录（合并工具、表面平整）、探索存档 HTML/PDF、PDF 生成脚本与素材 |
 
@@ -22,6 +23,8 @@
 | `verify-mask-vs-rect.cjs` | 遮罩与矩形同区域一致 → 证明拾取无纵向翻转 | 是 |
 | `verify-selection-toolbar.cjs` | 工具栏：模式开关/图标/aria、分组长按弹层、工具激活（21 项）| 是 |
 | `verify-model-renders.cjs` | 像素级渲染验证 + `splatDiag()` 行为（7 项）| 是 |
+| `verify-large-model-backend.cjs <model> <backend> [url]` | 同一模型在指定后端的可见性对照：canvas 采样 / 应用回读 / **合成截图**三路取证（WebGPU 只能靠截图）| 是 |
+| `verify-webgpu-fallback.cjs [url] [model]` | WebGPU 偏好被拒绝并回退 WebGL2 + 弹窗说明 + `?gpu=webgpu` 仍可用（7 项）| 是 |
 | `verify-overlay-missing-order-texture.cjs` | 复现"选中早于实例就绪"的加载崩溃，断言不崩 + 待命 + 恢复 | 是 |
 | `verify-render-diagnostics.mts` | 渲染诊断逻辑单元检查（含 WebGPU 上限分支，7 例）| 否（Node strip-types 直跑）|
 | `verify-blackscreen.cjs` / `verify-measure-online*.cjs` / `verify-merge-ui.cjs` | 早期线上/合并工具验证（保留作参考）| 视目标 URL |
@@ -36,8 +39,18 @@ npm run verify:diag                                         # 不需要服务
 npm run verify:toolbar
 npm run verify:selection
 npm run verify:render
+node docs/verify/verify-webgpu-fallback.cjs http://localhost:3100/ test-model.ply
 # 结束时删除 dist/test-model.ply —— 否则会被打进 electron 包
 ```
+
+需要真机 WebGPU 对照时（Edge 用真实适配器，勿加 swiftshader 参数）：
+
+```powershell
+node docs/verify/verify-large-model-backend.cjs test-model.ply webgl2 http://localhost:3100/
+node docs/verify/verify-large-model-backend.cjs test-model.ply webgpu http://localhost:3100/
+```
+
+> 大模型对照可以给 `dist/` 建硬链接，避免复制几百 MB：`New-Item -ItemType HardLink -Path dist/big-model.ply -Target <某大 PLY>`，验证完删除。
 
 > 端口被占用时 `serve` 会自动换端口，以它输出的 URL 为准。
 > Electron 打包版内建静态服务用 5173（`electron-main.js` 的 `findAvailablePort(5173)`），现场报错里的 `127.0.0.1:5173` 即此。
@@ -83,3 +96,4 @@ npm run dist:win       # 可选：打包便携版
 - 上游：`playcanvas/supersplat`（MIT，v3.1.x，**纯 WebGPU**）；本仓库是 WebGL2 分支。
 - 选择语义、工具栏、工具交互按上游 v3 对齐，细节与有意保留的差异见 `V3-选择工具对齐-SuperSplat3-2026-09-11.md` 与 `V3-开发存档-2026-09-11.md`。
 - 上游依赖 WebGPU compute/projected-cache 的部分（footprint 逐行区间、GPU colorMatch、`createLayer` 式 duplicate/separate）**未移植**，本仓库以 GLSL/CPU 等价实现或暂缓。
+- **本仓库的 WebGPU 后端不可用**（自研着色器全是 GLSL，且引擎在 WebGPU 上会改用自带 WGSL splat 材质），启动时会被拒绝并回退 WebGL2，详见 `V3-WebGPU-现状.md`。

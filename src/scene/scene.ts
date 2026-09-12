@@ -244,7 +244,9 @@ class Scene {
         this.app.graphicsDevice.on('contextlost', () => {
             console.error('[GPU] WebGL context lost — graphics driver crashed');
             try {
-                this.events.fire('showPopup', {
+                // popups are event *functions* (Events.function), so firing the
+                // event reaches no handler and shows nothing
+                this.events.invoke('showPopup', {
                     type: 'error',
                     header: i18n.t('doc.gpu-crashed'),
                     message: i18n.t('doc.gpu-crashed-message')

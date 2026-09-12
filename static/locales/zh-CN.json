@@ -177,6 +177,8 @@
     "popup.error": "错误",
     "popup.error-loading": "加载文件错误",
     "popup.webgpu-unavailable": "此导出需要 WebGPU，但当前浏览器不支持。请尝试使用最新版本的 Chrome、Edge 或 Safari。",
+    "popup.webgpu-backend.header": "WebGPU 后端暂不可用",
+    "popup.webgpu-backend.message": "当前版本的 WebGPU 后端无法渲染高斯点云（会导致画面全黑），已自动改用 WebGL2，设置也已改回 WebGL2。功能一切正常，无需手动操作。",
     "popup.load-options-header": "加载选项",
     "popup.lod-select-message": "此文件包含多个细节层级。请选择要加载的层级。",
     "popup.lod-select-splats": "高斯点",

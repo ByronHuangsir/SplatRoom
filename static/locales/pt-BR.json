@@ -177,6 +177,8 @@
     "popup.error": "Erro",
     "popup.error-loading": "Erro ao Carregar Arquivo",
     "popup.webgpu-unavailable": "Esta exportação requer WebGPU, que não está disponível neste navegador. Tente uma versão recente do Chrome, Edge ou Safari.",
+    "popup.webgpu-backend.header": "Backend WebGPU indisponível",
+    "popup.webgpu-backend.message": "O backend WebGPU não consegue renderizar splats nesta versão, então o aplicativo é executado em WebGL2. A configuração foi redefinida para WebGL2. Tudo funciona normalmente.",
     "popup.load-options-header": "Opções de Carregamento",
     "popup.lod-select-message": "Este arquivo contém vários níveis de detalhe. Selecione qual carregar.",
     "popup.lod-select-splats": "splats",
