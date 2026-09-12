@@ -8,8 +8,8 @@ import { EquirectRenderer } from './equirect-renderer';
 import { Events } from './events';
 import { encodePng } from './png-writer';
 import { Scene } from './scene';
-import { injectSphericalMetadata } from './spherical-metadata';
-import { Splat } from './splat';
+import { injectSphericalMetadata } from './splat/spherical-metadata';
+import { Splat } from './splat/splat';
 import { i18n } from './ui/localization';
 
 const nullClr = new Color(0, 0, 0, 0);

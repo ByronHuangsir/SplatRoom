@@ -32,9 +32,9 @@ import { PointerController } from './controllers';
 import { Element, ElementType } from '../element';
 import { Picker } from '../picker';
 import { Serializer } from '../serializer';
-import { vertexShader, fragmentShader } from '../shaders/blit-shader';
-import { Splat } from '../splat';
 import { TweenValue } from './tween-value';
+import { vertexShader, fragmentShader } from '../shaders/blit-shader';
+import { Splat } from '../splat/splat';
 import { ShaderQuad, SimpleRenderPass } from '../utils/simple-render-pass';
 
 // work globals

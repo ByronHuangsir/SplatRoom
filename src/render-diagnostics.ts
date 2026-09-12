@@ -1,4 +1,4 @@
-import type { Splat } from './splat';
+import type { Splat } from './splat/splat';
 
 // Facts that decide whether a loaded splat can actually be drawn.
 //

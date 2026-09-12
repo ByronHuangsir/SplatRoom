@@ -3,10 +3,10 @@ import { Mat4 } from 'playcanvas';
 
 import { Element } from '../element';
 import { Events } from '../events';
-import { Splat } from '../splat';
 import { Histogram } from './histogram';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { Splat } from '../splat/splat';
 
 // gpu propMode constants. these must match the propMode dispatch in
 // src/shaders/splat-value-shader.ts.

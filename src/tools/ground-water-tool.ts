@@ -2,7 +2,7 @@ import { SelectOp } from '../edit-ops';
 import { Events } from '../events';
 import { semanticSelect } from '../geometry/semantic-select';
 import { Scene } from '../scene';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 
 /**
  * 地面/水域平整逻辑（由左侧面板驱动）。

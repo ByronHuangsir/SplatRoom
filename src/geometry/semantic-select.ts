@@ -1,7 +1,7 @@
-import { Splat } from '../splat';
 import { applyFix, PlanarFixParams } from './planar-fix';
 import { detectDominantPlane, RegionDetectionResult } from './region-detect';
 import { detectWater, WaterDetectionResult } from './water-detect';
+import { Splat } from '../splat/splat';
 
 /**
  * L2 — 语义区域选择与处理（地面 / 水域）

@@ -32,10 +32,10 @@ import {
     WebgpuGraphicsDevice
 } from 'playcanvas';
 
-import { version } from '../package.json';
-import { ColorGrade, dcDecode, dcEncode, sigmoid } from './color-grade';
-import { Events } from './events';
-import { SHRotation } from './sh-utils';
+import { version } from '../../package.json';
+import { ColorGrade, dcDecode, dcEncode, sigmoid } from '../color-grade';
+import { Events } from '../events';
+import { SHRotation } from '../sh-utils';
 import { Splat } from './splat';
 import { State } from './splat-state';
 

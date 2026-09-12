@@ -14,11 +14,11 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from './shaders/splat-shader';
 import { Splat } from './splat';
 import { SplatGroup } from './splat-group';
 import { State } from './splat-state';
 import { TransformPalette } from './transform-palette';
+import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
 
 // Column types that carry per-gaussian position data in local space.
 const POS_COLS = ['x', 'y', 'z'];

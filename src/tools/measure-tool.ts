@@ -3,7 +3,7 @@ import { Entity, Mat4, Quat, TranslateGizmo, Vec3 } from 'playcanvas';
 
 import { Events } from '../events';
 import { Scene } from '../scene';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 import { ToolOverlay, OverlayWriter } from '../tool-overlay';
 import { Transform } from '../transform';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';

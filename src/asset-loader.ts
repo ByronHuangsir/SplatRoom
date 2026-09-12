@@ -3,8 +3,8 @@ import { AppBase, Asset, GSplatData, GSplatResource } from 'playcanvas';
 
 import { Events } from './events';
 import { defaultLodIndex, loadGSplatDataAsync, validateGSplatData } from './io';
-import { Splat } from './splat';
-import { detectGiantGreySplats, removeGiantGreySplats, shrinkGiantGreySplats } from './splat-sanitize';
+import { Splat } from './splat/splat';
+import { detectGiantGreySplats, removeGiantGreySplats, shrinkGiantGreySplats } from './splat/splat-sanitize';
 import { i18n } from './ui/localization';
 
 // handles loading gsplat assets using splat-transform

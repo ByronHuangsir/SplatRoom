@@ -1,7 +1,7 @@
 import { Element, ElementType } from './element';
 import { Events } from './events';
 import { Scene } from './scene';
-import { Splat } from './splat';
+import { Splat } from './splat/splat';
 
 const registerSelectionEvents = (events: Events, scene: Scene) => {
     let selections = new Set<Splat>();

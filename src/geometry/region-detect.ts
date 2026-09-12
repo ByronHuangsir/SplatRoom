@@ -1,8 +1,8 @@
 import { Vec3 } from 'playcanvas';
 
 import { fitPlane, Plane } from './plane-fit';
-import { Splat } from '../splat';
-import { State } from '../splat-state';
+import { Splat } from '../splat/splat';
+import { State } from '../splat/splat-state';
 
 /**
  * L1 — 自动区域识别（地面/水域/大平面）

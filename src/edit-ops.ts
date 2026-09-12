@@ -6,8 +6,8 @@ import { IndexRanges, sortedPredicate } from './index-ranges';
 import { Pivot } from './pivot';
 import { Scene } from './scene';
 import { SphereShape } from './sphere-shape';
-import { Splat } from './splat';
-import { State } from './splat-state';
+import { Splat } from './splat/splat';
+import { State } from './splat/splat-state';
 import { Transform } from './transform';
 
 interface EditOp {

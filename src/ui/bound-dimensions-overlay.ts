@@ -3,7 +3,7 @@ import { Vec3 } from 'playcanvas';
 
 import { Events } from '../events';
 import { Scene } from '../scene';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 
 const corners = Array.from({ length: 8 }, () => new Vec3());
 const screenCorners = Array.from({ length: 8 }, () => new Vec3());

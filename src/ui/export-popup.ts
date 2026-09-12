@@ -4,7 +4,7 @@ import { i18n } from './localization';
 import { Pose } from '../camera/camera-poses';
 import { Events } from '../events';
 import { ExportType, SceneExportOptions } from '../file-handler';
-import { AnimTrack, ExperienceSettings, defaultPostEffectSettings } from '../splat-serialize';
+import { AnimTrack, ExperienceSettings, defaultPostEffectSettings } from '../splat/splat-serialize';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {

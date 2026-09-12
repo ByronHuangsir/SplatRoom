@@ -1,8 +1,8 @@
 import { Vec3 } from 'playcanvas';
 
-import { Splat } from '../splat';
-import { State } from '../splat-state';
 import { RegionDetectionResult } from './region-detect';
+import { Splat } from '../splat/splat';
+import { State } from '../splat/splat-state';
 
 /**
  * L1 — 水域识别

@@ -19,7 +19,7 @@ import {
 import { AnimationController } from '../animation/animation-controller';
 import { TrackId } from '../animation/animation-data';
 import { Element, ElementType } from '../element';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 
 /**
  * CameraPreview renders a picture-in-picture view showing what the

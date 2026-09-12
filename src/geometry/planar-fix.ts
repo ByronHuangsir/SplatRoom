@@ -1,12 +1,12 @@
 import { GSplatData, Mat4, Quat, Vec3 } from 'playcanvas';
 
-import { Splat } from '../splat';
-import { State } from '../splat-state';
 import {
     Plane, pointToPlaneDistance, projectToBasis, basisToLocal,
     polygonBounds
 } from './plane-fit';
 import { quatToRotationMatrix, computeCovariance, eigenDecompSym3x3 } from './surface-analyzer';
+import { Splat } from '../splat/splat';
+import { State } from '../splat/splat-state';
 
 export interface PlanarFixParams {
     /** 0..1 — how strongly uneven splats are pressed onto the plane. */

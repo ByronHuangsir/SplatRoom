@@ -5,8 +5,8 @@ import { Events } from './events';
 import { BrowserFileSystem, BlobReadSource } from './io';
 import { recentFiles } from './recent-files';
 import { Scene } from './scene';
-import { Splat } from './splat';
-import { writeSplatFile } from './splat-serialize';
+import { Splat } from './splat/splat';
+import { writeSplatFile } from './splat/splat-serialize';
 import { Transform } from './transform';
 import { i18n } from './ui/localization';
 

@@ -12,9 +12,9 @@ import {
     BlendState
 } from 'playcanvas';
 
-import { vertexShader, fragmentShader } from '../shaders/position-shader';
-import { Splat } from '../splat';
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
+import { vertexShader, fragmentShader } from '../shaders/position-shader';
+import { Splat } from '../splat/splat';
 
 const resolve = (scope: ScopeSpace, values: any) => {
     for (const key in values) {

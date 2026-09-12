@@ -7,7 +7,7 @@ import { Events } from '../events';
 import { Scene } from '../scene';
 import { ShortcutManager } from '../shortcut-manager';
 import { SphereShape } from '../sphere-shape';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from '../ui/input-drag';
 import { i18n } from '../ui/localization';
 import addSvg from '../ui/svg/select-add.svg';

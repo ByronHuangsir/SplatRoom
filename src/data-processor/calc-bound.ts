@@ -14,9 +14,9 @@ import {
     BlendState
 } from 'playcanvas';
 
-import { vertexShader, fragmentShader } from '../shaders/bound-shader';
-import { Splat } from '../splat';
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
+import { vertexShader, fragmentShader } from '../shaders/bound-shader';
+import { Splat } from '../splat/splat';
 
 const v1 = new Vec3();
 const v2 = new Vec3();

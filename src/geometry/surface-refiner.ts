@@ -23,7 +23,6 @@
 
 import { Asset, GSplatData, GSplatResource } from 'playcanvas';
 
-import type { Splat } from '../splat';
 import {
     analyzeAll,
     detectOutliers,
@@ -31,6 +30,7 @@ import {
     type GaussAnalysisColumns,
     type OutlierStats
 } from './surface-analyzer';
+import type { Splat } from '../splat/splat';
 
 // ---- shared constants ------------------------------------------------------
 

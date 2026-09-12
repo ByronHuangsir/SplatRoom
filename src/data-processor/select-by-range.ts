@@ -15,10 +15,10 @@ import {
 } from 'playcanvas';
 
 import { BufferPool } from './buffer-pool';
+import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { packedMaskHeight, packedMaskWidth } from './histogram-config';
 import { vertexShader, fragmentShader } from '../shaders/select-by-range-shader';
-import { Splat } from '../splat';
-import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
+import { Splat } from '../splat/splat';
 
 const identity = new Mat4();
 const zeroVec3 = new Vec3();

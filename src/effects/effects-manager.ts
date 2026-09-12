@@ -1,7 +1,7 @@
 import { ElementType } from '../element';
 import { Events } from '../events';
 import { Scene } from '../scene';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 
 /**
  * 特效轨道管理器（SplatRoom 特效模块 v4）

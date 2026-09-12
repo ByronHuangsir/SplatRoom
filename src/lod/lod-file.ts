@@ -13,7 +13,7 @@
 import { readFile, selectLod, materializeToDataTable, createChunkDataPool, getInputFormat, type ReadFileSystem } from '@playcanvas/splat-transform';
 
 import { columnsToGsplatData, createLodAsset } from './lod';
-import type { Splat } from '../splat';
+import type { Splat } from '../splat/splat';
 
 /**
  * Materialise the coarse levels (LOD 1..n-1) of a structural multi-LOD file

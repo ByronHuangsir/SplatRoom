@@ -15,12 +15,12 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { Element, ElementType } from './element';
-import { suggestLodLevel } from './lod/lod';
-import { Serializer } from './serializer';
-import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from './shaders/splat-shader';
+import { Element, ElementType } from '../element';
+import { suggestLodLevel } from '../lod/lod';
+import { Serializer } from '../serializer';
 import { State, SplatState } from './splat-state';
-import { Transform } from './transform';
+import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
+import { Transform } from '../transform';
 import { TransformPalette } from './transform-palette';
 
 const vec = new Vec3();

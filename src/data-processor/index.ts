@@ -16,7 +16,7 @@ import { CalcHistogram, CalcHistogramOptions } from './calc-histogram';
 import { CalcPositions } from './calc-positions';
 import { Intersect, IntersectOptions } from './intersect';
 import { SelectByRange, SelectByRangeOptions } from './select-by-range';
-import { Splat } from '../splat';
+import { Splat } from '../splat/splat';
 
 const resolve = (scope: ScopeSpace, values: any) => {
     for (const key in values) {

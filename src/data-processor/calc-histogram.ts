@@ -17,6 +17,7 @@ import {
 } from 'playcanvas';
 
 import { drawPointsWithShader } from './draw-points';
+import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { GRID_DIM, NUM_BINS } from './histogram-config';
 import {
     fullscreenVS,
@@ -25,8 +26,7 @@ import {
     binVS,
     binFS
 } from '../shaders/histogram-shaders';
-import { Splat } from '../splat';
-import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
+import { Splat } from '../splat/splat';
 
 const identity = new Mat4();
 const zeroVec3 = new Vec3();

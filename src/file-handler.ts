@@ -9,9 +9,9 @@ import { BrowserFileSystem, MappedReadFileSystem } from './io';
 import { attachLodFromFile } from './lod/lod-file';
 import { renderDiagnostics } from './render-diagnostics';
 import { Scene } from './scene';
-import { Splat } from './splat';
-import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat-serialize';
-import { State } from './splat-state';
+import { Splat } from './splat/splat';
+import { SerializeSettings, serializeSog, serializeSpz, serializeViewer, SogSettings, SpzSettings, ViewerExportSettings, WebGPUUnavailableError, writeSplatFile } from './splat/splat-serialize';
+import { State } from './splat/splat-state';
 import { i18n } from './ui/localization';
 
 // ts compiler and vscode find this type, but eslint does not

@@ -15,11 +15,11 @@
  * blocked during the initial focus/import.
  */
 import { Element, ElementType } from '../element';
-import { Splat } from '../splat';
 import { buildLodAssets, planLodFractions, setLodDistances, getLodDistances } from './lod';
 import { EditHistory } from '../edit-history';
 import { Events } from '../events';
 import type { Scene } from '../scene';
+import { Splat } from '../splat/splat';
 
 const LOD_GENERATE_MIN = 900_000; // splats
 

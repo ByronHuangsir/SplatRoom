@@ -16,10 +16,10 @@ import {
 } from 'playcanvas';
 
 import { BufferPool } from './buffer-pool';
+import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { packedMaskHeight, packedMaskWidth } from './histogram-config';
 import { vertexShader, fragmentShader } from '../shaders/intersection-shader';
-import { Splat } from '../splat';
-import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
+import { Splat } from '../splat/splat';
 
 // every mode accepts `footprint`: 0 (default) tests the splat's center point,
 // >0 widens the test by the splat's rendered extent (the 2*sqrt(2)-sigma

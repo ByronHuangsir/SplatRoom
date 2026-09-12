@@ -15,9 +15,9 @@ import type { GridPlane } from './infinite-grid';
 import { MappedReadFileSystem } from './io';
 import { Scene } from './scene';
 import { getFootprint, getUseDepth } from './selection-flags';
-import { Splat } from './splat';
-import { writeSplatFile } from './splat-serialize';
-import { State } from './splat-state';
+import { Splat } from './splat/splat';
+import { writeSplatFile } from './splat/splat-serialize';
+import { State } from './splat/splat-state';
 import { i18n } from './ui/localization';
 
 const removeExtension = (filename: string) => {

@@ -2,7 +2,7 @@ import { BooleanInput, Button, Container, ContainerArgs, Label, SliderInput } fr
 
 import { Events } from '../events';
 import { i18n } from './localization';
-import { detectFloaters } from '../floater-removal';
+import { detectFloaters } from '../splat/floater-removal';
 
 /**
  * Floater Removal Panel — 去浮云（简化版）。
