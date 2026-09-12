@@ -358,3 +358,24 @@ warn: [Invalid CommandBuffer] ... Queue.Submit
 （PlayCanvas 对 GLSL 材质在 WebGPU 上走 glslang/twgsl 转译，入口点应为 `main`；报错里带引号的 `"main"` 说明
 入口点字符串被错误地当作名字传入，或模块其实来自另一条编译路径）。修好入口点之后再恢复"自建顺序纹理"的方案，
 并用同一脚本断言覆盖层真的画出来了（还需找到脚本里正确的 overlay 句柄属性）。
+### 6.14 第十一轮：覆盖层管线失败的**确切原因**已查明（顶点模块里没有入口点）
+
+用 `_tmp/overlay-shader-probe.cjs`（hook `createShaderModule`/`createRenderPipeline`，dump 模块内容、
+入口点与管线绑定）在开启 centers 模式时抓到：
+
+```
+mods[12]  vertex  : isWgsl=false, entries=["calcSplatUV_u1_u1_"], len=2688     <-- 没有 @vertex 入口
+mods[13]  fragment: isWgsl=true,  entries=["main_1","main"],  len=3374        <-- 入口正常
+pipes[0]  { vs:"main" -> module 12, fs:"main" -> module 13, targets:1 }
+warn: Entry point ""main"" doesn't exist in the shader module (vertex stage)
+```
+
+**结论**：覆盖层的**顶点**着色器经 glslang/twgsl 转译后，产出的 WGSL 模块**只有辅助函数** `calcSplatUV_u1_u1_`，
+**没有入口点**（片段侧正常）；管线仍按 `main` 去取入口点 → 管线非法 → 整帧黑。
+即"GLSL→WGSL 转译对**这个**顶点着色器不成立"，不是我们的顺序纹理方案有问题。
+
+**下一轮的正解**：像 splat 材质那样，给覆盖层材质也提供 **WGSL 版本**（`ShaderMaterial` 的 ShaderDesc 支持
+`vertexWGSL`/`fragmentWGSL`；引擎在 WebGPU 上会直接用它、跳过转译）。覆盖层 WGSL 需要在 PlayCanvas 的
+WGSL 方言下写（`varying` / 松散 `uniform name: type` / `var tex: texture_2d<f32>`，入口点 `vertexMain`
+/`fragmentMain`；顶点着色器还要用引擎的 `gsplatEvalSHVS`（WGSL 版已存在）以及 `vertex_index` 代替 `gl_VertexID`）。
+完成后与"自建 R32U 顺序纹理"一起恢复，并用 `verify-centers-overlay.cjs` 断言覆盖层真的画出来。
