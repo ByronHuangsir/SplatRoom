@@ -118,7 +118,14 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             events.fire('selection.setFootprint', 1);
             await selectNone();
             await events.invoke('select.rect', 'add', rect);
-            await record('rect / footprint');
+            await record('rect / footprint 1.00');
+
+            // 2b. the footprint value is continuous: partial coverage has to land
+            // between the center test and the full footprint
+            events.fire('selection.setFootprint', 0.35);
+            await selectNone();
+            await events.invoke('select.rect', 'add', rect);
+            await record('rect / footprint 0.35');
 
             // 3. depth without footprint: visible picks narrowed to centers
             events.fire('selection.setFootprint', 0);
@@ -211,12 +218,34 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             await sleep(120);
             out.toggles.depthAfterSet = events.invoke('selection.useDepth');
             events.fire('selection.setUseDepth', false);
+            // toggle returns to the last non-zero value, not always 1
+            events.fire('selection.setFootprint', 0.35);
+            await sleep(120);
+            events.fire('selection.toggleFootprint');
+            await sleep(120);
+            out.toggles.footprintAfterToggleOff = events.invoke('selection.footprint');
+            events.fire('selection.toggleFootprint');
+            await sleep(120);
+            out.toggles.footprintAfterToggleOn = events.invoke('selection.footprint');
             events.fire('selection.setFootprint', 0);
 
             return out;
         });
 
-        console.log(JSON.stringify({ importedBytes: imported, ...result, errors, warnings: warnings.slice(0, 20) }, null, 2));
+        // ordering checks: the footprint value must be continuous, i.e. partial
+        // coverage sits between the center test and the full footprint
+        const byName = Object.fromEntries(result.steps.map(s => [s.name, s.selected]));
+        const centers = byName['rect / centers'];
+        const half = byName['rect / footprint 0.35'];
+        const full = byName['rect / footprint 1.00'];
+        const checks = [
+            { name: 'footprint 1.00 covers at least the centers', pass: full >= centers, detail: `${full} vs ${centers}` },
+            { name: 'footprint 0.35 sits between centers and full', pass: half >= centers && half <= full, detail: `${centers} <= ${half} <= ${full}` },
+            { name: 'toggle restores the last footprint value', pass: Math.abs(result.toggles.footprintAfterToggleOn - 0.35) < 1e-6, detail: String(result.toggles.footprintAfterToggleOn) }
+        ];
+
+        console.log(JSON.stringify({ importedBytes: imported, ...result, checks, failed: checks.filter(c => !c.pass).length, errors, warnings: warnings.slice(0, 20) }, null, 2));
+        if (checks.some(c => !c.pass) || errors.length) process.exitCode = 1;
     } catch (err) {
         console.log(JSON.stringify({ fatal: String(err).slice(0, 800), errors, warnings: warnings.slice(0, 20) }, null, 2));
         process.exitCode = 1;

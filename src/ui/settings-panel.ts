@@ -506,9 +506,10 @@ class SettingsPanel extends Container {
 
         // selection depth / footprint (V3, SuperSplat 3 semantics):
         // "depth" = only splats visible on the surface can be selected,
-        // "footprint" = the hit test uses the splat's rendered gaussian extent
-        // instead of its center point. Labels inline until localised; both
-        // apply to the very next selection.
+        // "footprint" = the hit test uses a fraction of the splat's rendered
+        // gaussian extent instead of its center point (0 = centers, 1 = the full
+        // footprint, in between = partial coverage, like upstream's slider).
+        // Labels inline until localised; both apply to the very next selection.
         const selSurfaceRow = new Container({
             class: 'settings-panel-row'
         });
@@ -537,18 +538,21 @@ class SettingsPanel extends Container {
             class: 'settings-panel-row-label',
             text: 'Selection: footprint (coverage)'
         });
-        const selFootprintToggle = new BooleanInput({
-            type: 'toggle',
-            class: 'settings-panel-row-toggle',
-            value: (events.invoke('selection.footprint') as number) > 0
+        const selFootprintSlider = new SliderInput({
+            class: 'settings-panel-row-slider',
+            min: 0,
+            max: 1,
+            step: 0.05,
+            precision: 2,
+            value: events.invoke('selection.footprint') as number
         });
         selFootprintRow.append(selFootprintLabel);
-        selFootprintRow.append(selFootprintToggle);
-        selFootprintToggle.on('change', (value: boolean) => {
-            events.fire('selection.setFootprint', value ? 1 : 0);
+        selFootprintRow.append(selFootprintSlider);
+        selFootprintSlider.on('change', (value: number) => {
+            events.fire('selection.setFootprint', value);
         });
         events.on('selection.footprint', (value: number) => {
-            selFootprintToggle.value = value > 0;
+            selFootprintSlider.value = value;
         });
 
         // reset preferences to defaults

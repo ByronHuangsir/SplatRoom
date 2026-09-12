@@ -415,7 +415,9 @@ class BottomToolbar extends Container {
             footprintRingsIcon.style.display = rings ? '' : 'none';
             footprintCentersIcon.style.display = rings ? 'none' : '';
             footprintMode.dom.setAttribute('aria-pressed', String(rings));
-            footprintMode.dom.setAttribute('aria-label', i18n.t('tooltip.bottom-toolbar.footprint'));
+            // the value is continuous (0 = centers, 1 = the full footprint), so
+            // the accessible name and tooltip carry it
+            footprintMode.dom.setAttribute('aria-label', `${i18n.t('tooltip.bottom-toolbar.footprint')} (${value.toFixed(2)})`);
         };
 
         events.on('selection.footprint', updateFootprint);
@@ -456,7 +458,11 @@ class BottomToolbar extends Container {
         tooltips.register(undo, tooltip('tooltip.bottom-toolbar.undo', 'edit.undo'));
         tooltips.register(redo, tooltip('tooltip.bottom-toolbar.redo', 'edit.redo'));
         tooltips.register(selectionMode, tooltip('tooltip.bottom-toolbar.use-depth', 'selection.toggleUseDepth'));
-        tooltips.register(footprintMode, tooltip('tooltip.bottom-toolbar.footprint', 'selection.toggleFootprint'));
+        tooltips.register(footprintMode, () => {
+            const shortcut = shortcutManager.formatShortcut('selection.toggleFootprint');
+            const text = `${i18n.t('tooltip.bottom-toolbar.footprint')} (${footprint.toFixed(2)})`;
+            return shortcut ? i18n.formatTooltipWithShortcut(text, shortcut) : text;
+        });
         tooltips.register(picker, tooltip('tooltip.bottom-toolbar.rectangle-selection', 'tool.rectSelection'));
         tooltips.register(brush, tooltip('tooltip.bottom-toolbar.brush-selection', 'tool.brushSelection'));
         tooltips.register(sphereBrush, tooltip('tooltip.bottom-toolbar.sphere-brush-selection', 'tool.sphereBrushSelection'));
