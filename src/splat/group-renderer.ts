@@ -19,6 +19,7 @@ import { SplatGroup } from './splat-group';
 import { State } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
+import { vertexShaderWGSL, fragmentShaderWGSL, gsplatCenterWGSL, gsplatModifyWGSL } from '../shaders/splat-shader-wgsl';
 
 // Column types that carry per-gaussian position data in local space.
 const POS_COLS = ['x', 'y', 'z'];
@@ -554,11 +555,19 @@ class GroupRenderer {
         {
             const instance = this.mergedEntity.gsplat.instance;
             const { material } = instance;
-            const { glsl } = material.shaderChunks;
+            const { glsl, wgsl } = material.shaderChunks;
             glsl.set('gsplatVS', vertexShader);
             glsl.set('gsplatPS', fragmentShader);
             glsl.set('gsplatCenterVS', gsplatCenter);
             glsl.set('gsplatModifyVS', gsplatModifyVS);
+
+            // see splat.ts: the WebGPU backend compiles the splat material from WGSL
+            if (this.scene.app.graphicsDevice.isWebGPU) {
+                wgsl.set('gsplatVS', vertexShaderWGSL);
+                wgsl.set('gsplatPS', fragmentShaderWGSL);
+                wgsl.set('gsplatCenterVS', gsplatCenterWGSL);
+                wgsl.set('gsplatModifyVS', gsplatModifyWGSL);
+            }
 
             const bands = (instance.resource as GSplatResource).shBands ?? 0;
             material.setDefine('SH_BANDS', `${Math.min(bands, 3)}`);

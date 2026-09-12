@@ -3,11 +3,13 @@ import {
     FILTER_NEAREST,
     PIXELFORMAT_R8,
     PIXELFORMAT_R16U,
+    PROJECTION_ORTHOGRAPHIC,
     Asset,
     BoundingBox,
     Color,
     Entity,
     GSplatData,
+    GSplatInstance,
     GSplatResource,
     Mat4,
     Quat,
@@ -21,6 +23,7 @@ import { Serializer } from '../core/serializer';
 import { suggestLodLevel } from '../lod/lod';
 import { Element, ElementType } from '../scene/element';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
+import { vertexShaderWGSL, fragmentShaderWGSL, gsplatCenterWGSL, gsplatModifyWGSL, gsplatCornerWGSL } from '../shaders/splat-shader-wgsl';
 import { Transform } from '../transform/transform';
 
 const vec = new Vec3();
@@ -72,8 +75,8 @@ class Splat extends Element {
     lodLevel = -1;
     _lodBaseAsset: Asset | null = null;
     _lodLastSwitchAt = 0;
-    // 一次性告警标记：主相机引用缺失（排序兜底无法取相机姿态）只提示一次，
-    // 避免每帧刷屏。见 onPreRender。
+    // 娑撯偓濞嗏剝鈧冩啞鐠€锔界垼鐠佸府绱版稉鑽ゆ祲閺堝搫绱╅悽銊у繁婢舵唻绱欓幒鎺戠碍閸忔粌绨抽弮鐘崇《閸欐牜娴夐張鍝勑幀渚婄礆閸欘亝褰佺粈杞扮濞嗏槄绱?
+    // 闁灝鍘ゅВ蹇撴姎閸掑嘲鐫嗛妴鍌濐潌 onPreRender閵?
     _warnedNoMainCam = false;
     stateTexture: Texture;
     // encapsulates per-splat state mirror (cpu Uint8Array + gpu Texture).
@@ -109,13 +112,13 @@ class Splat extends Element {
     _colorGradeEnabled = true;
     _showDeleted = false;
 
-    // 粒子化散射进度：0 = 完整模型，1 = 完全散开成粒子（顶点着色器插值）
+    // 缁帒鐡欓崠鏍ㄦ殠鐏忓嫯绻樻惔锔肩窗0 = 鐎瑰本鏆ｅΟ鈥崇€烽敍? = 鐎瑰苯鍙忛弫锝呯磻閹存劗鐭戠€涙劧绱欐い鍓佸仯閻偓閼规彃娅掗幓鎺戔偓纭风礆
     _scatterProgress = 0;
-    // 散射参数缓存（模型空间包围盒中心与半径），在 bindAsset 后由
-    // ensureScatterParams 计算一次
+    // 閺侊絽鐨犻崣鍌涙殶缂傛挸鐡ㄩ敍鍫熌侀崹瀣敄闂傛潙瀵橀崶瀵告磪娑擃厼绺炬稉搴″磹瀵板嫸绱氶敍灞芥躬 bindAsset 閸氬海鏁?
+    // ensureScatterParams 鐠侊紕鐣绘稉鈧▎?
     _scatterCenter = new Vec3();
     _scatterRadius = 1;
-    // 特效模式与参数（波纹开场/飘散散场等）
+    // 閻楄鏅ュΟ鈥崇础娑撳骸寮弫甯礄濞夈垻姹楀鈧崷?妞嬫ɑ鏆庨弫锝呮簚缁涘绱?
     _effectMode = 0;
     _effectTime = 0;
     _effectColor = new Vec3(1, 1, 1);
@@ -127,7 +130,7 @@ class Splat extends Element {
 
     measurePoints: Vec3[] = [];
     measureSelection = -1;
-    // 测量比例尺：1 个模型单位 = measureScale 个实际单位；null = 未设置（按模型单位显示）
+    // 濞村鍣哄В鏂剧伐鐏忕尨绱? 娑擃亝膩閸ㄥ宕熸担?= measureScale 娑擃亜鐤勯梽鍛礋娴ｅ稄绱眓ull = 閺堫亣顔曠純顕嗙礄閹稿膩閸ㄥ宕熸担宥嗘▔缁€鐚寸礆
     measureScale: number | null = null;
     measureScaleUnit = 'm';
 
@@ -157,11 +160,22 @@ class Splat extends Element {
         this.rebuildMaterial = (bands: number) => {
             const instance = this.entity.gsplat.instance;
             const { material } = instance;
-            const { glsl } = material.shaderChunks;
+            const { glsl, wgsl } = material.shaderChunks;
             glsl.set('gsplatVS', vertexShader);
             glsl.set('gsplatPS', fragmentShader);
             glsl.set('gsplatCenterVS', gsplatCenter);
             glsl.set('gsplatModifyVS', gsplatModifyVS);
+
+            // the WebGPU backend compiles the splat material from WGSL sources, so
+            // the GLSL chunks above would be ignored there (the engine's stock WGSL
+            // shader would run and our two-attachment splat pass would be invalid)
+            if (device.isWebGPU) {
+                wgsl.set('gsplatVS', vertexShaderWGSL);
+                wgsl.set('gsplatPS', fragmentShaderWGSL);
+                wgsl.set('gsplatCenterVS', gsplatCenterWGSL);
+                wgsl.set('gsplatModifyVS', gsplatModifyWGSL);
+                wgsl.set('gsplatCornerVS', gsplatCornerWGSL);
+            }
 
             material.setDefine('SH_BANDS', `${Math.min(bands, (instance.resource as GSplatResource).shBands)}`);
             material.setParameter('splatState', this.stateTexture);
@@ -180,7 +194,7 @@ class Splat extends Element {
             material.setParameter('hslLumA', [this._hslLum[0], this._hslLum[1], this._hslLum[2], this._hslLum[3]]);
             material.setParameter('hslLumB', [this._hslLum[4], this._hslLum[5], this._hslLum[6], this._hslLum[7]]);
 
-            // 粒子化散射 uniform（默认 0 = 完整模型）
+            // 缁帒鐡欓崠鏍ㄦ殠鐏?uniform閿涘牓绮拋?0 = 鐎瑰本鏆ｅΟ鈥崇€烽敍?
             this.ensureScatterParams();
             material.setParameter('uScatterProgress', this._scatterProgress);
             material.setParameter('uScatterRadius', this._scatterRadius);
@@ -195,7 +209,7 @@ class Splat extends Element {
         this.bindAsset(asset, rotation);
     }
 
-    /** 计算粒子化散射参数：模型空间包围盒中心 + 半径（对角线一半 * 1.2） */
+    /** 鐠侊紕鐣荤划鎺戠摍閸栨牗鏆庣亸鍕棘閺佸府绱板Ο鈥崇€风粚娲？閸栧懎娲块惄鎺嶈厬韫?+ 閸楀﹤绶為敍鍫濐嚠鐟欐帞鍤庢稉鈧崡?* 1.2閿?*/
     private ensureScatterParams() {
         const bound = this.localBound;
         if (!bound || !bound.center) return;
@@ -204,13 +218,13 @@ class Splat extends Element {
     }
 
     /**
-     * 设置粒子化散射进度（0=模型，1=粒子），并同步到 GPU material。
-     * @param progress - 散射进度 0..1
-     * @param radiusScale - 散射半径相对包围盒的倍数（预设控制）
-     * @param effectMode - 特效模式：0=默认散射，1=波纹开场，2=飘散散场
-     * @param effectTime - 效果进度 0..1（波纹半径 / 飘散进度）
-     * @param effectColor - 效果高亮色（波纹/火花色，可选）
-     * @param fade - 整体透明度 0..1（开场淡入 0→1，散场淡出 1→0）
+     * 鐠佸墽鐤嗙划鎺戠摍閸栨牗鏆庣亸鍕箻鎼达讣绱?=濡€崇€烽敍?=缁帒鐡欓敍澶涚礉楠炶泛鎮撳銉ュ煂 GPU material閵?
+     * @param progress - 閺侊絽鐨犳潻娑樺 0..1
+     * @param radiusScale - 閺侊絽鐨犻崡濠傜窞閻╃顕崠鍛纯閻╂帞娈戦崐宥嗘殶閿涘牓顣╃拋鐐付閸掕绱?
+     * @param effectMode - 閻楄鏅ュΟ鈥崇础閿?=姒涙顓婚弫锝呯殸閿?=濞夈垻姹楀鈧崷鐚寸礉2=妞嬫ɑ鏆庨弫锝呮簚
+     * @param effectTime - 閺佸牊鐏夋潻娑樺 0..1閿涘牊灏濈痪鐟板磹瀵?/ 妞嬫ɑ鏆庢潻娑樺閿?
+     * @param effectColor - 閺佸牊鐏夋妯瑰瘨閼硅绱欏▔銏㈡睏/閻忣偉濮抽懝璇х礉閸欘垶鈧绱?
+     * @param fade - 閺佺繝缍嬮柅蹇旀鎼?0..1閿涘牆绱戦崷鐑樿窗閸?0閳?閿涘本鏆庨崷鐑樿窗閸?1閳?閿?
      */
     setScatterProgress(progress: number, radiusScale = 1, effectMode = 0, effectTime = 0, effectColor?: [number, number, number], fade = 1) {
         this._scatterProgress = progress;
@@ -327,14 +341,14 @@ class Splat extends Element {
 
         // NOTE: do NOT "prime" instancingCount / numSplats here. The engine's
         // update() sets them only when applyPendingSorted() returns a real count
-        // — which requires culler to push cameras into instance.cameras[] first.
+        // 閳?which requires culler to push cameras into instance.cameras[] first.
         // If the cull path ever skips this instance (e.g. individual splats
         // hidden under groupRenderer, or any code path that prevents the
         // gsplat cameras array from being populated), applyPendingSorted()
         // returns -1 forever and our "prime" would lock instancingCount at the
-        // full count with the identity order texture → model renders in raw
-        // storage order with NO depth sort → half-transparent gaussians mix
-        // randomly → visually identical to "near small / far big" (a.k.a. the
+        // full count with the identity order texture 閳?model renders in raw
+        // storage order with NO depth sort 閳?half-transparent gaussians mix
+        // randomly 閳?visually identical to "near small / far big" (a.k.a. the
         // PiP order-pollution symptom of pre-v9.1). Letting the engine default
         // (instancingCount=0, numSplats=0) keeps the model blank for the few
         // frames until the first real sort lands, which is the correct trade.
@@ -377,7 +391,7 @@ class Splat extends Element {
     //
     // By default the previously-bound asset is unloaded (sequence frames are
     // transient). Pass keepPrevious=true when the caller still owns the old
-    // asset — e.g. an undo/redo op swapping between its two snapshots — so the
+    // asset 閳?e.g. an undo/redo op swapping between its two snapshots 閳?so the
     // reverse step can bind it again.
     async replaceData(asset: Asset, keepPrevious = false) {
         console.log('[Splat.replaceData] start', this.name, 'asset=', (asset.file as any)?.filename);
@@ -409,7 +423,7 @@ class Splat extends Element {
         // before removing the old entity, which keeps the previous frame on screen
         // in the meantime. Skip the wait during offline video render
         // (lockedRenderMode): renders are gated on scene.lockedRender there, so
-        // blocking on a render would deadlock — and the render loop sorts+captures
+        // blocking on a render would deadlock 閳?and the render loop sorts+captures
         // each frame deterministically anyway.
         await this.updateState(State.deleted);
         console.log('[Splat.replaceData] updateState done, instance=', !!this.entity.gsplat?.instance);
@@ -420,7 +434,7 @@ class Splat extends Element {
 
         // notify dependents (e.g. the centers overlay, which parents itself under
         // this.entity) to re-bind to the new entity/instance before the old entity
-        // is destroyed — otherwise they're torn down with it and never re-attach
+        // is destroyed 閳?otherwise they're torn down with it and never re-attach
         // (no selection.changed fires on a frame swap).
         this.scene.events.fire('splat.replaced', this);
 
@@ -647,60 +661,79 @@ class Splat extends Element {
         serializer.packa(Array.from(this._hslLum));
     }
 
+    // WebGPU only: upload the camera matrices as material parameters (see the call
+    // site in onPreRender and the notes in src/shaders/splat-shader-wgsl.ts).
+    private updateGpuCameraUniforms(instance: GSplatInstance) {
+        const wrapper = this.scene.camera as any;
+        const cam = wrapper?.camera;
+        if (!cam || !instance?.material) {
+            return;
+        }
+        const { material } = instance;
+        const near = cam.nearClip;
+        const far = cam.farClip;
+        const isOrtho = cam.projection === PROJECTION_ORTHOGRAPHIC;
+        const { width, height } = wrapper.targetSize ?? { width: 1, height: 1 };
+        material.setParameter('uSplatView', cam.viewMatrix.data);
+        material.setParameter('uSplatProj', cam.projectionMatrix.data);
+        material.setParameter('uSplatCameraParams', [1 / far, far, near, isOrtho ? 1 : 0]);
+        material.setParameter('uSplatViewport', [width, height, 1 / width, 1 / height]);
+    }
+
     onPreRender() {
-        // SurfaceRefine / replaceData 的并发场景下，新 entity 的 gsplat instance
-        // 可能还未就绪，跳过本帧并在控制台输出一次性诊断信息。
+        // SurfaceRefine / replaceData 閻ㄥ嫬鑻熼崣鎴濇簚閺咁垯绗呴敍灞炬煀 entity 閻?gsplat instance
+        // 閸欘垵鍏樻潻妯绘弓鐏忚京鍗庨敍宀冪儲鏉╁洦婀扮敮褍鑻熼崷銊﹀付閸掕泛褰存潏鎾冲毉娑撯偓濞嗏剝鈧嗙槚閺傤厺淇婇幁顖樷偓?
         if (!this.entity?.gsplat?.instance) {
             console.warn(`[Splat.onPreRender] skipped: entity=${!!this.entity}, gsplat=${!!this.entity?.gsplat}, instance=${!!this.entity?.gsplat?.instance}, name=${this.name}, changedCounter=${this.changedCounter}`);
             return;
         }
 
-        // ---- 主视图排序兜底（SplatRoom patch）----
-        // 引擎的排序链路依赖 culler 每帧把主相机 push 进 instance.cameras[]，
-        // 然后 GSplatInstance.update() 调 instance.sort(cameras[0]) 触发
-        // worker 深度排序。当该链路失效（culler 不填充 cameras —— 大模型 /
-        // 特定 AABB / group-renderer 合并后个体 splat 被隐藏等），sort() 从不
-        // 执行 → worker 排序冻结在初始相机方向 → 相机移动后深度顺序错误 =
-        // "近小远大"（半透明高斯远盖近）。PiP 用独立 CPU/Worker 排序绕开
-        // cameras 依赖所以正常；主视图在这里补同样的"每帧强制 sort"：
-        //   1. instance.sort() 内部有 equalsApprox 节流（相机位置/方向没变
-        //      就不重新提交），所以每帧调用是廉价的，不会给 worker 刷量。
-        //   2. 引擎 sorter 有 _sortInFlight coalesce 补丁，排序中再触发
-        //      会合并为最新相机姿态，不会堆积队列。
-        //   3. PiP 激活时本实例的 sorter 被 swap 成 pipSorter（独立管线），
-        //      本兜底用 instance.sort() 仍只作用于当前 sorter —— 但 PiP
-        //      swap 只发生在 onPostRender 的短暂窗口内，且 restore 后 sorter
-        //      恢复为主 sorter，所以这里调用始终安全。
-        //   4. 合并渲染（groupRenderer.isActive）时个体 splat 的 meshInstance
-        //      通常被隐藏，本兜底对它们无害（不渲染）；合并实体自身的排序
-        //      由 group-renderer.ts 手动 sort() 保证。
+        // ---- 娑撴槒顫嬮崶鐐笓鎼村繐鍘规惔鏇礄SplatRoom patch閿?---
+        // 瀵洘鎼搁惃鍕笓鎼村繘鎽肩捄顖欑贩鐠?culler 濮ｅ繐鎶氶幎濠佸瘜閻╁憡婧€ push 鏉?instance.cameras[]閿?
+        // 閻掕泛鎮?GSplatInstance.update() 鐠?instance.sort(cameras[0]) 鐟欙箑褰?
+        // worker 濞ｅ崬瀹抽幒鎺戠碍閵嗗倸缍嬬拠銉╂懠鐠侯垰銇戦弫鍫礄culler 娑撳秴锝為崗?cameras 閳ユ柡鈧?婢堆勀侀崹?/
+        // 閻楃懓鐣?AABB / group-renderer 閸氬牆鑻熼崥搴濋嚋娴?splat 鐞氼偊娈ｉ挊蹇曠搼閿涘绱漵ort() 娴犲簼绗?
+        // 閹笛嗩攽 閳?worker 閹烘帒绨崘鑽ょ波閸︺劌鍨垫慨瀣祲閺堢儤鏌熼崥?閳?閻╁憡婧€缁夎濮╅崥搴㈢箒鎼达箓銆庢惔蹇涙晩鐠?=
+        // "鏉╂垵鐨潻婊冦亣"閿涘牆宕愰柅蹇旀妤傛ɑ鏌夋潻婊呮磰鏉╂埊绱氶妴渚緄P 閻劎瀚粩?CPU/Worker 閹烘帒绨紒鏇炵磻
+        // cameras 娓氭繆绂嗛幍鈧禒銉︻劀鐢潻绱辨稉鏄忣潒閸ユ儳婀潻娆撳櫡鐞涖儱鎮撻弽椋庢畱"濮ｅ繐鎶氬鍝勫煑 sort"閿?
+        //   1. instance.sort() 閸愬懘鍎撮張?equalsApprox 閼哄倹绁﹂敍鍫㈡祲閺堣桨缍呯純?閺傜懓鎮滃▽鈥冲綁
+        //      鐏忓彉绗夐柌宥嗘煀閹绘劒姘﹂敍澶涚礉閹碘偓娴犮儲鐦＄敮褑鐨熼悽銊︽Ц瀵ゅ鐜惃鍕剁礉娑撳秳绱扮紒?worker 閸掔兘鍣洪妴?
+        //   2. 瀵洘鎼?sorter 閺?_sortInFlight coalesce 鐞涖儰绔甸敍灞惧笓鎼村繋鑵戦崘宥埿曢崣?
+        //      娴兼艾鎮庨獮鏈佃礋閺堚偓閺傛壆娴夐張鍝勑幀渚婄礉娑撳秳绱伴崼鍡櫺濋梼鐔峰灙閵?
+        //   3. PiP 濠碘偓濞茬粯妞傞張顒€鐤勬笟瀣畱 sorter 鐞?swap 閹?pipSorter閿涘牏瀚粩瀣吀缁惧尅绱氶敍?
+        //      閺堫剙鍘规惔鏇犳暏 instance.sort() 娴犲秴褰ф担婊呮暏娴滃骸缍嬮崜?sorter 閳ユ柡鈧?娴?PiP
+        //      swap 閸欘亜褰傞悽鐔锋躬 onPostRender 閻ㄥ嫮鐓弳鍌滅崶閸欙絽鍞撮敍灞肩瑬 restore 閸?sorter
+        //      閹垹顦叉稉杞板瘜 sorter閿涘本澧嶆禒銉ㄧ箹闁插矁鐨熼悽銊ヮ潗缂佸牆鐣ㄩ崗銊ｂ偓?
+        //   4. 閸氬牆鑻熷〒鍙夌厠閿涘潛roupRenderer.isActive閿涘妞傛稉顏冪秼 splat 閻?meshInstance
+        //      闁艾鐖剁悮顐︽閽樺骏绱濋張顒€鍘规惔鏇烆嚠鐎瑰啩婊戦弮鐘差唺閿涘牅绗夊〒鍙夌厠閿涘绱遍崥鍫濊嫙鐎圭偘缍嬮懛顏囬煩閻ㄥ嫭甯撴惔?
+        //      閻?group-renderer.ts 閹靛濮?sort() 娣囨繆鐦夐妴?
         const inst = this.entity.gsplat.instance;
-        // group-renderer 合并激活时，个体 splat 的 layers 被清空（不参与渲染），
-        // 其排序兜底每帧 postMessage 是纯浪费（合并实体有自己的排序，见
-        // scene.ts onPreRender）。检测到被隐藏直接跳过整个排序兜底。
+        // group-renderer 閸氬牆鑻熷┑鈧ú缁樻閿涘奔閲滄担?splat 閻?layers 鐞氼偅绔荤粚鐚寸礄娑撳秴寮稉搴㈣閺屾搫绱氶敍?
+        // 閸忚埖甯撴惔蹇撳幑鎼存洘鐦＄敮?postMessage 閺勵垳鍑藉ù顏囧瀭閿涘牆鎮庨獮璺虹杽娴ｆ挻婀侀懛顏勭箒閻ㄥ嫭甯撴惔蹇ョ礉鐟?
+        // scene.ts onPreRender閿涘鈧倹顥呭ù瀣煂鐞氼偊娈ｉ挊蹇曟纯閹恒儴鐑︽潻鍥ㄦ殻娑擃亝甯撴惔蹇撳幑鎼存洏鈧?
         const gsplatComp = this.entity.gsplat;
         const hiddenByGroup = !!gsplatComp && gsplatComp.layers.length === 0;
         const mainCamNode = (this.scene.camera as any)?.mainCamera as any;
         if (!mainCamNode) {
-            // 主相机引用缺失：排序兜底无法取相机姿态 → worker 排序会冻结在
-            // 初始相机（表现为"近小远大"）。这是异常状态，一次性告警暴露。
+            // 娑撹崵娴夐張鍝勭穿閻劎宸辨径鎲嬬窗閹烘帒绨崗婊冪俺閺冪姵纭堕崣鏍祲閺堝搫协閹?閳?worker 閹烘帒绨导姘枙缂佹挸婀?
+            // 閸掓繂顫愰惄鍛婃簚閿涘牐銆冮悳棰佽礋"鏉╂垵鐨潻婊冦亣"閿涘鈧倽绻栭弰顖氱磽鐢摜濮搁幀渚婄礉娑撯偓濞嗏剝鈧冩啞鐠€锔芥瘹闂囧眰鈧?
             if (!this._warnedNoMainCam) {
                 this._warnedNoMainCam = true;
-                console.warn('[Splat.onPreRender] mainCamNode 缺失：主视图排序兜底被跳过，相机移动时深度排序可能冻结（近小远大）。scene.camera.mainCamera 未就绪？');
+                console.warn('[Splat.onPreRender] mainCamNode 缂傚搫銇戦敍姘瘜鐟欏棗娴橀幒鎺戠碍閸忔粌绨崇悮顐ョ儲鏉╁浄绱濋惄鍛婃簚缁夎濮╅弮鑸电箒鎼达附甯撴惔蹇撳讲閼宠棄鍠曠紒鎿勭礄鏉╂垵鐨潻婊冦亣閿涘鈧靠cene.camera.mainCamera 閺堫亜姘ㄧ紒顏庣吹');
             }
         }
         if (!hiddenByGroup && mainCamNode && inst.sorter) {
             // ---- Per-frame main-view sort fallback (bypasses engine epsilon gating) ----
             // Engine GSplatInstance.sort() at gsplat-instance.js L123 uses
             // equalsApprox(...,1e-3) on camera direction. Under slow rotation,
-            // each frame's direction change is ~1e-4 per ~16ms — well under
-            // 1e-3 — so the engine drops the request and the worker keeps
+            // each frame's direction change is ~1e-4 per ~16ms 閳?well under
+            // 1e-3 閳?so the engine drops the request and the worker keeps
             // serving stale orders. The user sees a "rotated / flipped /
             // intruded" view because the latest camera pose isn't reflected in
             // the depth-binning worker until the delta accumulates past 1e-3
             // (many frames later).
             //
-            // We mirror the engine's math exactly (world cam pos/dir →
+            // We mirror the engine's math exactly (world cam pos/dir 閳?
             // splat-local via invModelMat) but use a much tighter epsilon so
             // every rotation frame dispatches a fresh sort request. Sorter's
             // _sortInFlight coalesce patch (gsplat-sorter.js L129) absorbs the
@@ -708,7 +741,7 @@ class Splat extends Element {
             //
             // FIX (2026-08-12): removed the 3-frame throttle. The throttle was
             // introduced for performance (order-texture upload cost) but caused
-            // visible "近小远大" when the engine culler skips camera population.
+            // visible "鏉╂垵鐨潻婊冦亣" when the engine culler skips camera population.
             // The sorter's _sortInFlight coalesce already prevents worker queue
             // flooding; the per-frame epsilon (1e-12) keeps the dispatch idle
             // when the camera is truly stationary. Throttle-free ensures every
@@ -733,11 +766,11 @@ class Splat extends Element {
                 // Direct worker dispatch with forceUpdate=true. Engine's
                 // sorter.setCamera() doesn't accept forceUpdate, and the
                 // engine's worker epsilon (1e-3) is LARGER than our 1e-6
-                // detection threshold — so any setCamera call we make
+                // detection threshold 閳?so any setCamera call we make
                 // during slow rotation gets short-circuited by the worker.
                 // Bypass sorter.setCamera and post ourselves with
                 // forceUpdate=true so the worker actually re-sorts.
-                // _sortInFlight coalesce saves ONE pending pose — no queue.
+                // _sortInFlight coalesce saves ONE pending pose 閳?no queue.
                 try {
                     const ws = inst.sorter as any;
                     if (ws._sortInFlight) {
@@ -761,6 +794,15 @@ class Splat extends Element {
         const selected = this.scene.camera.renderOverlays && events.invoke('selection') === this;
         const cameraMode = events.invoke('camera.mode');
         const cameraOverlay = events.invoke('camera.overlay');
+
+        // WebGPU: the splat material reads its camera matrices from material
+        // parameters (see splat-shader-wgsl.ts) because the engine's view uniform
+        // buffer is not bound correctly for this material in our custom render-pass
+        // pipeline 鈥?matrix_view reads as the identity matrix, which collapses every
+        // splat to a degenerate point and leaves the viewport empty.
+        if (this.scene.graphicsDevice.isWebGPU) {
+            this.updateGpuCameraUniforms(this.entity.gsplat.instance);
+        }
 
         // configure rings rendering
         const material = this.entity.gsplat.instance.material;
@@ -808,7 +850,7 @@ class Splat extends Element {
             material.setParameter('hslLumA', [this._hslLum[0], this._hslLum[1], this._hslLum[2], this._hslLum[3]]);
             material.setParameter('hslLumB', [this._hslLum[4], this._hslLum[5], this._hslLum[6], this._hslLum[7]]);
         } else {
-            // bypass all color grading — neutral values
+            // bypass all color grading 閳?neutral values
             material.setParameter('clrOffset', [0, 0, 0]);
             material.setParameter('clrScale', [1, 1, 1, 1]);
             material.setParameter('saturation', 1);
@@ -842,14 +884,14 @@ class Splat extends Element {
             material.setParameter('uCropBoxRadiusY', cropBox.radiusY);
             material.setParameter('uCropBoxRadiusZ', cropBox.radiusZ);
             material.setParameter('uCropBoxHeight', cropBox.height);
-            // 切面（cap plane）：面板宽度（盒 local 单位）决定切面带厚度——
-            // 0.03 ≈ 盒宽 6%（够宽 → 多个被切 splat 截面都进入切面，密度高）；
-            // capAlpha 控制切面片元 alpha —— 0.25 是甜点：过低(0.08)呈半透明
-            // 雾状"纯色块"，过高(0.6)单截面完全覆盖后续 → 每个 splat 截面
-            // 独立实心 = "实心片状椭圆"。0.25 时多个截面半透明叠加，颜色
-            // 混合为区域混合色（合成测试：偏差仅 0.02）。
-            // 颜色不覆盖 → 切面走被切高斯本色 + 后续调色管线（HSL/contrast
-            // 等）。capColor 仍传入但 shader 不再读。
+            // 閸掑洭娼伴敍鍧坅p plane閿涘绱伴棃銏℃緲鐎硅棄瀹抽敍鍫㈡磪 local 閸楁洑缍呴敍澶婂枀鐎规艾鍨忛棃銏犵敨閸樻艾瀹抽垾鏂衡偓?
+            // 0.03 閳?閻╂帒顔?6%閿涘牆顧勭€?閳?婢舵矮閲滅悮顐㈠瀼 splat 閹搭亪娼伴柈鍊熺箻閸忋儱鍨忛棃顫礉鐎靛棗瀹虫姗堢礆閿?
+            // capAlpha 閹貉冨煑閸掑洭娼伴悧鍥у帗 alpha 閳ユ柡鈧?0.25 閺勵垳鏁庨悙鐧哥窗鏉╁洣缍?0.08)閸涘牆宕愰柅蹇旀
+            // 闂嗗墽濮?缁绢垵澹婇崸?閿涘矁绻冩?0.6)閸楁洘鍩呴棃銏犵暚閸忋劏顩惄鏍ф倵缂?閳?濮ｅ繋閲?splat 閹搭亪娼?
+            // 閻欘剛鐝涚€圭偛绺?= "鐎圭偛绺鹃悧鍥╁Ц濡烆厼娓?閵?.25 閺冭泛顦挎稉顏呭焻闂堛垹宕愰柅蹇旀閸欑姴濮為敍宀勵杹閼?
+            // 濞ｅ嘲鎮庢稉鍝勫隘閸╃喐璐╅崥鍫ｅ閿涘牆鎮庨幋鎰ゴ鐠囨洩绱伴崑蹇撴▕娴?0.02閿涘鈧?
+            // 妫版粏澹婃稉宥堫洬閻?閳?閸掑洭娼扮挧鎷岊潶閸掑洭鐝弬顖涙拱閼?+ 閸氬海鐢荤拫鍐缁狅紕鍤庨敍鍦歋L/contrast
+            // 缁涘绱氶妴淇pColor 娴犲秳绱堕崗銉ょ稻 shader 娑撳秴鍟€鐠囨眹鈧?
             material.setParameter('uCropBoxCapWidth', 0.03);
             material.setParameter('uCropBoxCapAlpha', 0.25);
             material.setParameter('uCropBoxCapColor', [1, 1, 1, 1]);
@@ -938,7 +980,7 @@ class Splat extends Element {
     denseRadius() {
         // Compute a density-weighted radius that covers the concentrated region.
         // Uses weighted standard deviation of positions, with the same alpha*scale
-        // weighting as focalPoint(). Returns 3× the max weighted stddev, which
+        // weighting as focalPoint(). Returns 3鑴?the max weighted stddev, which
         // captures ~99% of the concentrated Gaussians.
         const data = this.splatData;
         if (!data) {
@@ -998,7 +1040,7 @@ class Splat extends Element {
         varY /= totalWeight;
         varZ /= totalWeight;
 
-        // 3× sigma covers ~99% of concentrated Gaussians
+        // 3鑴?sigma covers ~99% of concentrated Gaussians
         const sigma = 3;
         const radius = sigma * Math.sqrt(Math.max(varX, varY, varZ));
 

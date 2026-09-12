@@ -1,5 +1,10 @@
 # SplatRoom V3 — WebGPU 后端的现状（2026-09-12）
 
+> **进度更新（同日晚，3.4.1 之后，未发布）**：WGSL 移植已完成并接线，黑屏的**真正原因已定位到相机矩阵**，
+> 详见文末「第 6 节：WGSL 移植进展与剩余阻塞」。结论先行：**渲染管线本身已经通了**（splat 遍的 MRT 管线合法、
+> draw 正常发出、片元能上屏——用"全屏三角形 + 品红片元"实测确认），剩下的问题是我们自研 camera 类的
+> **视图/投影矩阵没有传到 splat 材质**（引擎的 view uniform buffer 在 WebGPU 下对该材质读出的是单位矩阵）。
+
 **结论：WebGPU 后端目前无法渲染高斯点云。已改为"启动时拒绝该设置并回退 WebGL2 + 弹窗说明"，只在开发时用 `?gpu=webgpu` 打开。**
 
 这份文档记录的是**可复现的证据**，不是推测：全部结论都由 `docs/verify/` 下的无头浏览器脚本在本机（NVIDIA Ampere，Edge 真实 WebGPU 适配器，非 SwiftShader）实测得到。
@@ -116,3 +121,51 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
 2. 逐个检查其余自研 GLSL 通道在 WebGPU 下的行为：`intersection-shader`、`splat-value-shader`、`select-by-range-shader`、`histogram-shaders`、`splat-overlay-shader`、`tool-overlay-shader`、`bound-shader` 等（转译器到位后它们能编译，但结果**尚未逐项验证**）。
 3. 回读/回放路径：`copyRt` + `texture.read`、快照、录像、PiP 预览、8K 导出。
 4. 每完成一项，用 `verify-large-model-backend.cjs`（两种后端对照）+ 像素级/数值级断言固化，再更新本文档。
+
+---
+
+## 6. WGSL 移植进展与剩余阻塞（2026-09-12 第二轮）
+
+### 6.1 已完成
+
+| 项 | 位置 | 状态 |
+| --- | --- | --- |
+| WGSL 版 `gsplatVS` / `gsplatPS` / `gsplatCenterVS` / `gsplatModifyVS` | `src/shaders/splat-shader-wgsl.ts`（约 830 行） | ✅ 与 GLSL 侧逐特性对齐：编辑状态剔除、粒子散射/波纹/飘散、SH、色调/高光/阴影/对比/8 区 HSL、隐藏删除着色、裁剪盒三形状 + 切面、rings、选中/锁定着色 |
+| 自研 `gsplatCornerVS`（协方差投影） | 同上 `gsplatCornerWGSL` | ✅ 从引擎 WGSL 块复制，唯一改动是视口尺寸改读材质参数 |
+| 双附件 MRT 合法化 | `gsplatPS` 同时写 `output.color` 与 `output.color1` | ✅ Dawn 校验错误消失（管线实测 `2 targets -> [0:color, 1:color1]`） |
+| 注入方式 | `src/splat/splat.ts`、`src/splat/group-renderer.ts` | ✅ `device.isWebGPU` 时同时写 `shaderChunks.wgsl`（GLSL 侧保持原样，WebGL2 行为不变） |
+
+### 6.2 已证实"能画"的部分（用临时调试 shader 逐步二分）
+
+| 实验 | 结果 |
+| --- | --- |
+| 顶点直接输出全屏三角形 + 品红片元 | ✅ **整屏品红**（75% 画面）→ splat 遍的 draw、实例化、MRT 管线、片元输出全部正常 |
+| 用 `source.cornerUV` 画固定大小方块 | ✅ 屏中央方块 → 顶点缓冲 / `initSource` 正常 |
+| 用 `getCenter()` 画 2% 小方块 | ✅ 模型前墙分布出来 → 流纹理（高斯数据）在 WebGPU 下读取正常 |
+| 读 `getScale()` | ✅ ≈ 0.036，正常 |
+| 读 `viewport_size` / `minPixelSize` / `numSplats` | ✅ 1277 / 2 / 803（与画面一致） |
+
+### 6.3 剩余阻塞：相机矩阵
+
+- 探针读出 `uniform.matrix_view` 在 splat 材质里是**单位矩阵**（旋转列 = (1,-0.004,-0.004)，平移 ≈ 0）→ `centerView = modelCenter`，
+  投影后 w≈0，NDC 落在视口外 → 全部高斯被裁剪（这同时解释了为什么**引擎自带的 WGSL splat 着色器也画不出来**，
+  说明不是我们移植的 bug，而是该材质拿不到正确的 view uniform）。
+- 已尝试：把 `uSplatView` / `uSplatProj` / `uSplatCameraParams` / `uSplatViewport` 作为**材质参数**喂进去
+  （`src/splat/splat.ts` 的 `updateGpuCameraUniforms()`，每帧 `onPreRender` 更新），但读到的
+  `scene.camera.camera.viewMatrix` / `projectionMatrix` 在 `onPreRender` 时机是**零矩阵 / 接近单位矩阵**——
+  本仓库自研 `Camera` 类的相机矩阵由引擎在渲染准备阶段才计算，`onPreRender` 拿不到当帧值。
+- **下一步**：不读组件矩阵，改为在本仓库侧自己算：
+  `viewMatrix = 主相机节点 getWorldTransform() 的逆`，`projectionMatrix` 复用 `mainCamera.camera.calculateProjection(matrix, w, h)`
+  回调（`camera.ts` 已设置该回调），或把上传时机挪到引擎相机同步之后（如 `app.on('prerender')` 之后/渲染前一次 flush）。
+  算好后用 6.2 的读数法先验证数值，再恢复真实着色器看画面。
+
+### 6.4 复现用的调试工具（`_tmp/`，未入库）
+
+- `map.cjs`：截取画布区域 → 解码 PNG → 输出**精确颜色直方图 + 均值 + 粗粒度 ASCII 色块图 + 三条带像素读数**（排除"截图整体比例"这类不敏感指标）。
+- `pass-probe.cjs`：拦截 `beginRenderPass` / `setViewport` / `setScissorRect` / `draw*`，打印每个 pass 的附件纹理 id、loadOp 与实际 draw。
+- `draw-probe.cjs` / `ub-probe.cjs`：统计每个管线的 draw、并检查材质参数与 WGSL 里 `ub_view.*` / `ub_mesh_ub.*` 的落点。
+
+> 教训：`verify-large-model-backend.cjs` 里的 `shot` 指标用的是硬编码 `clip {0,0,800,500}`，会把左侧 UI 面板算进去，
+> **对"视口内容"不敏感**（网格-only 与整屏品红都是 0.3806）。判定"是否画出来"请用 `map.cjs` 或 `verify-webgpu-fallback.cjs`
+> 里的 `viewportStats()`（在视口内部取 300×220）。
+
