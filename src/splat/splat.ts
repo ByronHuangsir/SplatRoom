@@ -697,6 +697,7 @@ class Splat extends Element {
 
         material.setParameter('uSplatView', cam.viewMatrix.data);
         material.setParameter('uSplatViewProj', this._gpuViewProjMat.data);
+        material.setParameter('uSplatProj', this._gpuProjMat.data);
         material.setParameter('uSplatCameraParams', [1 / far, far, near, isOrtho ? 1 : 0]);
         material.setParameter('uSplatViewport', [width, height, 1 / width, 1 / height]);
     }

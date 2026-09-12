@@ -246,7 +246,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         // orthographic (which has no view-z Jacobian).
         let viewSpaceXY: vec2f = safeOffset *
             select(-center.view.z, 1.0, uniform.uSplatCameraParams.w == 1.0) /
-            (clipPos.w * vec2f(uniform.uSplatViewProj[0][0], uniform.uSplatViewProj[1][1]));
+            (clipPos.w * vec2f(uniform.uSplatProj[0][0], uniform.uSplatProj[1][1]));
         output.vScreenOffset = output.vViewCenter.xy + viewSpaceXY;
 
         let rotH: half3x3 = quatToMat3(half4(getRotation().yzwx));
@@ -748,6 +748,7 @@ uniform matrix_model: mat4x4f;
 // this app does control, and are updated once per frame.
 uniform uSplatView: mat4x4f;
 uniform uSplatViewProj: mat4x4f;
+uniform uSplatProj: mat4x4f;              // projection only (crop reconstruction)
 uniform uSplatCameraParams: vec4f;        // 1 / far, far, near, isOrtho
 uniform uSplatViewport: vec4f;            // width, height, 1 / width, 1 / height
 
@@ -770,7 +771,7 @@ fn initCenter(modelCenter: vec3f, center: ptr<function, SplatCenter>) -> bool {
         centerProj.z = clamp(centerProj.z, 0.0, abs(centerProj.w));
 
         center.proj = centerProj;
-        center.projMat00 = uniform.uSplatViewProj[0][0];
+        center.projMat00 = uniform.uSplatProj[0][0];
 
     #endif
 
