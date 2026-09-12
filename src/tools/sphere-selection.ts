@@ -3,6 +3,7 @@ import { Vec3 } from 'playcanvas';
 
 import { selectionTargetSplats, selectionTargetBound, volumeReachesTarget, fitSphereToBound } from './shape-fit';
 import { ShapeGizmoMode, ShapeTransformGizmo } from './shape-transform-gizmo';
+import { dimModelForVolumeTool, restoreModelAfterVolumeTool } from './volume-dim';
 import { ShapeTransformOp } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { ShortcutManager } from '../core/shortcut-manager';
@@ -318,6 +319,9 @@ class SphereSelection {
             if (!userPlaced || (target && !volumeReachesTarget(sphere.worldBound, target))) {
                 fitToTarget();
             }
+            // fade the model out while the volume is being placed (exp(-2), the same value the
+            // camera-path control uses and what the colour panel shows as transparency -2)
+            dimModelForVolumeTool(scene);
             if (gizmo.mode === 'none') {
                 gizmo.setMode('translate');
             }
@@ -331,6 +335,7 @@ class SphereSelection {
             gizmo.detach();
             scene.remove(sphere);
             this.active = false;
+            restoreModelAfterVolumeTool(scene);
 
             // the volume is transient tool state: drop its ops from history so
             // undo/redo never hits steps that visibly change nothing while the

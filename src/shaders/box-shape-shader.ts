@@ -74,16 +74,76 @@ const fragmentShader = /* glsl */ `
     const vec4 FRONT_COLOR = vec4(0.10, 0.95, 1.00, 0.75);
     const vec4 BACK_COLOR = vec4(0.05, 0.35, 1.00, 0.75);
 
+    // ---- strip pattern ---------------------------------------------------------------
+    // The strips live in box-metric space (boxLen carries half the side lengths) with a
+    // spacing of STRIP_PERIOD world units, drawn as lines covering STRIP_WIDTH of that
+    // spacing. That spacing is FIXED in world space, so a volume that covers more of the
+    // screen - a big selection, or simply zooming in - packs more and more lines into the
+    // same pixels. Once a line is thinner than a pixel the fixed pattern aliases: it turns
+    // into sparse speckle that shimmers as the camera moves (moire), which is exactly what
+    // makes a large selection volume hard to read.
+    //
+    // Two things fix that, both driven by the screen-space footprint of the pattern:
+    //   * LOD: the spacing doubles while the lines would be closer than MIN_LINE_SPACING_PX
+    //     pixels, blended between levels so zooming does not pop. The grid therefore gets
+    //     coarser as the volume gets bigger on screen instead of denser.
+    //   * analytic antialiasing: a line is never thinner than about a pixel, and its edges
+    //     fade over the pixel footprint, so what used to be missing sub-pixel lines becomes
+    //     a smooth, stable coverage (the same trick as pristineGrid in infinite-grid-shader).
+    const float STRIP_PERIOD = 0.5;
+    const float STRIP_WIDTH = 0.03;
+    const float MIN_LINE_SPACING_PX = 7.0;
+    const float COVERAGE_CUTOFF = 0.012;
+
     bool writeDepth(float alpha) {
         ivec2 uv = ivec2(gl_FragCoord.xy);
         ivec2 size = textureSize(blueNoiseTex32, 0);
         return alpha > texelFetch(blueNoiseTex32, uv % size, 0).y;
     }
 
-    bool strips(vec3 pos, int axis) {
-        bvec3 b = lessThan(fract(pos * 2.0 + vec3(0.015)), vec3(0.03));
-        b[axis] = false;
-        return any(b);
+    // coverage of one grid line along 'coord', antialiased over the fragment footprint:
+    // 'deriv' is how many metric units one pixel covers on that axis
+    float lineCoverage(float coord, float deriv, float period) {
+        float cell = fract(coord / period + 0.015);
+        float dist = min(cell, 1.0 - cell) * period;      // metric distance to the line
+        // the line is about a pixel and a half wide on screen whatever the zoom, and the fade
+        // spreads over another pixel and a half: measured, this wider fade is what keeps the
+        // pattern from flickering when the camera moves (a tighter one flipped 41% of its
+        // pixels for a 0.1 degree nudge, against 17% here)
+        float halfWidth = max(period * STRIP_WIDTH * 0.5, deriv * 0.6);
+        return 1.0 - smoothstep(halfWidth, halfWidth + deriv * 1.5, dist);
+    }
+
+    // coverage of the strip pattern at 'pos' (box-metric) whose screen footprint is 'fw',
+    // on a face normal to 'axis' - the strips run along the two other axes
+    float stripCoverage(vec3 pos, vec3 fw, int axis) {
+        // the coarsest-axis footprint decides the level, so no axis of the face aliases
+        float deriv = 0.0;
+        if (axis != 0) deriv = max(deriv, fw.x);
+        if (axis != 1) deriv = max(deriv, fw.y);
+        if (axis != 2) deriv = max(deriv, fw.z);
+
+        float level = max(0.0, log2(max(deriv * MIN_LINE_SPACING_PX / STRIP_PERIOD, 1e-6)));
+        float level0 = floor(level);
+        float blend = smoothstep(0.0, 1.0, level - level0);
+        float period0 = STRIP_PERIOD * exp2(level0);
+        float period1 = period0 * 2.0;
+
+        float cov0 = 0.0;
+        float cov1 = 0.0;
+        if (axis != 0) {
+            cov0 = max(cov0, lineCoverage(pos.x, fw.x, period0));
+            cov1 = max(cov1, lineCoverage(pos.x, fw.x, period1));
+        }
+        if (axis != 1) {
+            cov0 = max(cov0, lineCoverage(pos.y, fw.y, period0));
+            cov1 = max(cov1, lineCoverage(pos.y, fw.y, period1));
+        }
+        if (axis != 2) {
+            cov0 = max(cov0, lineCoverage(pos.z, fw.z, period0));
+            cov1 = max(cov1, lineCoverage(pos.z, fw.z, period1));
+        }
+        return mix(cov0, cov1, blend);
     }
 
     void main() {
@@ -106,27 +166,36 @@ const fragmentShader = /* glsl */ `
 
         float t0, t1;
         int axis0, axis1;
-        if (!intersectBox(t0, t1, axis0, axis1, localNear, localDir, vec3(0.0), vec3(0.5))) {
+        bool hit = intersectBox(t0, t1, axis0, axis1, localNear, localDir, vec3(0.0), vec3(0.5));
+
+        // strips operate on box-metric offsets (local * lengths) so the grid rotates with the
+        // box. Their screen footprint (how many metric units one pixel covers) has to be taken
+        // BEFORE the branch below: WGSL only allows derivative functions in uniform control
+        // flow, and the transpiled gl_FragCoord is a module-scope private variable, so any
+        // branch that reads it counts as non-uniform and fwidth after it fails to compile.
+        vec3 frontMetric = (localNear + localDir * t0) * boxLen * 2.0;
+        vec3 backMetric = (localNear + localDir * t1) * boxLen * 2.0;
+        vec3 frontFw = fwidth(frontMetric);
+        vec3 backFw = fwidth(backMetric);
+
+        if (!hit) {
             gl_FragColor = vec4(1.0, 0.0, 0.0, 0.6);
             return;
         }
 
-        // strips operate on box-metric offsets (local * lengths) so the
-        // 0.5-unit grid spacing is preserved and rotates with the box
-        vec3 frontLocal = localNear + localDir * t0;
-        bool front = t0 > 0.0 && strips(frontLocal * boxLen * 2.0, axis0);
+        float frontCov = t0 > 0.0 ? stripCoverage(frontMetric, frontFw, axis0) : 0.0;
+        float backCov = stripCoverage(backMetric, backFw, axis1);
 
-        vec3 backLocal = localNear + localDir * t1;
-        bool back = strips(backLocal * boxLen * 2.0, axis1);
-
-        if (front) {
-            vec3 frontPos = (matrix_model * vec4(frontLocal, 1.0)).xyz;
-            gl_FragColor = FRONT_COLOR;
-            gl_FragDepth = writeDepth(0.6) ? calcDepth(frontPos, matrix_viewProjection) : 1.0;
-        } else if (back) {
-            vec3 backPos = (matrix_model * vec4(backLocal, 1.0)).xyz;
-            gl_FragColor = BACK_COLOR;
-            gl_FragDepth = writeDepth(0.6) ? calcDepth(backPos, matrix_viewProjection) : 1.0;
+        if (frontCov > COVERAGE_CUTOFF && frontCov >= backCov) {
+            vec3 frontPos = (matrix_model * vec4(localNear + localDir * t0, 1.0)).xyz;
+            float alpha = FRONT_COLOR.a * frontCov;
+            gl_FragColor = vec4(FRONT_COLOR.rgb, alpha);
+            gl_FragDepth = writeDepth(alpha) ? calcDepth(frontPos, matrix_viewProjection) : 1.0;
+        } else if (backCov > COVERAGE_CUTOFF) {
+            vec3 backPos = (matrix_model * vec4(localNear + localDir * t1, 1.0)).xyz;
+            float alpha = BACK_COLOR.a * backCov;
+            gl_FragColor = vec4(BACK_COLOR.rgb, alpha);
+            gl_FragDepth = writeDepth(alpha) ? calcDepth(backPos, matrix_viewProjection) : 1.0;
         } else {
             discard;
         }
