@@ -229,3 +229,24 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
 > **对"视口内容"不敏感**（网格-only 与整屏品红都是 0.3806）。判定"是否画出来"请用 `map.cjs` 或 `verify-webgpu-fallback.cjs`
 > 里的 `viewportStats()`（在视口内部取 300×220）。
 
+
+### 6.7 第三轮：拾取遍**确实在画**，但结果没落到目标纹理
+
+_tmp/pick-draw-probe.cjs（hook `beginRenderPass`/`draw*`，统计一次 `prepareId()` 期间的 draw）：
+
+```
+duringPick: [ "drawIndexed 768/16 vs=vertexMain t=1 pick=true x1" ]
+gsplatDirector: true        // WebGPU 下引擎启用了 unified gsplat director
+opaqueCount: 0  transparentCount: 1
+```
+
+即：拾取遍**发出了 1 次 draw**（我们的 splat 材质、PICK_PASS 变体、1 个颜色附件），
+但 `paintId` 之后立刻原生读 `workTarget.colorBuffer` 仍是全 0（连清屏色都没有）。
+
+因此怀疑点收敛到**目标写入被丢弃**：PlayCanvas 的 `RenderPass` 在 WebGPU 下会把颜色附件标成
+`store=false`（`render-pass.js` 的 `colorOps.store`，debug 输出里表现为 `load->discard`），
+若拾取遍的目标被当作 transient/discard，draw 的结果就会被丢掉 —— 这同时解释了"清屏色也不见"。
+
+下一轮第一件事：用 `_tmp/pass-probe.cjs`（已支持打印每个 pass 的 `loadOp/storeOp`）在 `prepareId()` 期间抓一次
+pass 描述，确认是不是 `discard`；若是，则在 `Picker.prepareId` 里显式保留该附件（或临时关闭 transient 优化）。
+另记：`renderer.gsplatDirector` 在 WebGPU 下为 true（WebGL2 下为 false），这条渲染路径差异也要在拾取/居中点覆盖层上重新核对。
