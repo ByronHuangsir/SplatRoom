@@ -27,6 +27,7 @@
         "lint:locales": "node scripts/check-locales.mjs",
         "typecheck": "tsc --noEmit",
         "audit": "node scripts/audit-code.mjs",
+        "check": "npm run typecheck && npm run lint && npm run lint:locales && npm run audit",
         "verify:diag": "node --no-warnings --experimental-strip-types docs/verify/verify-render-diagnostics.mts",
         "verify:serve": "serve dist -C -l 3100",
         "verify:toolbar": "node docs/verify/verify-selection-toolbar.cjs http://localhost:3100/",
