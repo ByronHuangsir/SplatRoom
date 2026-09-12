@@ -66,6 +66,14 @@ const fragmentShader = /* glsl */ `
 
     uniform vec2 targetSize;
 
+    // Strip colours. The volume used to be white strips for the near side and black for the
+    // far side, which disappears against a grey model (and the black strips vanish into the
+    // dark background). A saturated pair reads on any content and still separates near from
+    // far: cyan for the side facing the camera, deep blue for the far side. Red stays
+    // reserved for the "ray missed the volume" fallback above.
+    const vec4 FRONT_COLOR = vec4(0.10, 0.95, 1.00, 0.75);
+    const vec4 BACK_COLOR = vec4(0.05, 0.35, 1.00, 0.75);
+
     bool writeDepth(float alpha) {
         ivec2 uv = ivec2(gl_FragCoord.xy);
         ivec2 size = textureSize(blueNoiseTex32, 0);
@@ -113,11 +121,11 @@ const fragmentShader = /* glsl */ `
 
         if (front) {
             vec3 frontPos = (matrix_model * vec4(frontLocal, 1.0)).xyz;
-            gl_FragColor = vec4(1.0, 1.0, 1.0, 0.6);
+            gl_FragColor = FRONT_COLOR;
             gl_FragDepth = writeDepth(0.6) ? calcDepth(frontPos, matrix_viewProjection) : 1.0;
         } else if (back) {
             vec3 backPos = (matrix_model * vec4(backLocal, 1.0)).xyz;
-            gl_FragColor = vec4(0.0, 0.0, 0.0, 0.6);
+            gl_FragColor = BACK_COLOR;
             gl_FragDepth = writeDepth(0.6) ? calcDepth(backPos, matrix_viewProjection) : 1.0;
         } else {
             discard;

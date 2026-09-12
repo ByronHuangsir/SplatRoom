@@ -201,6 +201,32 @@ const movedModelCase = (page, toolName) => page.evaluate(async (name) => {
     const modelExtent = Math.max(b.halfExtents.x, b.halfExtents.y, b.halfExtents.z) * 2;
     const volumeSize = el ? (el.lenX !== undefined ? Math.max(el.lenX, el.lenY, el.lenZ) : el.radius * 2) : null;
 
+    // CPU expectation for the default fit: the volume is 30% of the model, centred on the
+    // gaussian density (per-axis median of the splat centres, in world space)
+    const data = splat.splatData;
+    const n = data.numSplats;
+    const cx = data.getProp('x');
+    const cy = data.getProp('y');
+    const cz = data.getProp('z');
+    const m = splat.entity.getWorldTransform().data;
+    const xs = new Float64Array(n);
+    const ys = new Float64Array(n);
+    const zs = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        const x = cx[i];
+        const y = cy[i];
+        const z = cz[i];
+        xs[i] = m[0] * x + m[4] * y + m[8] * z + m[12];
+        ys[i] = m[1] * x + m[5] * y + m[9] * z + m[13];
+        zs[i] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    }
+    const median = (a) => {
+        a.sort();
+        return a[a.length >> 1];
+    };
+    const expectedCentre = [median(xs), median(ys), median(zs)];
+    const expectedSize = modelExtent * 0.3;
+
     const bars = Array.from(document.querySelectorAll('.select-toolbar'));
     const toolbar = bars.find(t => !t.classList.contains('pcui-hidden'));
     const ops = toolbar ? Array.from(toolbar.querySelectorAll('.select-toolbar-op')) : [];
@@ -214,6 +240,8 @@ const movedModelCase = (page, toolName) => page.evaluate(async (name) => {
         volumePosition: pos ? [+pos.x.toFixed(3), +pos.y.toFixed(3), +pos.z.toFixed(3)] : null,
         volumeSize: volumeSize === null ? null : +volumeSize.toFixed(3),
         modelExtent: +modelExtent.toFixed(3),
+        expectedCentre: expectedCentre.map(v => +v.toFixed(3)),
+        expectedSize: +expectedSize.toFixed(3),
         selected: splat.numSelected,
         numSplats: splat.splatData.numSplats
     };
@@ -400,7 +428,28 @@ const opCase = (page, op) => page.evaluate(async (operation) => {
                     movedSphere.volumeSize > 0 &&
                     movedSphere.volumeSize < movedSphere.modelExtent * 0.75,
                 detail: `volume at ${JSON.stringify(movedSphere.volumePosition)}, size ${movedSphere.volumeSize} (model extent ${movedSphere.modelExtent}), selected ${movedSphere.selected}/${movedSphere.numSplats}`
-            }
+            },
+            ...['box', 'sphere'].map((kind) => {
+                const r = kind === 'box' ? movedBox : movedSphere;
+                return {
+                    name: `${kind} tool: default size is 30% of the model`,
+                    pass: Math.abs(r.volumeSize - r.expectedSize) <= Math.max(0.01, r.expectedSize * 0.02),
+                    detail: `size ${r.volumeSize}, expected 30% of ${r.modelExtent} = ${r.expectedSize}`
+                };
+            }),
+            ...['box', 'sphere'].map((kind) => {
+                const r = kind === 'box' ? movedBox : movedSphere;
+                const d = Math.hypot(
+                    r.volumePosition[0] - r.expectedCentre[0],
+                    r.volumePosition[1] - r.expectedCentre[1],
+                    r.volumePosition[2] - r.expectedCentre[2]
+                );
+                return {
+                    name: `${kind} tool: default centre is the gaussian density centre`,
+                    pass: d <= Math.max(0.02, r.modelExtent * 0.02),
+                    detail: `volume at ${JSON.stringify(r.volumePosition)}, median of the splat centres ${JSON.stringify(r.expectedCentre)} (distance ${d.toFixed(4)})`
+                };
+            })
         ];
 
         const checks = [...volumeChecks, ...toolChecks];

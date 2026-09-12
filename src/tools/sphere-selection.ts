@@ -1,7 +1,7 @@
 import { Button, Container, Element, Label, NumericInput, VectorInput } from '@playcanvas/pcui';
 import { Vec3 } from 'playcanvas';
 
-import { selectionTargetBound, volumeReachesTarget, fitSphereToBound } from './shape-fit';
+import { selectionTargetSplats, selectionTargetBound, volumeReachesTarget, fitSphereToBound } from './shape-fit';
 import { ShapeGizmoMode, ShapeTransformGizmo } from './shape-transform-gizmo';
 import { ShapeTransformOp } from '../core/edit-ops';
 import { Events } from '../core/events';
@@ -208,9 +208,10 @@ class SphereSelection {
         // fit the volume over the current target (the selected splats, or every splat
         // when nothing is selected)
         const fitToTarget = () => {
+            const splats = selectionTargetSplats(events, scene);
             const bound = selectionTargetBound(events, scene);
             if (bound) {
-                fitSphereToBound(scene, sphere, bound);
+                fitSphereToBound(scene, sphere, bound, splats);
                 updateUI();
             }
             return !!bound;

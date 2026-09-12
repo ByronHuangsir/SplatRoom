@@ -54,6 +54,11 @@ const fragmentShader = /* glsl */ `
 
     uniform vec2 targetSize;
 
+    // Strip colours: cyan for the side facing the camera, deep blue for the far side. See the
+    // box shape shader for why the neutral white/black pair was replaced.
+    const vec4 FRONT_COLOR = vec4(0.10, 0.95, 1.00, 0.75);
+    const vec4 BACK_COLOR = vec4(0.05, 0.35, 1.00, 0.75);
+
     bool writeDepth(float alpha) {
         vec2 uv = fract(gl_FragCoord.xy / 32.0);
         float noise = texture2DLod(blueNoiseTex32, uv, 0.0).y;
@@ -95,10 +100,10 @@ const fragmentShader = /* glsl */ `
         bool back = strips(backPos - sphere.xyz);
 
         if (front) {
-            gl_FragColor = vec4(1.0, 1.0, 1.0, 0.6);
+            gl_FragColor = FRONT_COLOR;
             gl_FragDepth = writeDepth(0.6) ? calcDepth(frontPos, matrix_viewProjection) : 1.0;
         } else if (back) {
-            gl_FragColor = vec4(0.0, 0.0, 0.0, 0.6);
+            gl_FragColor = BACK_COLOR;
             gl_FragDepth = writeDepth(0.6) ? calcDepth(backPos, matrix_viewProjection) : 1.0;
         } else {
             discard;

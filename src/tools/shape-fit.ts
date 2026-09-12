@@ -13,16 +13,22 @@ import { Splat } from '../splat/splat';
 // broken. These helpers give the tools a target to fit to, and let them tell when a
 // volume has drifted away from it.
 
-// The bound the volume selection should act on: the selected splats when there are any,
-// otherwise every visible splat. Null when the scene has no splats.
-//
-// The bound is derived from each splat's LOCAL bound through its current world transform
-// rather than read from `splat.worldBound`: that cached copy is only refreshed on the
-// app's own transform paths, so a model moved by any other route would leave the volume
+// The splats a volume selection should act on: the selected splats when there are any,
+// otherwise every splat. Null when the scene has no splats.
+const selectionTargetSplats = (events: Events, scene: Scene): Splat[] => {
+    const selected = (events.invoke('selection.all') as Splat[]) ?? [];
+    if (selected.length) {
+        return selected;
+    }
+    return scene.getElementsByType(ElementType.splat) as Splat[];
+};
+
+// The bound of those splats, derived from each splat's LOCAL bound through its current world
+// transform rather than read from `splat.worldBound`: that cached copy is only refreshed on
+// the app's own transform paths, so a model moved by any other route would leave the volume
 // fitted to where the model used to be.
 const selectionTargetBound = (events: Events, scene: Scene): BoundingBox | null => {
-    const selected = (events.invoke('selection.all') as Splat[]) ?? [];
-    const splats = (selected.length ? selected : scene.getElementsByType(ElementType.splat)) as Splat[];
+    const splats = selectionTargetSplats(events, scene);
     if (!splats.length) {
         return null;
     }
@@ -53,57 +59,119 @@ const volumeReachesTarget = (volumeBound: BoundingBox, target: BoundingBox) => {
     return volumeBound.intersects(target);
 };
 
-// Default volume sizes. The volumes are tools the user places and resizes, so they start
-// small enough to be seen and grabbed: a volume fitted to the WHOLE model hugs its surface,
-// where the grid strips disappear into the geometry (and the scale gizmo's handles end up
-// buried inside the model, which is what made the tool feel unusable).
-const BOX_FIT = 0.5;      // half the model extent on each axis
-const SPHERE_FIT = 0.5;   // half the target's half-diagonal radius
+// Default volume size: a fraction of the model. A volume fitted to the WHOLE model hugs its
+// surface, where the grid strips disappear into the geometry and the scale gizmo's handles
+// end up buried inside the model, which is what made the tool feel unusable; a third of the
+// model is small enough to see and grab, and still big enough to cover the dense middle of
+// the scene where the user usually wants to start.
+const VOLUME_FRACTION = 0.3;
 
-// Where to put a freshly fitted volume: on the side of the model facing the camera,
-// straddling its near face. Centring on the bound looks natural but lands in empty space
-// for a shell-like model (a room scan is hollow, so a volume in its middle selects
-// nothing), while a volume that spans the whole model cannot be seen or grabbed. Straddling
-// the near face puts it on the geometry the user is looking at, and keeps it small.
-const placementCentre = (bound: BoundingBox, scene: Scene, out: Vec3) => {
-    const { center, halfExtents } = bound;
-    out.copy(center);
-    const camera = scene.camera?.mainCamera;
-    if (!camera) {
+// Where a freshly fitted volume goes: on the centre of the gaussian density, i.e. the
+// per-axis MEDIAN of the splat centres of the target, in world space. Not the centre of the
+// bounding box: geometry is rarely spread evenly through its box (a room scan is a hollow
+// shell, a captured object often sits on one side of the stray gaussians around it), so the
+// box centre frequently lands in empty space while the mass of gaussians is somewhere else.
+// The median is used rather than the mean because a handful of far-away floaters can drag a
+// mean a long way.
+//
+// Sampling is strided so the cost stays flat for large models (a 5M splat model is sampled
+// down to ~64k centres), and the result is memoised: activating a tool asks for the same
+// centre over and over, and `getCenters()` copies the whole position array.
+const SAMPLE_LIMIT = 65536;
+
+let densityKey = '';
+const densityCentreStorage = new Vec3();
+
+const splatsKey = (splats: Splat[]) => {
+    let key = '';
+    for (const splat of splats) {
+        // identity + count + world transform: any of those changing invalidates the centre
+        key += `${splat.entity.getGuid()}:${splat.numSplats}:${splat.entity.getWorldTransform().data.join(',')};`;
+    }
+    return key;
+};
+
+const densityCentre = (splats: Splat[], fallback: BoundingBox, out: Vec3): Vec3 => {
+    const key = splatsKey(splats);
+    if (key === densityKey) {
+        return out.copy(densityCentreStorage);
+    }
+
+    let total = 0;
+    for (const splat of splats) {
+        total += splat.numSplats ?? 0;
+    }
+    const stride = Math.max(1, Math.ceil(total / SAMPLE_LIMIT));
+
+    const xs: number[] = [];
+    const ys: number[] = [];
+    const zs: number[] = [];
+    const point = new Vec3();
+    for (const splat of splats) {
+        const data: any = splat?.splatData;
+        if (!data || typeof data.getCenters !== 'function') {
+            continue;
+        }
+        let centers: Float32Array;
+        try {
+            centers = data.getCenters() as Float32Array;
+        } catch (e) {
+            continue;
+        }
+        if (!centers) {
+            continue;
+        }
+        const count = centers.length / 3;
+        const transform = splat.entity.getWorldTransform();
+        for (let i = 0; i < count; i += stride) {
+            point.set(centers[i * 3], centers[i * 3 + 1], centers[i * 3 + 2]);
+            transform.transformPoint(point, point);
+            xs.push(point.x);
+            ys.push(point.y);
+            zs.push(point.z);
+        }
+    }
+
+    if (!xs.length) {
+        // no readable positions (unusual format): the bound centre is the best we have
+        out.copy(fallback.center);
         return out;
     }
-    const forward = camera.forward;
-    // bound extent along the view axis: how far the near face is from the centre
-    const extentAlong = Math.abs(forward.x) * halfExtents.x +
-        Math.abs(forward.y) * halfExtents.y +
-        Math.abs(forward.z) * halfExtents.z;
-    out.x -= forward.x * extentAlong * 0.5;
-    out.y -= forward.y * extentAlong * 0.5;
-    out.z -= forward.z * extentAlong * 0.5;
+
+    const mid = (values: number[]) => {
+        values.sort((a, b) => a - b);
+        return values[values.length >> 1];
+    };
+    out.set(mid(xs), mid(ys), mid(zs));
+
+    densityKey = key;
+    densityCentreStorage.copy(out);
     return out;
 };
 
 const placement = new Vec3();
 
-// fit an axis-aligned box (side lengths live on the shape) over the bound
-const fitBoxToBound = (scene: Scene, box: { pivot: any, lenX: number, lenY: number, lenZ: number, moved: () => void }, bound: BoundingBox) => {
+// fit an axis-aligned box (side lengths live on the shape) over the target
+const fitBoxToBound = (scene: Scene, box: { pivot: any, lenX: number, lenY: number, lenZ: number, moved: () => void }, bound: BoundingBox, splats: Splat[]) => {
     const { halfExtents } = bound;
     const min = 0.01;
-    box.pivot.setPosition(placementCentre(bound, scene, placement));
+    box.pivot.setPosition(densityCentre(splats, bound, placement));
     box.pivot.setLocalEulerAngles(0, 0, 0);
-    box.lenX = Math.max(min, halfExtents.x * 2 * BOX_FIT);
-    box.lenY = Math.max(min, halfExtents.y * 2 * BOX_FIT);
-    box.lenZ = Math.max(min, halfExtents.z * 2 * BOX_FIT);
+    box.lenX = Math.max(min, halfExtents.x * 2 * VOLUME_FRACTION);
+    box.lenY = Math.max(min, halfExtents.y * 2 * VOLUME_FRACTION);
+    box.lenZ = Math.max(min, halfExtents.z * 2 * VOLUME_FRACTION);
     box.moved();
 };
 
-// fit a sphere (radius lives on the shape, the pivot scale carries the diameter) over
-// the bound
-const fitSphereToBound = (scene: Scene, sphere: { pivot: any, radius: number, moved: () => void }, bound: BoundingBox) => {
+// fit a sphere (radius lives on the shape, the pivot scale carries the diameter) over the
+// target: the diameter is the same fraction of the model the box uses, measured on the
+// model's largest dimension so the two tools start at a comparable size
+const fitSphereToBound = (scene: Scene, sphere: { pivot: any, radius: number, moved: () => void }, bound: BoundingBox, splats: Splat[]) => {
     const { halfExtents } = bound;
-    sphere.pivot.setPosition(placementCentre(bound, scene, placement));
-    sphere.radius = Math.max(0.01, halfExtents.length() * SPHERE_FIT);
+    const maxExtent = Math.max(halfExtents.x, halfExtents.y, halfExtents.z) * 2;
+    sphere.pivot.setPosition(densityCentre(splats, bound, placement));
+    sphere.radius = Math.max(0.01, maxExtent * VOLUME_FRACTION * 0.5);
     sphere.moved();
 };
 
-export { selectionTargetBound, volumeReachesTarget, fitBoxToBound, fitSphereToBound };
+export { selectionTargetSplats, selectionTargetBound, volumeReachesTarget, fitBoxToBound, fitSphereToBound };
