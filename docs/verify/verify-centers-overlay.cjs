@@ -69,8 +69,8 @@ const settle = async (page) => {
             const scene = window.scene;
             const splat = scene.getElementsByType('splat')[0];
             return {
-                hasOverlay: !!splat.overlay,
-                orderReady: splat.overlay ? splat.overlay.orderReady : null,
+                hasOverlay: !!scene.splatOverlay,
+                orderReady: scene.splatOverlay ? scene.splatOverlay.orderReady : null,
                 hasOrderTexture: !!splat.entity.gsplat.instance.orderTexture,
                 hasOrderBuffer: !!splat.entity.gsplat.instance.orderBuffer,
                 sorterOrderBytes: splat.entity.gsplat.instance.sorter?.orderData?.byteLength ?? null
@@ -88,12 +88,11 @@ const settle = async (page) => {
             scene.forceRender = true;
             scene.app.renderNextFrame = true;
             await new Promise(r => setTimeout(r, 900));
-            const splat = scene.getElementsByType('splat')[0];
             return {
                 mode: scene.events.invoke('camera.mode'),
                 overlay: scene.events.invoke('camera.overlay'),
                 splatSize: scene.events.invoke('camera.splatSize'),
-                orderReady: splat.overlay ? splat.overlay.orderReady : null
+                orderReady: scene.splatOverlay ? scene.splatOverlay.orderReady : null
             };
         });
         const centers = await stats(page);
