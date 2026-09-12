@@ -577,6 +577,72 @@ WebGPU 必须由 `startRenderPass` 创建 render pass encoder，所以手动序�
 `error: function not found 'camera.getAzimElev' / 'camera.fov'` —— 那是 UI 在 editor 注册这些
 函数之前读了一次（`selection-flags.ts` 里有同类注释说明），与本问题无关，harness 已过滤。
 
+### 6.22 第十九轮：盒/球的"看起来不对"= gl_FragCoord 原点差异；顺带修好 360 全景导出
+
+用户把六个角度的现场截图（`盒选择/ScreenShot_2026-09-12_2041*.png`、`2042*.png`）与"应该长成什么样"的
+参考图（`204446_341.png`，模型透明度调低）放在一起，要求对比。逐项量化后定位到一个**坐标约定**缺陷。
+
+**参考图与现场图的差别（像素统计，`_tmp/red-pct.cjs` + `_tmp/edge-red.cjs`）**：
+
+| 图 | 尺寸 | 红色像素占比 | 红色像素中"距非红像素 ≤2px"的比例 |
+| --- | --- | --- | --- |
+| 现场六个角度（修复前） | 3840×2055 等 | **1.20% / 2.38% / 2.93% / 4.37% / 5.09% / 8.25%** | 6.5% / 12.2% / 9.5% / 20.4% / 20.9% / 26.2% |
+| 参考图（应该的样子） | 3569×2001 | 0.17% | 48.9% |
+
+"距非红像素 ≤2px"是关键指标：参考图里的红色是**轮廓细线**（近一半红色像素紧贴非红像素），
+现场图里只有 6.5%~26% —— 说明那是一整片**实心红块**。红色在盒/球着色器里只有一个来源：
+射线**没打中体积**时的兜底色 `vec4(1,0,0,0.6)`。所以现场图 = "体积该在的地方，着色器在那里找不到体积"。
+
+**根因**：`gl_FragCoord` 在 WebGPU 里原点在**左上**，GL 在**左下**；而相机射线 uniform
+（`near_origin/near_x/near_y`、`far_origin/far_x/far_y`，由 `Camera.updateCameraUniforms` 填）是按
+GL 约定摊开的。盒/球着色器用 `gl_FragCoord.xy / targetSize` 去插值这组 uniform，
+于是 WebGPU 上射线**上下镜像**：网格错位，大片像素干脆打不到体积 → 兜底红块。
+
+**修复**：`src/core/gpu-backend.ts` 新增 `applyFragCoordDefine(material, device)`，WebGPU 下定义
+`GSPLAT_FRAGCOORD_TOPLEFT`；盒/球着色器在该宏下把片元 y 翻回去
+（`vec2 fragCoord = vec2(gl_FragCoord.x, targetSize.y - gl_FragCoord.y)`）。
+材质改为**只建一次并复用**（原先每次激活都重建，宏会丢）。
+
+**修复后实测**（`_tmp/box-angles-probe.cjs`，隐藏模型只留体积、再按真实鼠标拖拽绕六个角度）：
+
+| 指标 | WebGPU | WebGL2 |
+| --- | --- | --- |
+| 六个角度的红色像素 | 0.758% / 1.377% / 0.246% / 0.881% / 0.698% / 0.771% | 0.759% / 1.380% / 0.922% / 0.881% / 0.697% / 0.771% |
+| 红色像素数（同一角度） | 7441 / 13522 / 8646 | 7449 / 13553 / 8649 |
+| 红色像素中紧贴非红像素 | 67.5% / 50.6% / 65.8% | 67.4% / 50.3% / 65.6% |
+
+即：**红色回落到与 WebGL2 逐像素同量级（差 0.2% 以内），并且性质从"实心块"变成"轮廓细线"
+（50%~68%），与参考图的 48.9% 同类**。修复前的对照实验（`_tmp/flip-test.cjs`）：中央裁剪区里
+WebGPU 与 WebGL2 的"亮网格"掩码在**翻转后**一致率 99.94%（10569 个共同亮点），不翻转只有 94.56% —— 镜像关系确凿。
+
+**顺带发现并修好的第二个 WebGPU 缺陷：360 全景导出是空帧。**
+`render.image` 带 `projection: 'equirect'` 在 WebGPU 上"成功返回"，但 512×256 的 PNG 只有 **588 字节**、
+全透明（WebGL2 同设置 30751 字节）。三个独立原因，逐个验证：
+
+1. **回读走了延迟路径**：`EquirectRenderer.read()` 没用 `immediate: true`，WebGPU 上该路径
+   解析成全 0 缓冲（帧回读 `app/render.ts` 早就用了 `immediate: true`）。实测：去掉即回到 588 字节空帧。
+2. **投影着色器在 WebGPU 上根本没编译成功**：六个面采样写在"按面加权"的分支里，
+   而 WGSL 只允许在**一致控制流**里做隐式导数采样，编译器报
+   `'textureSample' must only be called from uniform control flow` —— 且是通过 `console.log` 而不是
+   `error` 打印的，所以此前一直没被 harness 抓到。改成 `texture2DLod(..., 0.0)`
+   （面纹理本来就 `mipmaps: false`，显式 lod 0 也是正确的滤波）。顺带把 `dn <= 0.0` 的守卫放宽到 `1e-5`，
+   避免近切向方向产生 inf uv（inf × 0 权重 = NaN）。
+3. **上下翻转**：修好前两条之后，WebGPU 的全景与 WebGL2 逐像素一致率在**翻转后**远高于不翻转
+   → 投影着色器也要做同一处 y 翻转。用 `withFragCoordDefine()`（`ShaderUtils.createShader` 出来的
+   是 `Shader` 不是材质，没有 `setDefine`，改为把 `#define` 前置到片段源码）注入。
+
+**新增验证脚本** `docs/verify/verify-equirect-export.cjs`（可带 `--ref` 与另一后端产出的全景逐像素对比）：
+WebGL2 6/6 通过，WebGPU 7/7 通过；两者全景 **同行同向**（平均绝对差 0.065/255，99.67% 像素差 ≤8），
+翻转后平均绝对差 10.534 —— 方向由数据判定，不再靠推理。
+
+**回归**：`npm run check` 全绿；`verify:diag` 7/7；`verify-model-renders` 双后端、`verify-shape-selection`
+双后端 13 项、`verify-centers-overlay`、`verify-pip-preview`、`verify-selection-depth`、`verify-edit-hide`、
+`verify-effects`、`verify-export-image`、`verify-ortho-camera`、`verify-transform-palette`、
+`verify-webgpu-fallback` 全部 0 失败。
+
+**留在用户侧的两张对比图**：`盒选择对比/修复后仅盒_角度1..6.png`（隐藏模型，只看体积网格）、
+`盒选择对比/修复后角度1..6.png`（模型可见的现场视角，与用户原来的六张同机位思路一致）。
+
 
 
 

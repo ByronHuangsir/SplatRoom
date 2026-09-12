@@ -43,6 +43,40 @@ export const webgpuTranspilerUrls = (): { glslangUrl: string, twgslUrl: string }
 
 export type GpuBackend = 'webgl2' | 'webgpu';
 
+/**
+ * WebGPU's fragment position starts at the TOP-left, while GL's `gl_FragCoord` starts at the
+ * bottom-left. The camera-ray uniforms (`near_origin`/`near_x`/`near_y` and
+ * `far_origin`/`far_x`/`far_y`, filled by `Camera.updateCameraUniforms`) are laid out in the
+ * GL convention, so every shader that turns a fragment coordinate back into a world-space ray
+ * has to flip y on WebGPU. Without the flip the ray is mirrored vertically: the box/sphere
+ * selection volumes draw their grid mirrored, and most fragments miss the volume entirely and
+ * paint the shader's red "ray missed the box" fallback.
+ *
+ * Shaders that read gl_FragCoord only as a texel index or as a screen-space pattern (for
+ * example the hatch in tool-overlay-shader, or the histogram tile index) do not need this.
+ */
+export const applyFragCoordDefine = (
+    material: { setDefine: (name: string, value: string) => void },
+    device: { isWebGPU: boolean }
+) => {
+    if (device.isWebGPU) {
+        material.setDefine('GSPLAT_FRAGCOORD_TOPLEFT', '');
+    }
+};
+
+/**
+ * Same define as `applyFragCoordDefine`, for shaders built with `ShaderUtils.createShader`:
+ * those are plain `Shader` objects without `Material#setDefine`, so the define is prepended
+ * to the source instead. A define line is not part of the shader body, so this cannot change
+ * line-based error reporting for the real source.
+ */
+export const withFragCoordDefine = (
+    fragmentGLSL: string,
+    device: { isWebGPU: boolean }
+) => {
+    return device.isWebGPU ? `#define GSPLAT_FRAGCOORD_TOPLEFT\n${fragmentGLSL}` : fragmentGLSL;
+};
+
 const isBackend = (v: unknown): v is GpuBackend => v === 'webgl2' || v === 'webgpu';
 
 /** Persisted preference, or undefined when unset. */

@@ -26,6 +26,12 @@ const vertexShader = /* glsl*/ `
 // face textures store camera renders bottom-row-first (flipY: false render
 // targets), which matches gl_FragCoord's bottom-left origin, so t is
 // up-positive and no flips are needed anywhere.
+//
+// the face lookups use texture2DLod(..., 0.0) rather than texture2D: they sit inside the
+// per-face weight branch, and WGSL only allows implicit-derivative sampling
+// (textureSample) in uniform control flow - the branch made the WebGPU shader fail to
+// build, which silently produced an empty 360 frame. the faces are single-level
+// (mipmaps: false) with linear filtering, so an explicit lod 0 is also the correct filter.
 const fragmentShader = /* glsl*/ `
     uniform sampler2D uFace0;   // front -Z
     uniform sampler2D uFace1;   // right +X
@@ -42,7 +48,9 @@ const fragmentShader = /* glsl*/ `
     // dot(d, forward), and the weight feathers to zero towards the face edge
     float faceWeight(vec3 d, vec3 r, vec3 u, vec3 f, out vec2 st) {
         float dn = dot(d, f);
-        if (dn <= 0.0) {
+        // a guard rather than a plain 0.0 test: near-tangent directions would divide by ~0
+        // and give an infinite uv, and an infinite uv times a zero weight is a NaN
+        if (dn <= 1e-5) {
             st = vec2(0.0);
             return 0.0;
         }
@@ -52,7 +60,13 @@ const fragmentShader = /* glsl*/ `
     }
 
     void main(void) {
-        vec2 uv = gl_FragCoord.xy / uTargetSize;
+        // gl_FragCoord is top-left on WebGPU but the capture basis below is defined the GL
+        // way (bottom-left), so the output row has to be flipped (see withFragCoordDefine)
+        #ifdef GSPLAT_FRAGCOORD_TOPLEFT
+            vec2 uv = vec2(gl_FragCoord.x, uTargetSize.y - gl_FragCoord.y) / uTargetSize;
+        #else
+            vec2 uv = gl_FragCoord.xy / uTargetSize;
+        #endif
         float lon = (uv.x - 0.5) * 2.0 * PI;
         float lat = (uv.y - 0.5) * PI;
 
@@ -64,22 +78,22 @@ const fragmentShader = /* glsl*/ `
         float w;
 
         w = faceWeight(d, vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, -1.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace0, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace0, st, 0.0); wsum += w; }
 
         w = faceWeight(d, vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace1, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace1, st, 0.0); wsum += w; }
 
         w = faceWeight(d, vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace2, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace2, st, 0.0); wsum += w; }
 
         w = faceWeight(d, vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(-1.0, 0.0, 0.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace3, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace3, st, 0.0); wsum += w; }
 
         w = faceWeight(d, vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace4, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace4, st, 0.0); wsum += w; }
 
         w = faceWeight(d, vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, -1.0, 0.0), st);
-        if (w > 0.0) { acc += w * texture2D(uFace5, st); wsum += w; }
+        if (w > 0.0) { acc += w * texture2DLod(uFace5, st, 0.0); wsum += w; }
 
         gl_FragColor = acc / max(wsum, 1e-5);
     }

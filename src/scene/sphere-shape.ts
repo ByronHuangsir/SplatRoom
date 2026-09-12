@@ -12,6 +12,7 @@ import {
 } from 'playcanvas';
 
 import { Element, ElementType } from './element';
+import { applyFragCoordDefine } from '../core/gpu-backend';
 import { Serializer } from '../core/serializer';
 import { vertexShader, fragmentShader } from '../shaders/sphere-shape-shader';
 
@@ -50,6 +51,7 @@ class SphereShape extends Element {
                 BLENDEQUATION_ADD, BLENDMODE_SRC_ALPHA, BLENDMODE_ONE_MINUS_SRC_ALPHA,
                 BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA
             );
+            applyFragCoordDefine(material, this.scene.graphicsDevice);
             material.update();
 
             this.material = material;

@@ -70,7 +70,14 @@ const fragmentShader = /* glsl */ `
     }
 
     void main() {
-        vec2 clip = gl_FragCoord.xy / targetSize;
+        // the camera-ray uniforms are laid out from the bottom-left, so WebGPU's top-left
+        // fragment origin has to be flipped (see applyFragCoordDefine)
+        #ifdef GSPLAT_FRAGCOORD_TOPLEFT
+            vec2 fragCoord = vec2(gl_FragCoord.x, targetSize.y - gl_FragCoord.y);
+        #else
+            vec2 fragCoord = gl_FragCoord.xy;
+        #endif
+        vec2 clip = fragCoord / targetSize;
         vec3 worldNear = near_origin + near_x * clip.x + near_y * clip.y;
         vec3 worldFar = far_origin + far_x * clip.x + far_y * clip.y;
 

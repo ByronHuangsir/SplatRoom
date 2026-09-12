@@ -14,6 +14,7 @@ import {
     Texture
 } from 'playcanvas';
 
+import { withFragCoordDefine } from '../core/gpu-backend';
 import { faceFov, vertexShader, fragmentShader } from '../shaders/equirect-shader';
 
 // renders the six cube faces of a panorama to individual 2d textures and
@@ -81,7 +82,7 @@ class EquirectRenderer {
                 vertex_position: SEMANTIC_POSITION
             },
             vertexGLSL: vertexShader,
-            fragmentGLSL: fragmentShader
+            fragmentGLSL: withFragCoordDefine(fragmentShader, device)
         });
     }
 
@@ -98,12 +99,16 @@ class EquirectRenderer {
         drawQuadWithShader(device, equirectTarget, this.shader);
     }
 
-    // read the projected equirectangular pixels back to the cpu
+    // read the projected equirectangular pixels back to the cpu. `immediate` is required on
+    // WebGPU: the deferred readback path resolves with an all-zero buffer there, which is
+    // what made a 360 export come out as a fully transparent frame. (the frame readback in
+    // app/render.ts passes immediate: true for the same reason)
     read(data: Uint8Array) {
         const { equirectTarget } = this;
         return equirectTarget.colorBuffer.read(0, 0, equirectTarget.width, equirectTarget.height, {
             renderTarget: equirectTarget,
-            data
+            data,
+            immediate: true
         });
     }
 
