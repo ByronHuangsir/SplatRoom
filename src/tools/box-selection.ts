@@ -1,6 +1,7 @@
 import { Button, Container, Element, Label, VectorInput } from '@playcanvas/pcui';
 import { Vec3 } from 'playcanvas';
 
+import { selectionTargetBound, volumeReachesTarget, fitBoxToBound } from './shape-fit';
 import { ShapeGizmoMode, ShapeTransformGizmo } from './shape-transform-gizmo';
 import { ShapeTransformOp } from '../core/edit-ops';
 import { Events } from '../core/events';
@@ -162,10 +163,16 @@ class BoxSelection {
             }
         };
 
+        // true once the user has positioned the volume themselves (gizmo, inputs or
+        // undo/redo), so re-activating the tool keeps their placement instead of
+        // re-fitting the volume over the selection
+        let userPlaced = false;
+
         // record an undo op for the state change performed by fn
         const recordOp = (fn: () => void) => {
             const oldState = captureState();
             fn();
+            userPlaced = true;
             addOp(oldState, captureState());
         };
 
@@ -179,6 +186,7 @@ class BoxSelection {
         let uiDragState: BoxState | null = null;
         const startUiDrag = () => {
             uiDragState = captureState();
+            userPlaced = true;
         };
         const endUiDrag = () => {
             if (uiDragState) {
@@ -193,6 +201,7 @@ class BoxSelection {
             lowerBoundScale: new Vec3(0.01, 0.01, 0.01),
             onTransformStart: () => {
                 dragState = captureState();
+                userPlaced = true;
             },
             onTransform: (mode) => {
                 if (mode === 'scale') {
@@ -228,6 +237,17 @@ class BoxSelection {
                 position: box.pivot.getPosition().clone(),
                 radius: half
             };
+        };
+
+        // fit the volume over the current target (the selected splats, or every splat
+        // when nothing is selected)
+        const fitToTarget = () => {
+            const bound = selectionTargetBound(events, scene);
+            if (bound) {
+                fitBoxToBound(box, bound);
+                updateUI();
+            }
+            return !!bound;
         };
 
         const apply = (op: 'set' | 'add' | 'remove' | 'intersect') => {
@@ -352,6 +372,12 @@ class BoxSelection {
         this.activate = () => {
             this.active = true;
             scene.add(box);
+            // a volume that is not over its target (first use, or the model moved since)
+            // would make "set" select nothing, which reads as a broken tool
+            const target = selectionTargetBound(events, scene);
+            if (!userPlaced || (target && !volumeReachesTarget(box.worldBound, target))) {
+                fitToTarget();
+            }
             if (gizmo.mode === 'none') {
                 gizmo.setMode('translate');
             }
