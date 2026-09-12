@@ -663,6 +663,10 @@ class Splat extends Element {
 
     // WebGPU only: upload the camera matrices as material parameters (see the call
     // site in onPreRender and the notes in src/shaders/splat-shader-wgsl.ts).
+    private _gpuProjMat = new Mat4();
+
+    private _gpuViewProjMat = new Mat4();
+
     private updateGpuCameraUniforms(instance: GSplatInstance) {
         const wrapper = this.scene.camera as any;
         const cam = wrapper?.camera;
@@ -674,8 +678,18 @@ class Splat extends Element {
         const far = cam.farClip;
         const isOrtho = cam.projection === PROJECTION_ORTHOGRAPHIC;
         const { width, height } = wrapper.targetSize ?? { width: 1, height: 1 };
+        const aspect = height > 0 ? width / height : 1;
+
+        // The camera component's own projection matrix is not usable here: the engine
+        // refreshes it lazily only while it syncs the render view for a frame, which our
+        // custom pass pipeline does after onPreRender runs — reading it here returns
+        // zeros. Build the matrix ourselves with the same call the engine makes in
+        // Camera._evaluateProjectionMatrix().
+        this._gpuProjMat.setPerspective(cam.fov, aspect, near, far, false);
+        this._gpuViewProjMat.mul2(this._gpuProjMat, cam.viewMatrix);
+
         material.setParameter('uSplatView', cam.viewMatrix.data);
-        material.setParameter('uSplatProj', cam.projectionMatrix.data);
+        material.setParameter('uSplatViewProj', this._gpuViewProjMat.data);
         material.setParameter('uSplatCameraParams', [1 / far, far, near, isOrtho ? 1 : 0]);
         material.setParameter('uSplatViewport', [width, height, 1 / width, 1 / height]);
     }
