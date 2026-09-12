@@ -468,8 +468,27 @@ clip 空间（`uOverlayViewportSize` 由 `scene.camera.targetSize` 每帧上传�
 
 **仍未覆盖 / 已知降级**：
 
-- **PiP 预览**：`CameraPreview._ensurePipSort()` 在 WebGPU 上直接返回 null（引擎那边没有 order texture，
-  只有 storage buffer），所以 PiP 用引擎的排序结果渲染——预览仍然出图，只是深度顺序来自主相机而非 PiP 相机。
-  这是设计内的降级（代码里原本就写着 `if (device.isWebGPU) return null;`），尚未做像素级验证。
+- **PiP 预览**：在 WebGPU 上仍然关闭（`updateVisibility()` 里 `!webgpu`），但这次查清了三条事实：
+  (1) PiP 自己的排序管线现在**已经能在 WebGPU 上建起来**（`pipOrder` 在那边是 storage buffer，
+  经 `StorageBuffer.write()` 上传；WebGL2 仍是 R32U 纹理 + `levels` 播种），
+  (2) 用 `Texture.read(..., { immediate: true })` 回读 PiP 自己的渲染目标，**模型确实画进去了**
+  （99.7% 有颜色、均值 116），
+  (3) 但 PiP 的 `RenderPassForward.execute()` 在 WebGPU 上会抛
+  `Cannot read properties of null (reading 'setVertexBuffer')`（栈：`renderForwardInternal → draw → submitVertexBuffer`），
+  于是 Phase 5 的 `captureToCanvas` 永远执行不到、2D 画布是空的。这是最后一道拦路石。
+- **顺带修掉一个真实的 WebGPU 崩溃源**：PiP 相机的 `addComponent('camera', { clearColor: true })`
+  把布尔值塞进了本该是 `Color` 的属性，自动渲染那一遍的 clearValue 就成了 `{r:undefined,…}`；
+  WebGL 默默当 0 处理，WebGPU 直接抛
+  "Failed to read the 'a' property from 'GPUColorDict'"，**整帧被丢弃**。已改成真正的 `Color`。
 - **导出/快照**：`render.image`（旋转台/视频导出）尚未在 WebGPU 上验证。
+- **WebGPU 上的 PiP 渲染目标读取**已实现（`captureToCanvasWebGPU`，异步回读 + `putImageData`），
+  等上面的 draw 问题解决后即可生效。
+
+### 6.18 第十五轮：特效 / 变换调色板 / 正交 / 后端选择 全部双后端验证
+
+见 6.17 的表格与数值。本轮的结论是：**WebGPU 与 WebGL2 在这些路径上已经逐像素级一致**
+（居中点 2250/2250 px、裁剪比 0.40/0.40、隐藏 4.1%/4.1%、散射 236034/230095 px、
+调色板 212030/208894 px、正交 204852/204589 px），差异仅来自采样顺序与浮点累加。
+
+打包：`release/SplatRoom-3.6.0.exe`（便携版），启动时按设置面板/URL 选择后端，默认 WebGL2。
 

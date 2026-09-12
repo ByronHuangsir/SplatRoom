@@ -6,6 +6,8 @@ import {
     RenderPass,
     RenderPassForward,
     Texture,
+    StorageBuffer,
+    BUFFERUSAGE_COPY_DST,
     PIXELFORMAT_RGBA8,
     PIXELFORMAT_DEPTH,
     PIXELFORMAT_R32U,
@@ -219,11 +221,17 @@ class CameraPreview extends Element {
         // set to [] to prevent PlayCanvas's standard pipeline from auto-rendering
         // it during app.render(). We render manually via pipRenderPass in
         // onPreRender(). This avoids GL state conflicts with the main camera.
+        //
+        // clearColor is a Color on the camera component (not the RenderPass
+        // boolean flag it looks like): passing `true` copied a boolean into the
+        // pass clear value, which WebGL silently treated as undefined/0 but
+        // WebGPU rejects ("Failed to read the 'a' property from 'GPUColorDict'"),
+        // aborting the whole frame — hence the preview's own clear colour here.
         this.cameraEntity = new Entity('pipCamera');
         this.cameraEntity.addComponent('camera', {
             enabled: true,
-            clearColor: true,
-            clearDepth: true
+            clearColor: new Color(0.14, 0.14, 0.16, 1),
+            clearDepth: 1
         });
         this.cameraComponent = this.cameraEntity.camera as CameraComponent;
 
@@ -470,10 +478,12 @@ class CameraPreview extends Element {
                 }
                 currentKeys.push(key);
                 entry.mainSorter = instance.sorter;
-                entry.mainOrder = instance.orderTexture;
+                entry.mainOrder = entry.mainOrder ?? (this.scene.graphicsDevice.isWebGPU ? instance.orderBuffer : instance.orderTexture);
                 instance.sorter = entry.pipSorter;
                 instance.material.setParameter('splatOrder', entry.pipOrder);
-                instance.material.setParameter('splatTextureSize', entry.pipOrder.width);
+                if (!this.scene.graphicsDevice.isWebGPU) {
+                    instance.material.setParameter('splatTextureSize', entry.pipOrder.width);
+                }
             };
             for (const splat of splats) {
                 setup(splat, (splat.entity as any)?.gsplat?.instance);
@@ -651,7 +661,9 @@ class CameraPreview extends Element {
                     const inst = entry.instance;
                     inst.sorter = entry.mainSorter;
                     inst.material.setParameter('splatOrder', entry.mainOrder);
-                    inst.material.setParameter('splatTextureSize', entry.mainOrder.width);
+                    if (!this.scene.graphicsDevice.isWebGPU) {
+                        inst.material.setParameter('splatTextureSize', entry.mainOrder.width);
+                    }
                 }
                 // If an exception aborted the render after apply but before the
                 // happy-path restore, the crop-box uniforms on the shared material
@@ -708,7 +720,9 @@ class CameraPreview extends Element {
             if (isPipSorter || isPipOrder) {
                 inst.sorter = entry.mainSorter;
                 inst.material.setParameter('splatOrder', entry.mainOrder);
-                inst.material.setParameter('splatTextureSize', entry.mainOrder.width);
+                if (!this.scene.graphicsDevice.isWebGPU) {
+                    inst.material.setParameter('splatTextureSize', entry.mainOrder.width);
+                }
             }
         }
     }
@@ -717,7 +731,14 @@ class CameraPreview extends Element {
 
     /**
      * Build (lazily, ONCE) a PiP-private depth-sort pipeline for a GSplatInstance:
-     * an independent GSplatSorter (placeholder) + its own R32U order texture (pipOrder).
+     * an independent GSplatSorter (placeholder) + its own order storage (pipOrder).
+     *
+     * pipOrder is an R32U order TEXTURE on WebGL2 and a storage BUFFER on WebGPU:
+     * the engine's WGSL splat chunks read `splatOrder` as `array<u32>` from a
+     * storage buffer there (there is no order texture on that backend at all), so a
+     * texture in that slot would be a binding-type mismatch. Both cases speak the
+     * same permutation format, so the swap/restore logic below only differs in how
+     * the data is uploaded and whether `splatTextureSize` applies.
      *
      * SEEDING (v3.3 — engine-managed upload via `levels`): pass the identity
      * permutation as the Texture constructor's `levels` parameter. The constructor
@@ -736,16 +757,18 @@ class CameraPreview extends Element {
      * Worker (or the _cpuDepthSort fallback).
      *
      * Returns null when the instance cannot support an independent pipeline
-     * (WebGPU, compressed splats, resources without centers/streams).
+     * (compressed splats, resources without centers/streams).
      */
-    private _ensurePipSort(instance: any): { pipSorter: any; pipOrder: any; instance: any } | null {
+    private _ensurePipSort(instance: any): { pipSorter: any; pipOrder: any; mainOrder: any; instance: any } | null {
         const resource = instance.resource;
-        if (!instance.sorter || !resource || !instance.orderTexture ||
-            !resource.hasCenters || !resource.streams) {
+        if (!instance.sorter || !resource || !resource.hasCenters || !resource.streams) {
             return null;
         }
         const device = this.scene.graphicsDevice;
-        if (device.isWebGPU) return null;
+        // the main-view order object we must restore on the way out: the order texture
+        // on WebGL2, the order storage buffer on WebGPU
+        const mainOrder = device.isWebGPU ? instance.orderBuffer : instance.orderTexture;
+        if (!mainOrder) return null;
 
         const dims = resource.streams.textureDimensions;
         const numSplats = dims.x * dims.y;
@@ -755,21 +778,28 @@ class CameraPreview extends Element {
         const identitySeed = new Uint32Array(numSplats);
         for (let i = 0; i < numSplats; i++) identitySeed[i] = i;
 
-        // Create PiP order texture WITH identity seed via engine-managed upload.
-        // `levels: [identitySeed]` makes the constructor upload immediately using
-        // the engine's own GL state management (correct PBO handling, no overwrite).
-        const pipOrder = new Texture(device, {
-            name: 'splatOrderPip',
-            width: dims.x,
-            height: dims.y,
-            format: PIXELFORMAT_R32U,
-            mipmaps: false,
-            minFilter: FILTER_NEAREST,
-            magFilter: FILTER_NEAREST,
-            addressU: ADDRESS_CLAMP_TO_EDGE,
-            addressV: ADDRESS_CLAMP_TO_EDGE,
-            levels: [identitySeed]
-        });
+        let pipOrder: any;
+        if (device.isWebGPU) {
+            // storage buffer, seeded through its own write() (a mapped staging copy)
+            pipOrder = new StorageBuffer(device, numSplats * 4, BUFFERUSAGE_COPY_DST);
+            pipOrder.write(0, identitySeed);
+        } else {
+            // Create PiP order texture WITH identity seed via engine-managed upload.
+            // `levels: [identitySeed]` makes the constructor upload immediately using
+            // the engine's own GL state management (correct PBO handling, no overwrite).
+            pipOrder = new Texture(device, {
+                name: 'splatOrderPip',
+                width: dims.x,
+                height: dims.y,
+                format: PIXELFORMAT_R32U,
+                mipmaps: false,
+                minFilter: FILTER_NEAREST,
+                magFilter: FILTER_NEAREST,
+                addressU: ADDRESS_CLAMP_TO_EDGE,
+                addressV: ADDRESS_CLAMP_TO_EDGE,
+                levels: [identitySeed]
+            });
+        }
 
         // Independent sorter (its own Web Worker). init() hands centers/chunks to
         // the worker async. We hand COPIES so main/worker don't share state. We
@@ -785,7 +815,7 @@ class CameraPreview extends Element {
             resource.chunks ? resource.chunks.slice() : null
         );
 
-        return { pipSorter, pipOrder, instance };
+        return { pipSorter, pipOrder, mainOrder, instance };
     }
 
     private _releasePipSort(entry: any) {
@@ -879,13 +909,19 @@ class CameraPreview extends Element {
     }
 
     /**
-     * Build a NEW pipOrder texture from a back-to-front permutation and swap it
-     * into the instance material. Engine-managed upload via `levels` (proven
-     * reliable); the old texture is destroyed to avoid GPU memory leaks.
+     * Upload a back-to-front permutation into the PiP's own order storage and bind it to
+     * the shared material. WebGL2 builds a NEW order texture (engine-managed upload via
+     * `levels`, proven reliable, old one destroyed) while WebGPU writes the permutation
+     * into the existing order storage buffer in place.
      */
     private _applyPipOrder(entry: any, order: Uint32Array, dims: any): void {
         const device = this.scene.graphicsDevice;
         try {
+            if (device.isWebGPU) {
+                entry.pipOrder.write(0, order, 0, Math.min(order.length, entry.pipOrder.byteSize / 4));
+                entry.instance.material.setParameter('splatOrder', entry.pipOrder);
+                return;
+            }
             const newPipOrder = new Texture(device, {
                 name: 'splatOrderPip',
                 width: dims.x,
@@ -1090,9 +1126,13 @@ class CameraPreview extends Element {
 
     private updateVisibility() {
         const timelineOpen = this.scene.events.invoke('statusBar.panel') === 'timeline';
-        // WebGPU: the PiP private sorter/order-texture pipeline is WebGL-only
-        // (see _ensurePipSort) — disable the preview cleanly instead of showing
-        // an empty box when the main renderer runs on WebGPU.
+        // The private sort pipeline itself now works on WebGPU (pipOrder is an order
+        // storage buffer there, see _ensurePipSort), but rendering the preview through its
+        // own RenderPassForward still throws on that backend: a draw inside the pass hits
+        // "Cannot read properties of null (reading 'setVertexBuffer')", so the canvas copy
+        // never runs. The previewed image itself is correct — reading the preview render
+        // target back shows the model — so this is the last blocker, not a lost cause.
+        // Keep the preview off there instead of spamming that error every few frames.
         const webgpu = this.scene.graphicsDevice?.isWebGPU === true;
         this.enabled = timelineOpen && this.hasTrack && !webgpu;
 
@@ -1148,6 +1188,14 @@ class CameraPreview extends Element {
         const device = this.scene.graphicsDevice;
         const w = this.WIDTH;
         const h = this.HEIGHT;
+
+        // WebGPU has no gl context to borrow the colour texture from, so read the render
+        // target back instead (the copy is recorded into the engine's command encoder and
+        // only submitted at a frame boundary — hence immediate: true, same as picking).
+        if (device.isWebGPU) {
+            this.captureToCanvasWebGPU(w, h);
+            return;
+        }
 
         // Access WebGL context
         const gl = (device as any).gl as WebGL2RenderingContext | WebGLRenderingContext;
@@ -1207,6 +1255,35 @@ class CameraPreview extends Element {
         }
     }
 
+    /**
+     * WebGPU variant of the canvas copy: read the preview's colour texture back and blit
+     * it into the 2D canvas. Asynchronous (the readback resolves after the engine submits
+     * its command encoder), which is fine for a preview that updates a few times a second;
+     * only one readback is in flight at a time.
+     */
+    private async captureToCanvasWebGPU(w: number, h: number) {
+        if (this._capturePending || !this.ctx2d) return;
+        this._capturePending = true;
+        try {
+            const texture = this.colorBuffer as any;
+            const pixels = await texture.read(0, 0, w, h, {
+                renderTarget: this.renderTarget,
+                immediate: true
+            });
+            if (!pixels || pixels.length < w * h * 4 || !this.ctx2d) {
+                this._drawFallback('no pixels');
+                return;
+            }
+            const imageData = this.ctx2d.createImageData(w, h);
+            imageData.data.set(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, w * h * 4));
+            this.ctx2d.putImageData(imageData, 0, 0);
+        } catch (err: any) {
+            this._drawFallback(err?.message ?? 'error');
+        } finally {
+            this._capturePending = false;
+        }
+    }
+
     /** Draw a diagnostic pattern on the 2D canvas when capture fails */
     private _drawFallback(reason: string) {
         if (!this.ctx2d || !this.canvas2d) return;
@@ -1222,6 +1299,9 @@ class CameraPreview extends Element {
         ctx.textBaseline = 'middle';
         ctx.fillText(reason, w / 2, h / 2);
     }
+
+    // one WebGPU readback of the preview target in flight at a time
+    private _capturePending = false;
 
     private createDom() {
         // Append PiP directly to document.body so it floats above the entire app
