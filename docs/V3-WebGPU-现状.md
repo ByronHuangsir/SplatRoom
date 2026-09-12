@@ -492,3 +492,32 @@ clip 空间（`uOverlayViewportSize` 由 `scene.camera.targetSize` 每帧上传�
 
 打包：`release/SplatRoom-3.6.0.exe`（便携版），启动时按设置面板/URL 选择后端，默认 WebGL2。
 
+### 6.19 第十六轮：修掉"卡顿"与"PiP 消失"两个回归
+
+用户反馈：切到 WebGPU 后（回退移除 → 持久化的 WebGPU 偏好被采纳）**突然很卡**、**PiP 没了**。两条都定位到了具体原因：
+
+**（1）卡顿 = 我加的"顺序纹理镜像"每帧上传 20MB。**
+覆盖层在 WebGPU 上原本要把引擎的顺序数组镜像进自己的 R32U 纹理。用探针驱动 sorter 每帧产出
+新顺序（5M 模型）实测：**5 秒内 45 次纹理写入、合计 900MB（180MB/s）**，而 WebGL2 路径完全没有这笔开销
+（它直接用引擎的顺序纹理）。改为**恒等映射只播种一次**：覆盖层用"第 i 个点 = 第 i 个 splat"的纹理，
+不再跟随排序（对 1~2px 的圆点来说绘制顺序无关，屏外 splat 本来就被裁掉、隐藏的由状态纹理跳过），
+并保持 `drawPoints = 全部 splat`，点云依旧完整。修后同一测量：**1 次 / 20MB**（仅初次播种）。
+期间试过"完全不要纹理、直接用 `gl_VertexID/6` 当下标"，但那会改变材质的绑定布局，
+WebGPU 报 `Attribute shader location (0) is used more than once` + `No bind group set at group index 1`，
+整帧变黑，已回退到纹理方案（绑定布局保持不变）。
+
+**（2）PiP 消失 = 我在上一轮把它在 WebGPU 上关掉了；而它真正的病根是一个错误的调用序列。**
+PiP 手动调用 `before(); execute(); after();` 来渲染自己的那一遍，**跳过了 `device.startRenderPass()`**。
+引擎的 `RenderPass.render()` 是 `before() → device.startRenderPass() → execute() → device.endRenderPass() → after()`：
+WebGPU 必须由 `startRenderPass` 创建 render pass encoder，所以手动序列下第一个 draw 就
+`Cannot read properties of null (reading 'setVertexBuffer')`（WebGL2 之所以能用，是因为清理遍已经把目标绑好了）。
+改成 `this.pipRenderPass.render()` 之后，配合本轮的 `captureToCanvasWebGPU()`（异步回读 + putImageData）、
+`clearColor` 类型修复、以及 order storage buffer 支持，**PiP 在两个后端都能出图**：
+`verify-pip-preview.cjs` 双后端 6/6 —— 预览窗口 81.3%（WebGPU）/ 81.4%（WebGL2）有颜色，
+私有排序管线分别是 buffer / texture，关闭预览后主视角 **0 像素差异**。
+
+**验证**：`npm run check` 全绿；`verify:diag` 7/7；`verify-model-renders` 双后端 0 失败；
+`verify-centers-overlay` 双后端 2250px（0.92%）逐像素一致；`verify-selection-depth`、
+`verify-edit-hide`、`verify-effects`、`verify-webgpu-fallback` 全部通过。
+
+

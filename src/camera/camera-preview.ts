@@ -640,9 +640,14 @@ class CameraPreview extends Element {
                 cropModified = true;
 
                 this.pipClearPass.render();
-                this.pipRenderPass.before();
-                this.pipRenderPass.execute();
-                this.pipRenderPass.after();
+                // render() (not before/execute/after) so the device brackets the pass:
+                // RenderPass.render() calls device.startRenderPass()/endRenderPass() around
+                // execute(). Calling the three phases by hand left the WebGPU render-pass
+                // encoder unset, so the first draw inside the pass threw
+                // "Cannot read properties of null (reading 'setVertexBuffer')" and the whole
+                // preview frame was dropped (WebGL2 tolerated it because the clear pass had
+                // already bound the target).
+                this.pipRenderPass.render();
                 this.captureToCanvas();
 
                 // Normal-path restore. The finally also covers the exception path,
@@ -1126,15 +1131,11 @@ class CameraPreview extends Element {
 
     private updateVisibility() {
         const timelineOpen = this.scene.events.invoke('statusBar.panel') === 'timeline';
-        // The private sort pipeline itself now works on WebGPU (pipOrder is an order
-        // storage buffer there, see _ensurePipSort), but rendering the preview through its
-        // own RenderPassForward still throws on that backend: a draw inside the pass hits
-        // "Cannot read properties of null (reading 'setVertexBuffer')", so the canvas copy
-        // never runs. The previewed image itself is correct — reading the preview render
-        // target back shows the model — so this is the last blocker, not a lost cause.
-        // Keep the preview off there instead of spamming that error every few frames.
-        const webgpu = this.scene.graphicsDevice?.isWebGPU === true;
-        this.enabled = timelineOpen && this.hasTrack && !webgpu;
+        // Both backends run the preview now: the private sort pipeline uses an order texture
+        // on WebGL2 and an order storage buffer on WebGPU (see _ensurePipSort), the pass is
+        // executed through RenderPass.render() so the device brackets it on WebGPU too, and
+        // the canvas copy has a WebGPU readback path (captureToCanvasWebGPU).
+        this.enabled = timelineOpen && this.hasTrack;
 
         if (this.container) {
             this.container.style.display = this.enabled ? 'block' : 'none';

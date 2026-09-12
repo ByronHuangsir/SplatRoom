@@ -123,7 +123,14 @@ const vertexShader = /* glsl */ `
             uint splatIndex = uint(gl_VertexID);
         #endif
 
-        // look up splat ID from order texture using the splat index
+        // Which splat this vertex belongs to. WebGL2 reads the engine's order texture (the
+        // sorted, visible set). WebGPU has no order texture — the engine sorts into a storage
+        // buffer there — so the host hands us a texture seeded with the identity mapping
+        // (splat i at slot i) instead: mirroring the real sorted order would cost a ~20 MB
+        // upload per sort (measured: 180 MB/s while orbiting a 5M splat model) for a
+        // diagnostic overlay. Holding the identity mapping means drawing every splat in
+        // storage order, which for center dots is visually equivalent (off-screen splats are
+        // clipped, deleted ones are skipped by the state check below).
         ivec2 orderUV = ivec2(int(splatIndex % splatTextureSize), int(splatIndex / splatTextureSize));
         uint splatId = texelFetch(splatOrder, orderUV, 0).r;
 

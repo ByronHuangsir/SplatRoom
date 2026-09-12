@@ -42,12 +42,6 @@ class SplatOverlay extends Element {
     // (a load that hasn't finished setting the instance up): the overlay renders
     // nothing until it becomes ready
     orderReady = false;
-    // WebGPU only: the sorter writes the sorted order into a storage buffer there and the
-    // instance has no order texture at all, so the overlay keeps its own R32U mirror of the
-    // sorter's CPU-side order array (see ensureGpuOrderTexture/syncGpuOrder)
-    private gpuOrderTexture: Texture | null = null;
-    // the sorter's order buffer already mirrored into gpuOrderTexture
-    private gpuOrderSource: ArrayBuffer | null = null;
     // reused scratch matrix for the WebGPU view-projection material parameter
     private viewProjMat = new Mat4();
 
@@ -74,6 +68,8 @@ class SplatOverlay extends Element {
             // custom materials on WebGPU, so take the transform from material parameters
             // (the same workaround the splat material uses via uSplatView/uSplatViewProj)
             this.material.setDefine('GSPLAT_OVERLAY_PARAM_MATRICES', '');
+            // each center is drawn as a quad there (six vertices per splat)
+            this.quadSprites = true;
         }
 
         this.material.blendType = BLEND_NORMAL;
@@ -139,20 +135,20 @@ class SplatOverlay extends Element {
         this.entity.destroy();
     }
 
-    // the number of splat centers the overlay draws. on WebGPU each one is a quad, so the
-    // mesh needs six vertices per center (see GSPLAT_QUAD_SPRITES in the shader).
+    // WebGPU draws each center as a quad, so the mesh needs six vertices per center
+    // (see GSPLAT_QUAD_SPRITES in the shader)
     drawPoints = 0;
 
-    private setDrawCount(count: number) {
-        this.drawPoints = count;
-        this.mesh.primitive[0].count = count * (this.scene.graphicsDevice.isWebGPU ? 6 : 1);
-    }
+    private quadSprites = false;
 
-    // WebGPU only: create (or resize) the R32U order texture the overlay's shader reads
-    // instead of the instance order texture the engine only provides on WebGL2. contents
-    // start as the identity mapping so centers are drawable before the first sort lands.
-    // created on demand (it costs four bytes per splat) from onPreRender, so selecting a
-    // splat does not allocate it while centers are not on screen.
+    // WebGPU only: the order texture the overlay's shader reads. The engine sorts into a
+    // storage buffer on that backend and provides no order texture, so this is seeded with
+    // the identity mapping (splat i in slot i) and then left alone: mirroring the real
+    // sorted order cost a ~20 MB upload per sort (measured: 180 MB/s while orbiting a 5M
+    // splat model), while center dots do not depend on the draw order at all. Built on
+    // demand (four bytes per splat) so it only exists while centers are actually drawn.
+    private gpuOrderTexture: Texture | null = null;
+
     private ensureGpuOrderTexture() {
         const dims = (this.splat?.entity as any)?.gsplat?.instance?.resource?.textureDimensions;
         if (!dims) {
@@ -183,24 +179,12 @@ class SplatOverlay extends Element {
         texture.unlock();
 
         this.gpuOrderTexture = texture;
-        // force the next frame to mirror the sorter's current order over the identity data
-        this.gpuOrderSource = null;
         return texture;
     }
 
-    // WebGPU only: mirror the sorter's order array into the order texture. the sorter keeps
-    // it in `orderData`, a fresh ArrayBuffer per sort, so comparing that reference is enough
-    // to know whether the mirror is stale (and keeps the upload off the non-centers path).
-    private syncGpuOrder(texture: Texture) {
-        const source = (this.sorter as any)?.orderData as ArrayBuffer | undefined;
-        if (!source || source === this.gpuOrderSource) {
-            return;
-        }
-        this.gpuOrderSource = source;
-        const order = new Uint32Array(source);
-        const data = texture.lock() as Uint32Array;
-        data.set(order.subarray(0, Math.min(order.length, data.length)));
-        texture.unlock();
+    private setDrawCount(count: number) {
+        this.drawPoints = count;
+        this.mesh.primitive[0].count = count * (this.quadSprites ? 6 : 1);
     }
 
     attach(splat: Splat) {
@@ -225,8 +209,7 @@ class SplatOverlay extends Element {
             return;
         }
 
-        // set up order texture uniforms (WebGPU gets them from onPreRender, once the
-        // mirror exists)
+        // set up order texture uniforms (WebGL2 only: WebGPU indexes splats directly)
         if (!isWebGPU) {
             material.setParameter('splatOrder', orderTexture);
             material.setParameter('splatTextureSize', orderTexture.width);
@@ -259,7 +242,13 @@ class SplatOverlay extends Element {
         // subscribe to sorter updates for dynamic count, caching the sorter so
         // detach() can unsubscribe from this exact instance
         this.onSorterUpdated = () => {
-            this.setDrawCount(instance.sorter.pendingSorted?.count ?? this.drawPoints);
+            // WebGL2 draws the sorter's visible prefix of its (sorted) order texture. The
+            // WebGPU identity texture maps draw index to splat index, so the sorter's count
+            // would describe a different set of indices there — draw every splat instead
+            // (off-screen ones are clipped).
+            if (!isWebGPU) {
+                this.setDrawCount(instance.sorter.pendingSorted?.count ?? this.drawPoints);
+            }
         };
         this.sorter = instance.sorter;
         this.sorter.on('updated', this.onSorterUpdated);
@@ -281,10 +270,9 @@ class SplatOverlay extends Element {
         this.sorter = null;
         this.onSorterUpdated = null;
 
-        // release the WebGPU order mirror; it is rebuilt on demand (four bytes per splat)
+        // release the identity order texture (rebuilt on demand, four bytes per splat)
         this.gpuOrderTexture?.destroy();
         this.gpuOrderTexture = null;
-        this.gpuOrderSource = null;
 
         this.entity.remove();
         this.splat = null;
@@ -333,10 +321,9 @@ class SplatOverlay extends Element {
             // refreshes them lazily when it syncs the render view — so build the
             // view-projection here, the same way Splat.updateGpuCameraUniforms does.
             if (scene.graphicsDevice.isWebGPU) {
-                // the order mirror is only needed for the frames we actually draw
+                // the identity order texture is only needed for the frames we actually draw
                 const orderTexture = this.ensureGpuOrderTexture();
                 if (orderTexture) {
-                    this.syncGpuOrder(orderTexture);
                     material.setParameter('splatOrder', orderTexture);
                     material.setParameter('splatTextureSize', orderTexture.width);
                 }

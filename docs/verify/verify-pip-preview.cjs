@@ -183,22 +183,19 @@ const pipStats = async (page) => {
             { name: 'model visible before the preview', pass: before.litPct > 20, detail: `${before.litPct}% lit, mean ${before.meanLum}` },
             { name: 'camera track created', pass: state.hasTrack === true, detail: `hasTrack=${state.hasTrack}` },
             {
-                name: 'preview state matches the backend',
-                // WebGPU: preview disabled (its RenderPassForward draw throws there, see
-                // updateVisibility). WebGL2: enabled and rendering through its own pipeline.
-                pass: state.enabled === (backend === 'webgl2'),
+                name: 'preview enabled on this backend',
+                pass: state.enabled === true,
                 detail: `enabled=${state.enabled} on ${backend}, container=${state.container}`
             },
             {
-                name: 'private pipeline builds on this backend',
-                pass: backend === 'webgl2' ?
-                    (state.pipEntries === 1 && state.pipOrderKind === 'texture') :
-                    true, // not built while the preview is disabled
+                name: 'private sort pipeline built',
+                // WebGL2 keeps its own R32U order texture, WebGPU an order storage buffer
+                pass: state.pipEntries === 1 && state.pipOrderKind === (backend === 'webgpu' ? 'buffer' : 'texture'),
                 detail: `entries=${state.pipEntries} pipOrder=${state.pipOrderKind} mainOrder=${state.mainOrderKind}`
             },
             {
-                name: backend === 'webgl2' ? 'preview window shows the model' : 'preview window stays hidden',
-                pass: backend === 'webgl2' ? (!!pip && pip.colourfulPct > 5) : pip === null,
+                name: 'preview window shows the model',
+                pass: !!pip && pip.colourfulPct > 5,
                 detail: pip ? `${pip.colourfulPct}% colourful, ${pip.litPct}% lit in ${JSON.stringify(pip.box)}` : 'preview window not visible'
             },
             {
