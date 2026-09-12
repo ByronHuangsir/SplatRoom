@@ -158,6 +158,12 @@ Color target has no corresponding fragment stage output but writeMask (...) is n
   `viewMatrix = 主相机节点 getWorldTransform() 的逆`，`projectionMatrix` 复用 `mainCamera.camera.calculateProjection(matrix, w, h)`
   回调（`camera.ts` 已设置该回调），或把上传时机挪到引擎相机同步之后（如 `app.on('prerender')` 之后/渲染前一次 flush）。
   算好后用 6.2 的读数法先验证数值，再恢复真实着色器看画面。
+- 补充读数（材质参数路径，第二轮实测）：`uSplatView` **确实进到着色器了**（`view[3][2] ≈ 0.23`，与相机位置一致），
+  但 `uSplatProj` 在着色器里读出来是 **无效值**（`proj[0][0]*0.25+0.5` 被 clamp 到 0 → ≤ -2 或 NaN），
+  与 `cam.projectionMatrix.data` 在 `onPreRender` 时刻读出**全 0** 一致。
+  引擎 `Camera.projectionMatrix` 与 `viewMatrix` 都是"脏标记 + 懒重算"的 getter（`camera.js` L395 / `_updateViewProjMat`），
+  本仓库的自研相机路径下这个懒重算在 `onPreRender` 时机没有发生，因此**必须自己算投影矩阵**（或调用引擎的
+  `updateProjection`/`_updateViewProjMat` 等入口）后再上传。
 
 ### 6.4 复现用的调试工具（`_tmp/`，未入库）
 
