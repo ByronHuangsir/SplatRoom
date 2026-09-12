@@ -250,3 +250,14 @@ opaqueCount: 0  transparentCount: 1
 下一轮第一件事：用 `_tmp/pass-probe.cjs`（已支持打印每个 pass 的 `loadOp/storeOp`）在 `prepareId()` 期间抓一次
 pass 描述，确认是不是 `discard`；若是，则在 `Picker.prepareId` 里显式保留该附件（或临时关闭 transient 优化）。
 另记：`renderer.gsplatDirector` 在 WebGPU 下为 true（WebGL2 下为 false），这条渲染路径差异也要在拾取/居中点覆盖层上重新核对。
+### 6.8 第五轮：WebGPU 上的选择与编辑功能实测通过
+
+| 验证 | 命令 | 结果 |
+| --- | --- | --- |
+| 选择（矩形 + footprint + 深度） | `node docs/verify/verify-selection-depth.cjs "http://localhost:3621/?gpu=webgpu"` | **failed=0 / errors=0**：centers 573 ≤ footprint0.35 619 ≤ footprint1.00 742；toggle 还原 0.35（与 WebGL2 同一套序关系断言） |
+| 编辑状态（隐藏全部） | `node docs/verify/verify-edit-hide.cjs "http://localhost:3621/?gpu=webgpu"` | 视口彩色像素 **99.3% → 4.1%**，均值亮度 114 → 8（模型从画面消失）；WebGL2 对照组同为 99.3% → 4.1% |
+
+结论：拾取底层（id/depth 回读）+ 选择上层（mask/footprint）+ 编辑状态（`splatState` 纹理在 WGSL 着色器里生效）在 WebGPU 下都已工作；
+`verify-edit-hide.cjs` 已作为长期验证脚本入库（它的脚本内断言计数还在修，功能读数已双后端一致）。
+
+剩余验证项：颜色分级 / 裁剪盒 / 粒子特效 / 变换调色板 / 选中描边（RT1）/ 居中点覆盖层（orderBuffer）/ PiP / 导出。
