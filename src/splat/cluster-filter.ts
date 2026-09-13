@@ -1,4 +1,4 @@
-import { estimateCellSize } from './floater-removal';
+import { estimateSpacing } from './floater-removal';
 import { Splat } from './splat';
 import { State } from './splat-state';
 
@@ -15,10 +15,16 @@ import { State } from './splat-state';
  *   small   —— 删除小于阈值的簇（阈值 = 最大簇点数的百分比 minPct），例如删掉所有"碎屑团"
  *   largest —— 只保留最大簇，其余全算（等价于"只留主体"，忽略阈值）
  *
- * 体素边长**跟着点云自身的疏密走**：以"中位半径 × 0.3"估计典型点间距，再乘一个系数
- * （detail 0 → 3.0×，50 → 1.75×，100 → 0.5×）。这样默认情况下同一片点云天然是一个连通簇
- * ——如果按模型对角线定死体素大小，稀疏点云会被切成一堆互不相连的小格，簇统计就没有意义了；
- * 而把 detail 拉到最细，就是主动要求"按更细的间距重新分团"（会切出更多簇，这是预期行为）。
+ * 体素边长**跟着点云自身的疏密走**：以最近邻距离的中位数估计典型点间距（estimateSpacing），再乘一个
+ * 系数（detail 0 → 24×，50 → 16×，100 → 8×）。这个区间是在用户提供的真实扫描上标定的
+ * （931,720 高斯，间距 0.0018）：系数 8 时最大簇只占 51.9%（点云表面的采样缝隙把主体切碎了），
+ * 12 → 92.7%，16 → 99.5%，24 → 99.8%，32 → 100%（基本只剩一个簇，参数失去意义）。所以默认取 16
+ * ——主体是一个簇、同时还能挑出真正游离的小团；往"精细"方向拉到 8 是用户主动要求按更细的间距重新
+ * 分团（会切出大量碎簇，这是预期行为）。
+ *
+ * 注意这里以前用的是"中位半径 × 0.3"（estimateCellSize）。那个估计在真实扫描上给的是**场景尺度**
+ * 而不是采样间距（实测 0.371 vs 真值 0.00164，差 226 倍），于是体素大得把所有东西并成一个簇、
+ * 参数怎么拉都没反应；顺带它也是"去浮云"在真实数据上选不中任何东西的根因，两者一起改掉了。
  * 只统计非删除/非锁定的高斯（与去浮云一致），返回的掩码按 splat 的原始索引对齐。
  */
 
@@ -95,12 +101,12 @@ export function detectClusters(splat: Splat, options: ClusterOptions = {}): Clus
     }
 
     const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2 + (maxZ - minZ) ** 2) || 1;
-    // voxel size follows the point cloud's own density: median radius estimate * factor, where
-    // the factor runs from 3x (coarse) down to 0.5x (fine) across the detail slider. It is raised
-    // if the model would need more cells per axis than the packed key can address.
-    const spacing = Math.max(estimateCellSize(x, y, z, numSplats), diag * 1e-6);
+    // voxel size follows the point cloud's own sampling density (median nearest-neighbour distance)
+    // times a factor: 24x (coarse) down to 8x (fine) across the detail slider. Calibrated on a real
+    // 931k scan, where 8x shreds the main body into 111k clusters but 16x keeps it at 99.5%.
+    const spacing = Math.max(estimateSpacing(x, y, z, numSplats, valid), diag * 1e-6);
     const extent = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || diag;
-    const voxelSize = Math.max(spacing * (3.0 - (detail / 100) * 2.5), extent / KEY_LIMIT, diag * 1e-6);
+    const voxelSize = Math.max(spacing * (24 - (detail / 100) * 16), extent / KEY_LIMIT, diag * 1e-6);
 
     // ---- 2) voxelize: voxel key -> voxel index, and point -> voxel index ----
     // coordinates are relative to the lower bound, so they are non-negative and small enough to

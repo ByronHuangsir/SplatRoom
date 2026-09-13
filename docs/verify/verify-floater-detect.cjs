@@ -5,14 +5,18 @@
 //   main        3000 gaussians, a dense legitimate cloud
 //   attached      40 gaussians ON its +X face, low opacity + 10x the scale  -> surface detail
 //   strays         5 single gaussians alone in space                        -> real floaters
-//   blobs      12/25/40 gaussian clumps 3 units away                        -> the cluster filter's job
+//   blobs      12/25/40 gaussian clumps 3 units away                        -> detached islands
 //
-// The detector used to OR four loose rules: transparency, abnormal volume, low neighbour count and
-// distance from the centroid. The first two hit the surface patch (measured: all 40 selected, 117
-// in total), so it selected "unusual looking" gaussians instead of floating ones. It now keys on
-// "is there anything right next to this gaussian", which is blind to how big or transparent a
-// surface gaussian is. This harness pins that down: exactly the strays on the floater model, and
-// nothing at all on a clean model.
+// The detector used to OR four loose rules (transparency, abnormal volume, low neighbour count,
+// distance from the centroid); the first two hit the surface patch (measured: all 40 selected, 117
+// in total). It now keys on ONE thing - how empty the space around a gaussian is, at a scale tied to
+// the point spacing (34.5x the median nearest-neighbour distance) - so all 82 genuinely isolated
+// gaussians are selected (5 strays + the 77 points of the detached islands) and nothing on the
+// surface is. Detached islands used to be left to the cluster filter; the density rule catches them
+// too now, and the cluster filter keeps its own size-threshold semantics.
+//
+// The scale fix itself (a real 931k scan used to select almost nothing because the "point spacing"
+// estimate was the scene size, 226x too large) is pinned separately by verify-floater-scale.cjs.
 //
 // usage: node docs/verify/verify-floater-detect.cjs "<url>" [model]
 const fs = require('fs');
@@ -86,16 +90,16 @@ const inspect = async (page, model) => {
         const z = splat.splatData.getProp('z');
         let selected = 0;
         let nearSurface = 0;      // the attached patch sits at x ~ 0.34
-        let strays = 0;           // beyond 1.5 units from the origin
+        let detached = 0;         // strays and detached islands: beyond 1.5 units from the origin
         for (let i = 0; i < st.length; i++) {
             if (!(st[i] & 1)) continue;
             selected++;
             const x0 = x[i]; const y0 = y[i]; const z0 = z[i];
             const r = Math.sqrt(x0 * x0 + y0 * y0 + z0 * z0);
             if (x0 > 0.3 && x0 < 0.4 && Math.abs(y0) < 0.3 && Math.abs(z0) < 0.3) nearSurface++;
-            else if (r > 1.5) strays++;
+            else if (r > 1.5) detached++;
         }
-        return { numSplats: splat.splatData.numSplats, countText: text, breakdown: title, selected, nearSurfacePicked: nearSurface, strayPicked: strays, buttonLayout: layout };
+        return { numSplats: splat.splatData.numSplats, countText: text, breakdown: title, selected, nearSurfacePicked: nearSurface, detachedPicked: detached, buttonLayout: layout };
     });
 };
 
@@ -139,7 +143,7 @@ const inspect = async (page, model) => {
             return { numSplats: splat.splatData.numSplats, countText: text };
         });
 
-        const expectedStrays = gen.expected.floaterDetectorSelects;
+        const expectedSelects = gen.expected.floaterDetectorSelects;
         const layout = floaterRun.buttonLayout;
         const allButtons = layout.flat();
         const rowWidthsEqual = layout.length > 0 &&
@@ -148,14 +152,21 @@ const inspect = async (page, model) => {
 
         const checks = [
             {
-                name: 'the detector selects exactly the isolated strays',
-                pass: floaterRun.selected === expectedStrays,
-                detail: `selected ${floaterRun.selected} of ${floaterRun.numSplats}, expected ${expectedStrays} (panel said ${floaterRun.countText}, breakdown ${floaterRun.breakdown})`
+                name: 'the detector selects every isolated gaussian (strays + detached islands)',
+                pass: floaterRun.selected === expectedSelects && floaterRun.detachedPicked === expectedSelects,
+                detail: `selected ${floaterRun.selected} of ${floaterRun.numSplats}, expected ${expectedSelects} ` +
+                    `(${gen.expected.strays} strays + ${gen.expected.detachedIslands} detached-island points; ` +
+                    `classified ${floaterRun.detachedPicked} beyond r=1.5) (panel said ${floaterRun.countText}, breakdown ${floaterRun.breakdown})`
             },
             {
                 name: 'no surface-hugging gaussian is selected',
                 pass: floaterRun.nearSurfacePicked === 0,
                 detail: `${floaterRun.nearSurfacePicked} of the ${gen.surfaceHugging} low-opacity / oversized gaussians on the surface were picked (used to be all of them)`
+            },
+            {
+                name: 'the panel count matches the selection it applies',
+                pass: floaterRun.countText === `${floaterRun.selected}`,
+                detail: `panel showed ${floaterRun.countText}, selecting applied ${floaterRun.selected} rows (detection is exact, no sampling)`
             },
             {
                 name: 'a clean model with no floaters selects nothing',

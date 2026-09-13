@@ -11,9 +11,10 @@ import { Splat } from '../splat/splat';
  * Floater Removal Panel — 去浮云 + 连通簇过滤。
  *
  * 去浮云：开关 + 单个「灵敏度」滑条（0-100，默认 40）+ 检出明细 + 「仅选中 / 移除浮云」两个动作。
- * 灵敏度内部联动 透明度/体积/隔离/距离 四策略（见 splat/floater-removal.ts）。
+ * 判据只有一个：以该点为中心、半宽 = 34.5 × 典型点间距的方块里有几个邻居；低于"模型自身典型密度 ×
+ * 比例（灵敏度）"就算浮云（见 splat/floater-removal.ts，里面有真实扫描上的标定数据）。
  *
- * 连通簇：把高斯中心按体素量化后做 6 邻域连通分量（思路对齐 PlayCanvas splat-transform 的
+ * 连通簇：把高斯中心按体素量化后做 26 邻域连通分量（思路对齐 PlayCanvas splat-transform 的
  * `--filter-cluster`），两种模式：「删除小簇」（小于阈值的簇）与「保留最大簇」（除最大簇外全算）。
  * 见 splat/cluster-filter.ts。
  *
@@ -55,8 +56,8 @@ class FloaterPanel extends Container {
     private _enabledToggle: BooleanInput;
     private _fltEnabled = true;
 
-    private _sensitivity = 40;
-    private _clusterDetail = 50;      // 0..100 -> voxel size = diagonal / lerp(64, 1024)
+    private _sensitivity = 50;
+    private _clusterDetail = 50;      // 0..100 -> voxel size = spacing x lerp(24, 8); higher = finer
     private _clusterMinPct = 2;       // clusters smaller than this % of the largest are "small"
     private _clusterModeValue = 'small';
     private _detectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -336,7 +337,7 @@ class FloaterPanel extends Container {
         const targets: Target[] = [];
         for (const splat of this._targetSplats()) {
             try {
-                const result = detectFloaters(splat, this._sensitivity, Infinity);
+                const result = detectFloaters(splat, this._sensitivity);
                 targets.push({ splat, mask: result.mask });
             } catch (e) {
                 // skip models whose data cannot be read
@@ -381,24 +382,26 @@ class FloaterPanel extends Container {
             return;
         }
 
-        // preview: strided sample per model, so the count reacts while dragging the sliders
+        // The detection itself is exact (the count grid has to cover every gaussian anyway, so
+        // sampling the candidates would save nothing and would mis-report small counts); the
+        // debounce above is what keeps slider drags responsive.
         try {
             let count = 0;
-            const details = { opacity: 0, volume: 0, isolation: 0, distance: 0 };
+            let radius = 0;
+            let limit = 0;
+            let reference = 0;
             for (const splat of splats) {
-                const result = detectFloaters(splat, this._sensitivity, 8000);
+                const result = detectFloaters(splat, this._sensitivity);
                 count += result.count;
-                details.opacity += result.details.opacity;
-                details.volume += result.details.volume;
-                details.isolation += result.details.isolation;
-                details.distance += result.details.distance;
+                radius = Math.max(radius, result.details.radius);
+                reference = Math.max(reference, result.details.reference);
+                limit = Math.max(limit, result.details.limit);
             }
             this._resultLabel.text = `${count}`;
             this._resultLabel.dom.title = i18n.t('panel.floater.details', {
-                opacity: details.opacity,
-                volume: details.volume,
-                isolation: details.isolation,
-                distance: details.distance
+                radius: radius.toPrecision(3),
+                limit,
+                reference
             });
         } catch (e) {
             this._resultLabel.text = '!';

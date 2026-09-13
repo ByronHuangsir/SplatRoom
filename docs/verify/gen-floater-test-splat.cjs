@@ -7,7 +7,15 @@
 //                 the old detector keyed on: low opacity and a much larger scale. These are
 //                 surface detail, NOT floaters - selecting them is the bug this model guards.
 //   blobs         12 / 25 / 40 gaussians at 3 units out on +X / +Y / +Z, well clear of everything.
-//                 These are real floaters and must be selected: 77 in total.
+//   strays         5 single gaussians alone in space.
+//
+// The detector keys on ONE thing now: how empty the space around a gaussian is, measured at a scale
+// tied to the point spacing (see splat/floater-removal.ts). Everything genuinely isolated qualifies,
+// so the 5 strays AND the 77 points of the detached islands are selected (82), while the surface
+// patch and the main cloud are not. Detached islands used to be left to the connected-cluster filter;
+// the density rule now catches them too, and the cluster filter is kept for its own semantics
+// ("delete clusters below a size threshold" / "keep the largest cluster only", which the density rule
+// has no notion of).
 //
 // usage: node docs/verify/gen-floater-test-splat.cjs [outPath]
 const fs = require('fs');
@@ -133,7 +141,10 @@ console.log(JSON.stringify({
     strays: STRAYS,
     floaterBlobs: BLOBS.reduce((n, b) => n + b.count, 0),
     expected: {
-        floaterDetectorSelects: STRAYS,                                    // 去浮云: strays only
+        // 去浮云 的密度判据：空间上真正孤立的东西全都算，所以是 5 个散点 + 77 个游离小团的点
+        floaterDetectorSelects: STRAYS + BLOBS.reduce((n, b) => n + b.count, 0),
+        strays: STRAYS,
+        detachedIslands: BLOBS.reduce((n, b) => n + b.count, 0),
         mustNotSelect: ATTACHED,                                           // surface detail
         clusterFilterSelects: BLOBS.reduce((n, b) => n + b.count, 0) + STRAYS   // 连通簇: patches + strays
     }
