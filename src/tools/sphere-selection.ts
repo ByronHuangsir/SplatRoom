@@ -167,7 +167,7 @@ class SphereSelection {
 
         const gizmo = new ShapeTransformGizmo(events, scene, {
             rotate: false,
-            uniformScale: true,
+            scaleHandles: 'axes',
             lowerBoundScale: new Vec3(0.02, 0.02, 0.02),
             onTransformStart: () => {
                 dragState = captureState();
@@ -175,9 +175,19 @@ class SphereSelection {
             },
             onTransform: (mode) => {
                 if (mode === 'scale') {
-                    // the pivot's uniform scale is the sphere's diameter;
-                    // the radius setter refreshes the bound
-                    sphere.radius = sphere.pivot.getLocalScale().x * 0.5;
+                    // The sphere's only size parameter is its radius, so whatever handle is dragged
+                    // (any of the three axis boxes or the centre box) scales it UNIFORMLY: the
+                    // largest component of the pivot's local scale is the one the user just
+                    // changed, and the radius setter writes all three axes back to the diameter.
+                    //
+                    // Before this, the scale gizmo offered only its uniform centre handle, and that
+                    // handle turned out to be unusable in practice: it is about 8 px across at the
+                    // default gizmo size and drags on it produced no radius change at all (measured
+                    // by dragging with real mouse input at seven offsets around the centre - the box
+                    // volume, which keeps its axis handles, resized from the same gesture). So the
+                    // user could not set the sphere's size with the gizmo at all.
+                    const s = sphere.pivot.getLocalScale();
+                    sphere.radius = Math.max(s.x, s.y, s.z) * 0.5;
                 } else {
                     sphere.moved();
                 }

@@ -68,10 +68,21 @@ const fragmentShader = /* glsl */ `
     // footprint. The footprint is measured from the screen-space derivative of the direction
     // to the surface point rather than of the angles themselves, because the azimuth wraps at
     // +-180 degrees and a derivative across that seam would be meaningless.
+    //
+    // A third fix came from a user report: an arc spacing of 0.5 world units on a SMALL sphere
+    // covers more than a full turn (a radius of 0.05 puts the meridians 1146 degrees apart), so
+    // the whole sphere showed one meridian and one parallel - "only two lines remain". The
+    // spacing is now capped at MAX_STRIP_SPACING_DEG, which keeps at least 12 meridians and 6
+    // parallels on any sphere whatever its radius, and the silhouette is drawn on top with a
+    // constant screen-space width (rimCoverage below) so the extent always reads.
     const float STRIP_ARC = 0.5;
     const float STRIP_WIDTH = 0.03;
     const float MIN_LINE_SPACING_PX = 7.0;
     const float COVERAGE_CUTOFF = 0.012;
+    const float MAX_STRIP_SPACING_DEG = 30.0;     // -> >= 12 meridians, >= 6 parallels
+    // silhouette line: about RIM_HALF_PX pixels wide, fading over RIM_FADE_PX more
+    const float RIM_HALF_PX = 1.0;
+    const float RIM_FADE_PX = 1.25;
 
     bool writeDepth(float alpha) {
         vec2 uv = fract(gl_FragCoord.xy / 32.0);
@@ -93,7 +104,8 @@ const fragmentShader = /* glsl */ `
     // screen footprint is 'degPerPixel'
     float stripCoverage(vec2 ae, vec2 degPerPixel) {
         float deriv = max(degPerPixel.x, degPerPixel.y);
-        float base = 180.0 / (3.14159265 * max(sphere.w, 1e-4));   // arc length -> degrees
+        // arc length -> degrees, capped so a small sphere still shows a full grid
+        float base = min(180.0 / (3.14159265 * max(sphere.w, 1e-4)), MAX_STRIP_SPACING_DEG);
 
         float level = max(0.0, log2(max(deriv * MIN_LINE_SPACING_PX / base, 1e-6)));
         float level0 = floor(level);
@@ -106,6 +118,14 @@ const fragmentShader = /* glsl */ `
         float cov1 = max(lineCoverage(ae.x, degPerPixel.x, spacing1),
                          lineCoverage(ae.y, degPerPixel.y, spacing1));
         return mix(cov0, cov1, blend);
+    }
+
+    // coverage of the silhouette, at a constant width in screen space: 'rim' is 0 exactly on the
+    // silhouette (where the surface normal is perpendicular to the view ray) and grows inwards,
+    // so dividing by its screen-space rate turns it into a distance in pixels
+    float rimCoverage(float rim, float rimFw) {
+        float pixels = rim / max(rimFw, 1e-9);
+        return 1.0 - smoothstep(RIM_HALF_PX, RIM_HALF_PX + RIM_FADE_PX, pixels);
     }
 
     void main() {
@@ -131,18 +151,25 @@ const fragmentShader = /* glsl */ `
         // private variable, so a branch that reads it counts as non-uniform.
         vec3 frontRel = (worldNear + rayDir * t0) - sphere.xyz;
         vec3 backRel = (worldNear + rayDir * t1) - sphere.xyz;
-        vec2 frontAe = calcAzimuthElev(normalize(frontRel));
-        vec2 backAe = calcAzimuthElev(normalize(backRel));
+        vec3 frontN = normalize(frontRel);
+        vec3 backN = normalize(backRel);
+        vec2 frontAe = calcAzimuthElev(frontN);
+        vec2 backAe = calcAzimuthElev(backN);
         float radToDeg = 180.0 / 3.14159265;
-        vec2 frontStep = vec2(length(fwidth(normalize(frontRel))) * radToDeg);
-        vec2 backStep = vec2(length(fwidth(normalize(backRel))) * radToDeg);
+        vec2 frontStep = vec2(length(fwidth(frontN)) * radToDeg);
+        vec2 backStep = vec2(length(fwidth(backN)) * radToDeg);
+        // 0 exactly on the silhouette, growing inwards
+        float frontRim = 1.0 - abs(dot(frontN, rayDir));
+        float backRim = 1.0 - abs(dot(backN, rayDir));
+        float frontRimFw = fwidth(frontRim);
+        float backRimFw = fwidth(backRim);
 
         if (!hit) {
             discard;
         }
 
-        float frontCov = t0 > 0.0 ? stripCoverage(frontAe, frontStep) : 0.0;
-        float backCov = stripCoverage(backAe, backStep);
+        float frontCov = t0 > 0.0 ? max(stripCoverage(frontAe, frontStep), rimCoverage(frontRim, frontRimFw)) : 0.0;
+        float backCov = max(stripCoverage(backAe, backStep), rimCoverage(backRim, backRimFw));
 
         if (frontCov > COVERAGE_CUTOFF && frontCov >= backCov) {
             vec3 frontPos = worldNear + rayDir * t0;

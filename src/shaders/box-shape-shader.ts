@@ -90,10 +90,23 @@ const fragmentShader = /* glsl */ `
     //   * analytic antialiasing: a line is never thinner than about a pixel, and its edges
     //     fade over the pixel footprint, so what used to be missing sub-pixel lines becomes
     //     a smooth, stable coverage (the same trick as pristineGrid in infinite-grid-shader).
+    //
+    // A third fix came from a user report: with a SMALL volume the fixed 0.5 world spacing left
+    // at most one or two lines inside it, so there was nothing to read the boundary from ("when
+    // the box is set very small only two lines remain"). So:
+    //   * the spacing is now capped per axis at (side length / MIN_STRIPS_PER_AXIS), which keeps
+    //     at least that many lines across every axis at any volume size, and
+    //   * the 12 edges are drawn on top of the strips with a CONSTANT screen-space width
+    //     (edgeCoverage below), so the extent is unambiguous even when the strips are sparse.
     const float STRIP_PERIOD = 0.5;
     const float STRIP_WIDTH = 0.03;
     const float MIN_LINE_SPACING_PX = 7.0;
     const float COVERAGE_CUTOFF = 0.012;
+    const float MIN_STRIPS_PER_AXIS = 4.0;
+    // edge line: about EDGE_HALF_PX pixels wide on each side of the border, fading over
+    // EDGE_FADE_PX more, whatever the zoom level or the volume size
+    const float EDGE_HALF_PX = 1.0;
+    const float EDGE_FADE_PX = 1.25;
 
     bool writeDepth(float alpha) {
         ivec2 uv = ivec2(gl_FragCoord.xy);
@@ -114,36 +127,59 @@ const fragmentShader = /* glsl */ `
         return 1.0 - smoothstep(halfWidth, halfWidth + deriv * 1.5, dist);
     }
 
-    // coverage of the strip pattern at 'pos' (box-metric) whose screen footprint is 'fw',
-    // on a face normal to 'axis' - the strips run along the two other axes
-    float stripCoverage(vec3 pos, vec3 fw, int axis) {
-        // the coarsest-axis footprint decides the level, so no axis of the face aliases
-        float deriv = 0.0;
-        if (axis != 0) deriv = max(deriv, fw.x);
-        if (axis != 1) deriv = max(deriv, fw.y);
-        if (axis != 2) deriv = max(deriv, fw.z);
-
-        float level = max(0.0, log2(max(deriv * MIN_LINE_SPACING_PX / STRIP_PERIOD, 1e-6)));
+    // per-axis strips with the level-of-detail blend: the spacing doubles while the lines would
+    // come closer together than MIN_LINE_SPACING_PX pixels
+    float axisCoverage(float coord, float deriv, float base) {
+        float level = max(0.0, log2(max(deriv * MIN_LINE_SPACING_PX / base, 1e-6)));
         float level0 = floor(level);
         float blend = smoothstep(0.0, 1.0, level - level0);
-        float period0 = STRIP_PERIOD * exp2(level0);
+        float period0 = base * exp2(level0);
         float period1 = period0 * 2.0;
+        return mix(lineCoverage(coord, deriv, period0), lineCoverage(coord, deriv, period1), blend);
+    }
 
-        float cov0 = 0.0;
-        float cov1 = 0.0;
+    // coverage of the strip pattern at 'pos' (box-metric) whose screen footprint is 'fw',
+    // on a face normal to 'axis' - the strips run along the two other axes, each with its own
+    // spacing so a thin box still shows a few lines on its narrow faces
+    float stripCoverage(vec3 pos, vec3 fw, int axis, vec3 periods) {
+        float cov = 0.0;
+        if (axis != 0) cov = max(cov, axisCoverage(pos.x, fw.x, periods.x));
+        if (axis != 1) cov = max(cov, axisCoverage(pos.y, fw.y, periods.y));
+        if (axis != 2) cov = max(cov, axisCoverage(pos.z, fw.z, periods.z));
+        return cov;
+    }
+
+    // spacing per axis: never coarser than STRIP_PERIOD, never so coarse that the axis shows
+    // fewer than MIN_STRIPS_PER_AXIS lines
+    vec3 stripPeriods() {
+        vec3 extents = max(boxLen * 2.0, vec3(1e-5));
+        return min(vec3(STRIP_PERIOD), extents / MIN_STRIPS_PER_AXIS);
+    }
+
+    // coverage of the volume's edges, at a constant width in screen space: 'edge' is the metric
+    // distance to the nearest border of the face, 'edgeFw' how much that distance changes per pixel
+    float edgeCoverage(vec3 metric, vec3 fw, int axis) {
+        vec3 extent = max(boxLen * 2.0, vec3(1e-5));
+        vec3 n = metric / extent;              // -1 at the low face, +1 at the high face
+        vec3 nFw = fw / extent;
+
+        float edge = 1.0;
+        float edgeFw = 0.0;
         if (axis != 0) {
-            cov0 = max(cov0, lineCoverage(pos.x, fw.x, period0));
-            cov1 = max(cov1, lineCoverage(pos.x, fw.x, period1));
+            edge = min(edge, 1.0 - abs(n.x));
+            edgeFw = max(edgeFw, nFw.x);
         }
         if (axis != 1) {
-            cov0 = max(cov0, lineCoverage(pos.y, fw.y, period0));
-            cov1 = max(cov1, lineCoverage(pos.y, fw.y, period1));
+            edge = min(edge, 1.0 - abs(n.y));
+            edgeFw = max(edgeFw, nFw.y);
         }
         if (axis != 2) {
-            cov0 = max(cov0, lineCoverage(pos.z, fw.z, period0));
-            cov1 = max(cov1, lineCoverage(pos.z, fw.z, period1));
+            edge = min(edge, 1.0 - abs(n.z));
+            edgeFw = max(edgeFw, nFw.z);
         }
-        return mix(cov0, cov1, blend);
+
+        float pixels = edge / max(edgeFw, 1e-9);
+        return 1.0 - smoothstep(EDGE_HALF_PX, EDGE_HALF_PX + EDGE_FADE_PX, pixels);
     }
 
     void main() {
@@ -183,8 +219,10 @@ const fragmentShader = /* glsl */ `
             return;
         }
 
-        float frontCov = t0 > 0.0 ? stripCoverage(frontMetric, frontFw, axis0) : 0.0;
-        float backCov = stripCoverage(backMetric, backFw, axis1);
+        float frontCov = t0 > 0.0 ? max(stripCoverage(frontMetric, frontFw, axis0, stripPeriods()),
+                                        edgeCoverage(frontMetric, frontFw, axis0)) : 0.0;
+        float backCov = max(stripCoverage(backMetric, backFw, axis1, stripPeriods()),
+                            edgeCoverage(backMetric, backFw, axis1));
 
         if (frontCov > COVERAGE_CUTOFF && frontCov >= backCov) {
             vec3 frontPos = (matrix_model * vec4(localNear + localDir * t0, 1.0)).xyz;

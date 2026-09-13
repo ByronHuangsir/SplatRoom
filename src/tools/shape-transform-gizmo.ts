@@ -8,8 +8,14 @@ type ShapeGizmoMode = 'translate' | 'rotate' | 'scale' | 'none';
 type ShapeGizmoOptions = {
     // include a rotate gizmo
     rotate: boolean;
-    // restrict the scale gizmo to its uniform center handle
-    uniformScale: boolean;
+    // Which scale handles to offer:
+    //   'all'  - the three axis boxes, the three plane handles and the centre box (free scaling)
+    //   'axes' - the three axis boxes and the centre box only, no plane handles. Used by the
+    //            sphere volume: dragging any of them applies a uniform scale (see
+    //            sphere-selection.ts). The plane handles are dropped because scaling a sphere
+    //            along two axes at once has no meaning, and the centre box alone proved too
+    //            small a target to grab reliably (measured: a ~8 px handle that ignores drags).
+    scaleHandles: 'all' | 'axes';
     // minimum local scale the scale gizmo may apply
     lowerBoundScale: Vec3;
     // a gizmo drag started
@@ -41,10 +47,10 @@ class ShapeTransformGizmo {
         const translate = new TranslateGizmo(scene.camera.camera, scene.gizmoLayer);
 
         const scale = new ScaleGizmo(scene.camera.camera, scene.gizmoLayer);
-        if (options.uniformScale) {
-            // disable everything except uniform scale
-            ['x', 'y', 'z', 'yz', 'xz', 'xy'].forEach((axis) => {
-                scale.enableShape(axis as 'x' | 'y' | 'z' | 'yz' | 'xz' | 'xy', false);
+        if (options.scaleHandles === 'axes') {
+            // keep the axis boxes and the centre box, drop the plane handles (see the option docs)
+            ['yz', 'xz', 'xy'].forEach((axis) => {
+                scale.enableShape(axis as 'yz' | 'xz' | 'xy', false);
             });
         }
         scale.lowerBoundScale.copy(options.lowerBoundScale);

@@ -198,7 +198,7 @@ class BoxSelection {
 
         const gizmo = new ShapeTransformGizmo(events, scene, {
             rotate: true,
-            uniformScale: false,
+            scaleHandles: 'all',
             lowerBoundScale: new Vec3(0.01, 0.01, 0.01),
             onTransformStart: () => {
                 dragState = captureState();
