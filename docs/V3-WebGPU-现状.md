@@ -787,6 +787,41 @@ WebGPU 独有的缺陷，与用户观察一致。
 - 回归：全套 18 个验证脚本 0 失败（含 `verify-shape-selection` 双后端、`verify-volume-dim` 双后端、
   `verify-pip-camera`、`verify-equirect-export` 等），`npm run check` 全绿。
 
+### 6.26 第二十三轮：审查"去浮云"时发现并修好一个真 bug —— 点"移除浮云"只选中不删除
+
+起因是用户让我对比 SuperSplat 与我们自己的浮云清理能力，查代码时顺手实测了"移除浮云"这条路，
+发现它**只选中、不删除**。
+
+**证据**（`_tmp/floater-apply-probe.cjs`：直接触发面板同一个事件，并逐位读原始 state 数组）：
+
+| 步骤 | rawSelectedBits | rawDeletedBits | numSplats |
+| --- | --- | --- | --- |
+| 初始 | 0 | 0 | 2000 |
+| 触发 `floater.apply`（掩码 50 个） | **50** | **0** ← 修复前 | 2000 |
+| 对照：普通 `select.mask` + `select.delete` | 100 | 100 | 1900 |
+
+对照说明删除机制本身没问题，问题在这条调用链。
+
+**根因**：`floater.apply` 的处理器把三步打包成一个 `MultiOp`：
+`SelectNoneOp → SelectOp(add, mask) → DeleteSelectionOp`。而 `StateOp` 的子类都在**构造函数**里用
+`IndexRanges.fromPredicate` 快照自己的范围 —— `DeleteSelectionOp` 快照的是"此刻被选中的 splat"，
+而构造 MultiOp 时选中集合还是空的（`[]`），于是它拿到空范围、什么也不删；等 `SelectOp` 把浮云选上，
+删除那一步早已"无物可删"。副作用是**再点一次就生效**（第二次构造时选中集合已非空），
+典型的"点两次才管用"。
+
+**修法**：让 `DeleteSelectionOp` 在 **do() 执行时**才抓取范围（`captureRanges()`），undo 复用同一份范围；
+其它按"输入已定"快照的 op 不受影响。这样凡是"先选后删"的组合都成立，而不只是去浮云这一条。
+`SelectOp` 仍按注释所述接收"已提交的掩码快照"，那条设计是对的，未改动。
+
+**新增回归**：`docs/verify/verify-floater-removal.cjs`（4 项，双后端 0 失败）—— 一次点击即删除
+（deleted 0→50、存活 2000→1950）、被删 splat 的状态位是 `selected|deleted = 5` 而不是"只选中"、
+一次 undo 完全还原、无控制台报错。
+
+**回归**：`verify:diag` 7/7；`verify-shape-selection`（双后端）、`verify-volume-dim`、
+`verify-floater-removal`（双后端）、`verify-model-renders`、`verify-pip-camera`、`verify-pip-preview`、
+`verify-centers-overlay`、`verify-selection-depth`、`verify-edit-hide`、`verify-effects`、
+`verify-export-image` 全部 0 失败。
+
 
 
 

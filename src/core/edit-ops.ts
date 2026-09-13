@@ -167,9 +167,26 @@ class UnhideAllOp extends StateOp {
 class DeleteSelectionOp extends StateOp {
     name = 'deleteSelection';
 
+    // The deleted ranges are captured when the op RUNS rather than when it is constructed.
+    // StateOp subclasses normally snapshot their ranges up front, which is right for ops whose
+    // input is already fixed - but this op's input is "whatever is selected right now", and it
+    // is used inside a MultiOp that selects first and deletes second (the 去浮云 / floater
+    // removal path). Building that MultiOp snapshotted the selection while it was still empty,
+    // so pressing 移除浮云 selected the floaters and deleted nothing.
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => state[i] === State.selected), State.deleted, BitOp.SET, State.deleted);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.deleted, BitOp.SET, State.deleted);
+    }
+
+    private captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => state[i] === State.selected);
+    }
+
+    // undo() inherits from StateOp and reuses the ranges captured here, so it removes exactly
+    // what this op deleted
+    do() {
+        this.captureRanges();
+        return super.do();
     }
 }
 
