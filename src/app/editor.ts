@@ -3,7 +3,7 @@ import { Asset, Color, GSplatData, GSplatResource, Mat4, path, Quat, Texture, Ve
 
 import { serializeGrade, deserializeGrade } from './color-grade-file';
 import { EditHistory } from '../core/edit-history';
-import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp } from '../core/edit-ops';
+import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp, EditOp } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
 import { getFootprint, getUseDepth } from '../core/selection-flags';
@@ -1398,15 +1398,26 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
     });
 
-    // floater removal: select the mask then delete in one undoable operation
-    events.on('floater.apply', (data: { mask: Uint8Array, count: number }) => {
-        selectedSplats().forEach((splat) => {
-            events.fire('edit.add', new MultiOp([
+    // floater removal / cluster filter: one undoable step for every selected model.
+    //
+    // The caller sends one mask PER MODEL (each is detected against that model's own data) plus
+    // whether to delete. Selecting and deleting have to be separate ops in that order:
+    // DeleteSelectionOp takes "what is selected" as its input, and the mask is only turned into a
+    // selection by the SelectOp before it.
+    events.on('floater.apply', (data: { targets: { splat: Splat, mask: Uint8Array }[], remove: boolean, count: number }) => {
+        const ops: EditOp[] = [];
+        for (const { splat, mask } of data.targets) {
+            ops.push(
                 new SelectNoneOp(splat),
-                new SelectOp(splat, 'add', data.mask),
-                new DeleteSelectionOp(splat)
-            ]));
-        });
+                new SelectOp(splat, 'add', mask)
+            );
+            if (data.remove) {
+                ops.push(new DeleteSelectionOp(splat));
+            }
+        }
+        if (ops.length) {
+            events.fire('edit.add', ops.length === 1 ? ops[0] : new MultiOp(ops));
+        }
     });
 
     // ---- heal tool: depth-limited lasso selection ----

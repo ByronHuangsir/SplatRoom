@@ -30,8 +30,8 @@ export interface FloaterResult {
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
-/** 点云中位半径 × 0.3（与对比工具一致）：估计典型点间距，供隔离网格自适应。 */
-function estimateCellSize(x: Float32Array, y: Float32Array, z: Float32Array, n: number): number {
+/** 点云中位半径 × 0.3（与对比工具一致）：估计典型点间距，供隔离网格 / 连通簇体素自适应。 */
+export function estimateCellSize(x: Float32Array, y: Float32Array, z: Float32Array, n: number): number {
     let cx = 0, cy = 0, cz = 0;
     const sample = Math.min(n, 2000);
     const step = Math.max(1, Math.floor(n / sample));

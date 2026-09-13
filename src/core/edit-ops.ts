@@ -103,6 +103,10 @@ class SelectInvertOp extends StateOp {
 class SelectOp extends StateOp {
     name = 'selectOp';
 
+    private sel: Uint8Array | Uint32Array;
+
+    private opKind: 'add' | 'remove' | 'set' | 'intersect';
+
     // `sel` is a committed snapshot of hits: either a per-splat mask
     // (Uint8Array, 255 = hit) or a sorted Uint32Array of indices. taking a
     // committed mask rather than a closure removes the foot-gun where a
@@ -116,10 +120,23 @@ class SelectOp extends StateOp {
     //               hit disagree, which leaves locked/deleted bits untouched.
     //   intersect — keep only splats currently selected AND in the hit mask
     //               (clear the selected bit on selected splats that are not hit).
+    //
+    // The index ranges are resolved when the op RUNS, not when it is built: the mask is already
+    // fixed, but "currently unselected" has to mean "unselected at the moment this op applies".
+    // A MultiOp that deselects and then selects the same rows (the 去浮云 / 连通簇 apply path, run
+    // a second time when those rows were already selected) used to compute an empty range at
+    // construction time and then select nothing, which also left the following DeleteSelectionOp
+    // with nothing to delete. Every op in a MultiOp now reads the state left by the op before it.
     constructor(splat: Splat, op: 'add' | 'remove' | 'set' | 'intersect', sel: Uint8Array | Uint32Array) {
-        const splatData = splat.splatData;
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.selected, BitOp.SET);
+        this.sel = sel;
+        this.opKind = op;
+    }
+
+    private captureRanges() {
+        const splatData = this.splat.splatData;
         const state = splatData.getProp('state') as Uint8Array;
-        const isHit = sel instanceof Uint32Array ? sortedPredicate(sel) : (i: number) => sel[i] === 255;
+        const isHit = this.sel instanceof Uint32Array ? sortedPredicate(this.sel) : (i: number) => this.sel[i] === 255;
 
         // single rule applied uniformly: only non-locked splats are considered.
         // deleted splats are also valid (so they can be selected when showDeleted
@@ -142,7 +159,16 @@ class SelectOp extends StateOp {
             intersect: (i: number) => valid(i) && (state[i] & State.selected) !== 0 && !isHit(i)
         };
 
-        super(splat, IndexRanges.fromPredicate(splatData.numSplats, preds[op]), State.selected, bitOps[op]);
+        this.mask = State.selected;
+        this.op = bitOps[this.opKind];
+        this.ranges = IndexRanges.fromPredicate(splatData.numSplats, preds[this.opKind]);
+    }
+
+    // undo() inherits from StateOp and reuses the ranges captured here (StateOp's undo is the
+    // inverse bit operation over the same rows, which is what "undo my selection" means)
+    do() {
+        this.captureRanges();
+        return super.do();
     }
 }
 

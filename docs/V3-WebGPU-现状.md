@@ -822,6 +822,63 @@ WebGPU 独有的缺陷，与用户观察一致。
 `verify-centers-overlay`、`verify-selection-depth`、`verify-edit-hide`、`verify-effects`、
 `verify-export-image` 全部 0 失败。
 
+### 6.27 第二十四轮：去浮云加"仅选中"+ 按元素分别检测；新增 3D 连通簇过滤（对齐上游 --filter-cluster）
+
+用户在我给出 SuperSplat 对比后，从待办里挑了两项：①去浮云加"仅选中（预览）"＋按元素分别检测；
+②新增 3D 连通簇过滤。两项都做完并双后端验证。
+
+**（1）去浮云面板改造**（`src/ui/floater-panel.ts`）
+
+- **目标改为所有选中模型**（`selection.all`），并且**每个模型用它自己的数据单独检测、单独出掩码**。
+  旧版用"主选中模型"检测、再把同一份掩码套到所有选中模型上 —— 单模型无感，多模型时 A 的索引会
+  作用到 B 身上（`_targetSplats()` / `_floaterTargets()`）。
+- **新增「仅选中」按钮**：检出结果先变成选区供复核，再决定按「移除浮云」或手动 Delete。
+  两个按钮与连通簇共用同一个 `floater.apply` 事件，由 editor 打包成**一次可撤销操作**。
+- 面板**默认开启**（原先 toggle 默认关、按钮却没禁用，状态自相矛盾；`panel.floater.enable` 文案
+  一直是孤儿键），只有把 toggle 关掉才真正禁用/变灰。
+
+**（2）新增 `src/splat/cluster-filter.ts`：体素连通分量**
+
+对齐 `splat-transform --filter-cluster` 的思路（官方文档原话：它 "isolates the central scene and
+discards stray floaters"）：把高斯中心量化到体素、对**被占用的体素**做连通分量标记、按簇大小决定去留。
+比"去浮云"的四信号启发式更几何：**薄结构只要连着主体就整片保住**，真正飘在空中的一团会被整体识别。
+两种模式：**删除小簇**（阈值 = 最大簇点数的百分比）/ **只保留最大簇**。
+
+- **体素边长跟着点云自身疏密走**：中位半径 × 0.3（复用 `estimateCellSize`）再乘系数，detail
+  0 → 3.0×、50 → 1.75×、100 → 0.5×。按模型对角线定死会把稀疏点云切成一堆互不相连的小格。
+- **两个实测踩出来的坑**：
+  1. **体素键必须塞进 double 的 53 位**：原来每轴 21 位 → 63 位，静默丢精度（Node 复算：18 个
+     体素里 **12 个解码回错误坐标**，连通图被切碎，最大簇从 3000 变成 3011）。改为每轴 17 位
+     （51 位）+ 相对下界的坐标 + 超限时自动放大体素，并且**不再从键里解码**，改为把体素坐标与键
+     并存。
+  2. **连通性用 26 邻域而不是 6 邻域**：合成测试里 40 点的小团恰好跨越一个体素角点，6 邻域把它
+     判成两个簇；点云是表面采样而非实体，26 邻域才符合"这一团就是一个浮云"。
+- **合成模型验证**（新增 `docs/verify/gen-cluster-test-splat.cjs` + `verify-cluster-filter.cjs`）：
+  3000 点主体 + 12/25/40 点三个远离小团（相距 3 个单位）→ 面板报 **4 簇、最大 3000、小簇 3 个共
+  77 点**；「仅选中」正好选中 **77**；「移除」删 **77** 且主体 **3000 存活**；一次 undo 全还原。
+  双后端 **0 失败**。
+
+**（3）顺带修掉两个核心 op 的"构造时快照"时序 bug**
+
+这轮把 `SelectOp` 也改成**在 do() 时解析索引范围**（上一轮改的是 `DeleteSelectionOp`）。原因：
+"先清空选区、再选中同一批行"这个组合在**第二次点击**时，构造期算出的范围是空的（那批行当时已经
+被选中 → `add` 谓词为假）→ 选不中，紧跟其后的 `DeleteSelectionOp` 也就没东西可删。这正是
+"点两次才生效 / 第二次失效"的根源。现在 MultiOp 里每个 op 读到的都是**前一个 op 执行完之后**的状态。
+（`SelectOp` 依然只接受"已提交的掩码/索引快照"，那条设计不变。）
+
+**（4）回归**
+
+- `verify-floater-removal.cjs` 扩到 **7 项**（按元素掩码、仅选中不删、重复应用仍生效、删除作用于
+  本次创建的选区、另一个模型不受影响、一次 undo 还原、无控制台报错），双后端 0 失败。
+- 新增 `verify-cluster-filter.cjs`（5 项），双后端 0 失败。
+- 9 语言新增 10 条文案（`panel.floater.selectOnly/details/cluster/clusterMode*/clusterDetail/clusterMin/
+  clusterHint/clusterDetails`），并补译了 9 条历史遗留未翻译的文案（floater 4 条 + surface-refine 3 条；
+  另有 gamepad/control-customize 约 40 条仍为英文，已在下面记为已知问题）。`npm run lint:locales`
+  676 键全同步。
+- **全套 20 个验证套件 0 失败**（含 selection-depth / selection-overlay / selection-toolbar /
+  shape-selection 双后端 / edit-hide / grade-crop / volume-dim / centers / pip ×2 / effects /
+  export-image / equirect / ortho / palette / webgpu-fallback / diag 7/7），`npm run check` 全绿。
+
 
 
 
