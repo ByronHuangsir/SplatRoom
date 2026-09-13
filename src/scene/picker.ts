@@ -247,9 +247,19 @@ class Picker {
     }
 
     // Read normalized depth at many scattered screen positions (0-1 range, y
-    // down) after a single prepareDepth. Points are grouped into 64px tiles, so
-    // a brush stroke costs a handful of readbacks instead of one per sample or
-    // one read of its whole screen bound.
+    // down) after a single prepareDepth.
+    //
+    // Every read is a SYNCHRONOUS GPU stall (the copy has to be submitted and mapped inline on WebGPU,
+    // see readIds), which is by far the dominant cost of a brush stroke: measured in the packaged app on
+    // a 931k-splat scan, one stroke's depth readbacks took 113-180 ms while the depth pass itself was
+    // ~0.2 ms of CPU time, and a single-sample stroke still cost 135 ms for its one read.
+    //
+    // Tiles were introduced to read a few small regions instead of the whole screen bound, but with the
+    // stall dominating that trades one big wait for many: measured 150.8 ms (tiled) against 76.1 ms
+    // (one read of the union bound) on the same strokes. So the samples are read in ONE call whenever the
+    // union of their pixels is not absurdly large, and only fall back to tiles above that.
+    static MAX_UNION_READ_PX = 4 << 20;      // 4M pixels: an 8 MB RGBA16F-ish copy at most
+
     async readDepths(points: { x: number, y: number }[]): Promise<(number | null)[]> {
         if (!this.depthRenderTarget) {
             return new Array(points.length).fill(null);
@@ -259,8 +269,8 @@ class Picker {
         const pixelsX = new Int32Array(points.length);
         const pixelsY = new Int32Array(points.length);
         const result: (number | null)[] = new Array(points.length).fill(null);
-        const tiles = new Map<string, { indices: number[], minX: number, minY: number, maxX: number, maxY: number }>();
-        const tileSize = 64;
+        const valid: number[] = [];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
         for (let i = 0; i < points.length; ++i) {
             const { x, y } = points[i];
@@ -272,23 +282,53 @@ class Picker {
             const py = Math.min(Math.floor(y * rt.height), rt.height - 1);
             pixelsX[i] = px;
             pixelsY[i] = py;
+            valid.push(i);
+            minX = Math.min(minX, px);
+            maxX = Math.max(maxX, px);
+            minY = Math.min(minY, py);
+            maxY = Math.max(maxY, py);
+        }
 
-            const key = `${Math.floor(px / tileSize)},${Math.floor(py / tileSize)}`;
-            const tile = tiles.get(key);
-            if (tile) {
-                tile.indices.push(i);
-                tile.minX = Math.min(tile.minX, px);
-                tile.minY = Math.min(tile.minY, py);
-                tile.maxX = Math.max(tile.maxX, px);
-                tile.maxY = Math.max(tile.maxY, py);
-            } else {
-                tiles.set(key, { indices: [i], minX: px, minY: py, maxX: px, maxY: py });
-            }
+        if (valid.length === 0) {
+            return result;
         }
 
         // Flip Y for texture reads on WebGL (texture origin is bottom-left):
         // read the flipped band and index its rows from the bottom
         const flip = this.device.isWebGL2;
+        const unionWidth = maxX - minX + 1;
+        const unionHeight = maxY - minY + 1;
+
+        if (unionWidth * unionHeight <= Picker.MAX_UNION_READ_PX) {
+            const texY = flip ? rt.height - maxY - 1 : minY;
+            const pixels = await rt.colorBuffer.read(minX, texY, unionWidth, unionHeight, {
+                renderTarget: rt,
+                immediate: true
+            });
+            for (let k = 0; k < valid.length; ++k) {
+                const i = valid[k];
+                const row = flip ? maxY - pixelsY[i] : pixelsY[i] - minY;
+                result[i] = this.decodeDepth(pixels, (row * unionWidth + pixelsX[i] - minX) * 4);
+            }
+            return result;
+        }
+
+        // very wide stroke: group the samples into tiles so the copy stays small
+        const tiles = new Map<string, { indices: number[], minX: number, minY: number, maxX: number, maxY: number }>();
+        const tileSize = 64;
+        for (const i of valid) {
+            const key = `${Math.floor(pixelsX[i] / tileSize)},${Math.floor(pixelsY[i] / tileSize)}`;
+            const tile = tiles.get(key);
+            if (tile) {
+                tile.indices.push(i);
+                tile.minX = Math.min(tile.minX, pixelsX[i]);
+                tile.minY = Math.min(tile.minY, pixelsY[i]);
+                tile.maxX = Math.max(tile.maxX, pixelsX[i]);
+                tile.maxY = Math.max(tile.maxY, pixelsY[i]);
+            } else {
+                tiles.set(key, { indices: [i], minX: pixelsX[i], minY: pixelsY[i], maxX: pixelsX[i], maxY: pixelsY[i] });
+            }
+        }
 
         for (const tile of tiles.values()) {
             const width = tile.maxX - tile.minX + 1;

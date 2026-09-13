@@ -43,6 +43,11 @@ class SphereBrushSelection {
         const { canvas, context } = mask;
 
         let radius = 40;
+        // 厚度 (thickness): the depth slab along the view direction, in the same unit
+        // as the brush radius (css pixels at the stroke's depth). 0 = the plain
+        // sphere brush. Exposed through the settings panel's sliders and carried into
+        // the stroke so the editor can turn it into world units.
+        let thickness = 0;
 
         circle.setAttribute('r', radius.toString());
 
@@ -189,7 +194,8 @@ class SphereBrushSelection {
                             y: point.y / canvas.height,
                             radius: point.radius
                         })),
-                        canvas
+                        canvas,
+                        thickness
                     );
                 } finally {
                     mask.busy = false;
@@ -248,11 +254,28 @@ class SphereBrushSelection {
         events.on('tool.brushSelection.smaller', () => {
             radius = Math.max(1, radius / 1.05);
             circle.setAttribute('r', radius.toString());
+            events.fire('tool.brushSelection.changed', { radius, thickness });
         });
 
         events.on('tool.brushSelection.bigger', () => {
             radius = Math.min(500, radius * 1.05);
             circle.setAttribute('r', radius.toString());
+            events.fire('tool.brushSelection.changed', { radius, thickness });
+        });
+
+        // the settings panel's two sliders: size (the brush radius) and thickness
+        // (how deep along the view the stroke reaches)
+        events.function('tool.brushSelection.settings', () => ({ radius, thickness }));
+
+        events.on('tool.brushSelection.setSettings', (settings: { radius?: number, thickness?: number }) => {
+            if (typeof settings?.radius === 'number' && Number.isFinite(settings.radius)) {
+                radius = Math.max(1, Math.min(500, settings.radius));
+                circle.setAttribute('r', radius.toString());
+            }
+            if (typeof settings?.thickness === 'number' && Number.isFinite(settings.thickness)) {
+                thickness = Math.max(0, Math.min(500, settings.thickness));
+            }
+            events.fire('tool.brushSelection.changed', { radius, thickness });
         });
     }
 }

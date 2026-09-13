@@ -63,6 +63,14 @@ const fragmentShader = /* glsl */ `
     uniform vec3 pathMin;
     uniform vec3 pathMax;
 
+    // Brush THICKNESS (the panel's 厚度 slider): > 0 turns each brush sphere into a
+    // slab - full radius across the view, but only that many world units deep along
+    // brushViewDir, which is the unit view direction the stroke was made with. The
+    // path points sit on the surface the stroke picked, so "along the view" measures
+    // depth behind that surface: 0 (or less) keeps the plain sphere behaviour.
+    uniform float brushThickness;
+    uniform vec3 brushViewDir;
+
     // the renderer rasterizes a gaussian out to 2*sqrt(2) sigma
     const float FOOTPRINT_EXTENT = 2.8284271;
 
@@ -199,9 +207,29 @@ const fragmentShader = /* glsl */ `
     }
 
     // sphere brush hit: the center point against a brush sphere, widened by the
-    // splat's extent along the approach direction when footprint is on
+    // splat's extent along the approach direction when footprint is on. With a
+    // brush thickness the sphere becomes a slab along the view direction (see the
+    // brushThickness uniform): lateral distance decides inside the slab, and the
+    // depth component is clipped to the slab.
     bool brushHit(vec3 world, vec3 closest, float radius, mat3 basisT, bool useFootprint) {
         vec3 d = world - closest;
+
+        if (brushThickness > 0.0) {
+            float along = dot(d, brushViewDir);
+            if (abs(along) > brushThickness * 0.5) {
+                return false;
+            }
+            vec3 lateral = d - brushViewDir * along;
+            float lateralDist = length(lateral);
+            if (lateralDist <= radius) {
+                return true;
+            }
+            if (!useFootprint || lateralDist < 1e-6) {
+                return false;
+            }
+            return lateralDist - radius <= length(basisT * (lateral / lateralDist));
+        }
+
         float dist = length(d);
         if (dist <= radius) {
             return true;

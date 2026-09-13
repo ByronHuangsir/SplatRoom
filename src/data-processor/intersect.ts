@@ -55,9 +55,14 @@ type BoxOptions = {
 // center when footprint is 0, matching the brush's visible-stroke semantics.
 type SphereBrushOptions = {
     sphereBrush: {
+        // flattened x, y, z, signed radius per path point
         points: Float32Array;
         mask: Texture;
         footprint?: number;
+        // slab depth along viewDir, in world units (0/undefined = plain sphere brush):
+        // the panel's 厚度 slider, so a stroke selects a slab instead of a ball
+        thickness?: number;
+        viewDir?: number[];
     };
 };
 
@@ -238,16 +243,19 @@ class Intersect {
         const pathMax = [0, 0, 0];
         if (pathCount > 0) {
             // world-space bounds of the path (each capsule segment widened by
-            // its own radius); the shader culls candidates against this before
-            // walking the path
+            // its own radius, and by half the brush thickness along the view when
+            // a slab is requested); the shader culls candidates against this
+            // before walking the path
+            const brushReach = Math.max(0, (sphereBrush?.thickness ?? 0) * 0.5);
             pathMin.fill(Infinity);
             pathMax.fill(-Infinity);
             for (let i = 0; i < pathCount; ++i) {
                 const radius = Math.abs(points[i * 4 + 3]);
                 for (let axis = 0; axis < 3; ++axis) {
                     const v = points[i * 4 + axis];
-                    pathMin[axis] = Math.min(pathMin[axis], v - radius);
-                    pathMax[axis] = Math.max(pathMax[axis], v + radius);
+                    const reach = radius + brushReach;
+                    pathMin[axis] = Math.min(pathMin[axis], v - reach);
+                    pathMax[axis] = Math.max(pathMax[axis], v + reach);
                 }
             }
 
@@ -260,7 +268,12 @@ class Intersect {
             pathCount,
             pathMin,
             pathMax,
-            pathTexture: this.pathTexture ?? this.dummyTexture
+            pathTexture: this.pathTexture ?? this.dummyTexture,
+            // brush thickness (0 = plain sphere brush) and the view direction it is
+            // measured along; both are always resolved so a stale slab can never
+            // clip a following stroke
+            brushThickness: sphereBrush?.thickness ?? 0,
+            brushViewDir: sphereBrush?.viewDir ?? [0, 0, 1]
         });
 
         if (sphereBrush) {

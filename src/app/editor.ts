@@ -863,7 +863,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     events.function('select.bySphereBrush', async (
         op: 'add'|'remove'|'set'|'intersect',
         points: { x: number, y: number, radius: number }[],
-        canvas: HTMLCanvasElement
+        canvas: HTMLCanvasElement,
+        thicknessPx = 0
     ) => {
         const splats = selectedSplats();
         if (!splats.length || !points.length) return;
@@ -885,7 +886,23 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const pixelScale = camera.worldSizePerPixel(1);
         const ortho = camera.ortho;
 
-        events.fire('startSpinner');
+        // Brush thickness (the panel's 厚度 slider) arrives in the same unit as the
+        // brush radius - css pixels at the stroke's depth - and becomes a world-space
+        // slab depth once the stroke's depths are known. The view direction is the
+        // stroke's own view axis, so "深度" always means "behind the surface the
+        // stroke touched".
+        const viewDirVec = pose.rotation.transformVector(Vec3.FORWARD, new Vec3());
+        const viewDir = [viewDirVec.x, viewDirVec.y, viewDirVec.z];
+
+        // A brush stroke is usually quick, but the spinner overlay covers the whole
+        // viewport and swallows pointer events, so a fast click used to dim the app
+        // for no reason (reported as "click, wait a second"): it is only shown once
+        // the stroke has actually been running for a moment.
+        let spinnerShown = false;
+        const spinnerTimer = setTimeout(() => {
+            spinnerShown = true;
+            events.fire('startSpinner');
+        }, 200);
         try {
             // one queued operation reserves the stroke's place in history now
             // and runs the depth picking and the intersect against the same
@@ -896,6 +913,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
                 const path: number[] = [];
                 let previous: { position: Vec3, radius: number } | null = null;
+                let depthSum = 0;
+                let depthCount = 0;
 
                 for (let i = 0; i < points.length; ++i) {
                     const hit = hits[i];
@@ -910,11 +929,18 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                     const startsPath = !previous || previous.position.distance(hit.position) > Math.max(previous.radius, radius) * 2;
                     path.push(hit.position.x, hit.position.y, hit.position.z, startsPath ? -radius : radius);
                     previous = { position: hit.position, radius };
+                    depthSum += ortho ? 1 : hit.depth;
+                    depthCount++;
                 }
 
                 if (!path.length) {
                     return;
                 }
+
+                // css pixels -> world units at the stroke's own depth, so the slab
+                // stays the same thickness on screen as the user zooms
+                const meanDepth = depthCount > 0 ? depthSum / depthCount : 1;
+                const brushThickness = thicknessPx > 0 ? thicknessPx * pixelScale * meanDepth : 0;
 
                 const pathPoints = new Float32Array(path);
                 for (const splat of splats) {
@@ -922,7 +948,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                         sphereBrush: {
                             points: pathPoints,
                             mask,
-                            footprint
+                            footprint,
+                            thickness: brushThickness,
+                            viewDir
                         }
                     }, splat);
                     // SelectOp consumes `data` synchronously in its constructor
@@ -931,7 +959,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             });
         } finally {
-            events.fire('stopSpinner');
+            clearTimeout(spinnerTimer);
+            if (spinnerShown) {
+                events.fire('stopSpinner');
+            }
             mask.destroy();
         }
     });

@@ -557,6 +557,66 @@ class SettingsPanel extends Container {
             selFootprintSlider.value = value;
         });
 
+        // brush size / thickness (the sphere brush's two sliders):
+        //   size      = the brush radius in css pixels (same value the [ and ] keys change)
+        //   thickness = how deep along the view direction the stroke reaches, in the same
+        //               unit; 0 keeps the plain sphere brush, >0 turns it into a slab.
+        // Labels inline until localised, like the two selection rows above.
+        const brushSettings = () => (events.invoke('tool.brushSelection.settings') as { radius: number, thickness: number }) ?? { radius: 40, thickness: 0 };
+
+        const brushSizeRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const brushSizeLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Brush: size (px)'
+        });
+        const brushSizeSlider = new SliderInput({
+            class: 'settings-panel-row-slider',
+            min: 1,
+            max: 500,
+            step: 1,
+            precision: 0,
+            value: brushSettings().radius
+        });
+        brushSizeRow.append(brushSizeLabel);
+        brushSizeRow.append(brushSizeSlider);
+        brushSizeSlider.on('change', (value: number) => {
+            events.fire('tool.brushSelection.setSettings', { radius: value });
+        });
+
+        const brushThicknessRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const brushThicknessLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Brush: thickness (px, 0 = ball)'
+        });
+        const brushThicknessSlider = new SliderInput({
+            class: 'settings-panel-row-slider',
+            min: 0,
+            max: 500,
+            step: 1,
+            precision: 0,
+            value: brushSettings().thickness
+        });
+        brushThicknessRow.append(brushThicknessLabel);
+        brushThicknessRow.append(brushThicknessSlider);
+        brushThicknessSlider.on('change', (value: number) => {
+            events.fire('tool.brushSelection.setSettings', { thickness: value });
+        });
+
+        events.on('tool.brushSelection.changed', (settings: { radius: number, thickness: number }) => {
+            // the [ ] shortcuts and alt+wheel move the size slider too, so the panel
+            // never disagrees with the brush on screen
+            if (brushSizeSlider.value !== settings.radius) {
+                brushSizeSlider.value = settings.radius;
+            }
+            if (brushThicknessSlider.value !== settings.thickness) {
+                brushThicknessSlider.value = settings.thickness;
+            }
+        });
+
         // reset preferences to defaults
 
         const resetRow = new Container({
@@ -591,6 +651,8 @@ class SettingsPanel extends Container {
         this.append(gpuRow);
         this.append(selSurfaceRow);
         this.append(selFootprintRow);
+        this.append(brushSizeRow);
+        this.append(brushThicknessRow);
         this.append(resetRow);
 
         // handle panel visibility
