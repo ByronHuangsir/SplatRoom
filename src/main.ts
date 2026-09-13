@@ -58,6 +58,7 @@ import { GamepadSettings } from './ui/gamepad-settings';
 import { HealPanel } from './ui/heal-panel';
 import { i18n } from './ui/localization';
 import { registerSelectCursor } from './ui/select-cursor';
+import { SelectionDepthBar } from './ui/selection-depth-bar';
 import { registerSnapshotEvents } from './ui/snapshot-handler';
 
 declare global {
@@ -340,6 +341,8 @@ const main = async () => {
     // tool manager
     const toolManager = new ToolManager(events);
     toolManager.register('rectSelection', new RectSelection(events, editorUI.toolsContainer.dom));
+    // eslint-disable-next-line no-new -- the depth bar wires its own events and lives as long as the app
+    new SelectionDepthBar(events, editorUI.canvasContainer.dom);
     toolManager.register('brushSelection', new BrushSelection(events, editorUI.toolsContainer.dom, mask));
     toolManager.register('floodSelection', new FloodSelection(events, editorUI.toolsContainer.dom, mask, editorUI.canvasContainer));
     toolManager.register('polygonSelection', new PolygonSelection(events, editorUI.toolsContainer.dom, mask));

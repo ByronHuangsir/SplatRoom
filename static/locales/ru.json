@@ -170,6 +170,8 @@
     "select-toolbar.position": "Позиция",
     "select-toolbar.size": "Размер",
     "select-toolbar.rotation": "Вращение",
+    "select-toolbar.depth": "Глубина",
+    "select-toolbar.depthThickness": "Толщина глубины (% модели)",
     "select-toolbar.radius": "Радиус",
     "popup.ok": "ОК",
     "popup.cancel": "Отмена",

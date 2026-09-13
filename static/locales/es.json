@@ -170,6 +170,8 @@
     "select-toolbar.position": "Posición",
     "select-toolbar.size": "Tamaño",
     "select-toolbar.rotation": "Rotación",
+    "select-toolbar.depth": "Profundidad",
+    "select-toolbar.depthThickness": "Grosor de profundidad (% del modelo)",
     "select-toolbar.radius": "Radio",
     "popup.ok": "Aceptar",
     "popup.cancel": "Cancelar",

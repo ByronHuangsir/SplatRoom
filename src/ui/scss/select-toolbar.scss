@@ -56,6 +56,24 @@
         background-color: $bcg-dark;
     }
 
+    // the selection depth bar: a depth toggle plus its thickness slider, shown while a
+    // screen-space selection tool is active (rect / lasso / polygon / 2d brush)
+    #selection-depth-bar {
+        .select-toolbar-toggle {
+            margin: 0px 4px 0px 0px;
+        }
+
+        .select-toolbar-slider {
+            width: 180px;
+            margin: 0px 8px 0px 6px;
+
+            // the thickness only does anything in depth mode, so it dims while depth is off
+            &.dimmed {
+                opacity: 0.45;
+            }
+        }
+    }
+
     // text action buttons (e.g. the orient tool's align/clear); shorter than
     // the icon buttons so they sit in balance with the labels and inputs
     .select-toolbar-button {

@@ -170,6 +170,8 @@
     "select-toolbar.position": "位置",
     "select-toolbar.size": "大小",
     "select-toolbar.rotation": "旋转",
+    "select-toolbar.depth": "深度",
+    "select-toolbar.depthThickness": "深度厚度(占模型 %)",
     "select-toolbar.radius": "半径",
     "popup.ok": "确定",
     "popup.cancel": "取消",
