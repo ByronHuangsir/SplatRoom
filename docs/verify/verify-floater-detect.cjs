@@ -50,6 +50,16 @@ const inspect = async (page, model) => {
         header.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         await new Promise(r => setTimeout(r, 500));
 
+        // the panel is off by default (the toggle in its header is the switch), so read the "disabled"
+        // state first and then switch the detector on
+        const disabledText = (panel.querySelector('.floater-panel-result')?.textContent || '').trim();
+        const toggle = panel.querySelector('.floater-panel-header-toggle .pcui-boolean-input-toggle');
+        if (toggle) {
+            toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+            toggle.click();
+        }
+        await new Promise(r => setTimeout(r, 300));
+
         let text = '--';
         let title = '';
         for (let i = 0; i < 40; i++) {
@@ -96,7 +106,7 @@ const inspect = async (page, model) => {
             if (x0 > 0.3 && x0 < 0.4 && Math.abs(y0) < 0.3 && Math.abs(z0) < 0.3) nearSurface++;
             else if (r > 1.5) detached++;
         }
-        return { numSplats: splat.splatData.numSplats, countText: text, breakdown: title, selected, nearSurfacePicked: nearSurface, detachedPicked: detached, buttonLayout: layout };
+        return { numSplats: splat.splatData.numSplats, countText: text, breakdown: title, selected, nearSurfacePicked: nearSurface, detachedPicked: detached, buttonLayout: layout, disabledText };
     });
 };
 
@@ -139,7 +149,6 @@ const inspect = async (page, model) => {
             }
             return { numSplats: splat.splatData.numSplats, countText: text };
         });
-
         const expectedSelects = gen.expected.floaterDetectorSelects;
         const layout = floaterRun.buttonLayout;
         const allButtons = layout.flat();
@@ -148,6 +157,11 @@ const inspect = async (page, model) => {
         const anyClipped = layout.some(row => row.some(b => b.labelClipped));
 
         const checks = [
+            {
+                name: 'the floater panel starts switched off',
+                pass: floaterRun.disabledText === '--',
+                detail: `before the header toggle was switched on the panel read "${floaterRun.disabledText}" (the detector no longer runs until asked for)`
+            },
             {
                 name: 'the detector selects every lone stray, whatever its opacity',
                 pass: floaterRun.selected === expectedSelects && floaterRun.detachedPicked === expectedSelects,

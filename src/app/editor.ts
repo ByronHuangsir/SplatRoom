@@ -6,7 +6,7 @@ import { EditHistory } from '../core/edit-history';
 import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp, EditOp } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
-import { getFootprint, getUseDepth } from '../core/selection-flags';
+import { getDepthThickness, getFootprint, getUseDepth } from '../core/selection-flags';
 import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../geometry/planar-fix';
 import { semanticSelect } from '../geometry/semantic-select';
 import { refineSurface, refineSurfaceLevel2, SurfaceRefineLevel2Params } from '../geometry/surface-refiner';
@@ -15,6 +15,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
+import { selectDepthBand } from '../splat/selection-band';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -976,6 +977,80 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         return getFootprint() > 0 ? 'footprint' : 'centers';
     };
 
+    // ---- selection depth thickness (the settings panel's slider) -----------
+    // The depth method above can only ever pick the front-most splat of a pixel, so
+    // a screen selection is one layer thick. With a thickness it becomes a slab:
+    // render the depth pass once, read the front surface depth over the region in a
+    // single batched readback, then test every splat against it on the CPU (see
+    // splat/selection-band.ts). Returns null when the thickness is 0, in which case
+    // the caller keeps the historical id-pick path.
+    const depthBandMask = async (
+        splat: Splat,
+        regionContains: (px: number, py: number) => boolean,
+        bounds: { x0: number, y0: number, x1: number, y1: number }
+    ): Promise<Uint8Array | null> => {
+        const thicknessPct = getDepthThickness();
+        if (thicknessPct <= 0) {
+            return null;
+        }
+
+        const { width, height } = scene.targetSize;
+        const x0 = Math.max(0, Math.min(width - 1, Math.floor(bounds.x0)));
+        const y0 = Math.max(0, Math.min(height - 1, Math.floor(bounds.y0)));
+        const x1 = Math.max(0, Math.min(width - 1, Math.ceil(bounds.x1)));
+        const y1 = Math.max(0, Math.min(height - 1, Math.ceil(bounds.y1)));
+        if (x1 < x0 || y1 < y0) {
+            return null;
+        }
+
+        const bound = scene.bound;
+        const diag = bound ? bound.halfExtents.length() * 2 : 1;
+        const thickness = Math.max(1e-6, diag * thicknessPct * 0.01);
+
+        // the front-most surface depth of every region pixel, in one readback
+        scene.camera.depthPrep(splat);
+        const step = (x1 - x0 + 1) * (y1 - y0 + 1) > 400000 ? 4 : 2;
+        const columns = Math.floor((x1 - x0) / step) + 1;
+        const rows = Math.floor((y1 - y0) / step) + 1;
+        const points: { x: number, y: number }[] = new Array(columns * rows);
+        let w = 0;
+        for (let row = 0; row < rows; row++) {
+            for (let column = 0; column < columns; column++) {
+                points[w++] = {
+                    x: (x0 + column * step + 0.5) / width,
+                    y: (y0 + row * step + 0.5) / height
+                };
+            }
+        }
+        const depths = await scene.camera.readDepths(points);
+
+        const frontDepth = (px: number, py: number): number | null => {
+            const column = Math.min(columns - 1, Math.max(0, Math.round((px - x0) / step)));
+            const row = Math.min(rows - 1, Math.max(0, Math.round((py - y0) / step)));
+            const value = depths[row * columns + column];
+            return typeof value === 'number' ? value : null;
+        };
+
+        const camera = scene.camera;
+        const viewProjection = new Mat4().mul2(camera.camera.projectionMatrix, camera.camera.viewMatrix);
+        const cameraPosition = camera.mainCamera.getPosition();
+        const viewDir = camera.mainCamera.getRotation().transformVector(Vec3.FORWARD, new Vec3());
+
+        return selectDepthBand(splat, {
+            region: { contains: regionContains },
+            frontDepth,
+            viewProjection: viewProjection.data,
+            worldTransform: splat.worldTransform.data,
+            cameraPosition: { x: cameraPosition.x, y: cameraPosition.y, z: cameraPosition.z },
+            viewDir: { x: viewDir.x, y: viewDir.y, z: viewDir.z },
+            near: camera.near,
+            far: camera.far,
+            thickness,
+            width,
+            height
+        });
+    };
+
     events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
         const method = screenSelectionMethod();
         const rectOptions: any = {
@@ -990,7 +1065,24 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 // depths (a wider test than the center test)
                 await runSelectIntersect(splat, op, { ...rectOptions, footprint: getFootprint() });
             } else {
-                // depth: visible splats in the rect, narrowed to centers in the
+                // depth: a slab of the given thickness behind the visible surface when
+                // the thickness slider is set, otherwise the historical one-layer pick
+                const { width, height } = scene.targetSize;
+                const px0 = Math.min(rect.start.x, rect.end.x) * width;
+                const px1 = Math.max(rect.start.x, rect.end.x) * width;
+                const py0 = Math.min(rect.start.y, rect.end.y) * height;
+                const py1 = Math.max(rect.start.y, rect.end.y) * height;
+                const band = await depthBandMask(
+                    splat,
+                    (px, py) => px >= px0 && px <= px1 && py >= py0 && py <= py1,
+                    { x0: px0, y0: py0, x1: px1, y1: py1 }
+                );
+                if (band) {
+                    events.fire('edit.add', new SelectOp(splat, op, band));
+                    continue;
+                }
+
+                // visible splats in the rect, narrowed to centers in the
                 // rect when the footprint toggle is off (SuperSplat's
                 // centers+depth == the visible surface)
                 const ids = await pickRectIds(splat, op, rect);
@@ -1077,8 +1169,28 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                     // all depths (a wider test than the center test)
                     await runSelectIntersect(splat, op, { mask: maskTexture, footprint: getFootprint() });
                 } else {
-                    // depth: visible splats under the stroke, narrowed to centers
-                    // in the stroke when the footprint toggle is off
+                    // depth: a slab of the given thickness behind the visible surface
+                    // when the thickness slider is set, otherwise the historical
+                    // one-layer pick (visible splats under the stroke, narrowed to
+                    // centers in the stroke when the footprint toggle is off)
+                    const { width, height } = scene.targetSize;
+                    const band = await depthBandMask(
+                        splat,
+                        (px, py) => {
+                            const mx = Math.floor((px / width) * canvas.width);
+                            const my = Math.floor((py / height) * canvas.height);
+                            if (mx < 0 || my < 0 || mx >= canvas.width || my >= canvas.height) {
+                                return false;
+                            }
+                            return context.getImageData(mx, my, 1, 1).data[3] > 0;
+                        },
+                        { x0: 0, y0: 0, x1: width - 1, y1: height - 1 }
+                    );
+                    if (band) {
+                        events.fire('edit.add', new SelectOp(splat, op, band));
+                        continue;
+                    }
+
                     const ids = await pickMaskIds(splat);
                     if (getFootprint() > 0 || !ids.length) {
                         events.fire('edit.add', new SelectOp(splat, op, ids));
@@ -1163,6 +1275,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     events.function('select.point', async (op: 'add'|'remove'|'set'|'intersect', point: { x: number, y: number }) => {
         const { width, height } = scene.targetSize;
+        const clickX = Math.min(width - 1, Math.max(0, Math.floor(point.x * width)));
+        const clickY = Math.min(height - 1, Math.max(0, Math.floor(point.y * height)));
 
         // front-most visible splat exactly under the cursor
         const pickPixel = async (splat: Splat): Promise<number | undefined> => {
@@ -1196,7 +1310,18 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             } else {
                 // depth clicks deliberately ignore the footprint toggle and pick
                 // the front-most splat under the cursor (requiring a visible
-                // center at the clicked pixel would make clicking rarely land)
+                // center at the clicked pixel would make clicking rarely land).
+                // With a thickness the click picks the slab behind that pixel.
+                const band = await depthBandMask(
+                    splat,
+                    (px, py) => px === clickX && py === clickY,
+                    { x0: clickX - 2, y0: clickY - 2, x1: clickX + 2, y1: clickY + 2 }
+                );
+                if (band) {
+                    events.fire('edit.add', new SelectOp(splat, op, band));
+                    continue;
+                }
+
                 const pickId = await pickPixel(splat);
                 if (pickId !== undefined) {
                     events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId])));

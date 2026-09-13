@@ -56,6 +56,14 @@ const gen = JSON.parse(require('child_process').execFileSync(process.execPath, [
             panel.querySelector('.panel-header').dispatchEvent(new MouseEvent('click', { bubbles: true }));
             await new Promise(r => setTimeout(r, 500));
 
+            // the panel is off by default now, so switch the detector on before reading counts
+            const toggle = panel.querySelector('.floater-panel-header-toggle .pcui-boolean-input-toggle');
+            if (toggle) {
+                toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                toggle.click();
+            }
+            await new Promise(r => setTimeout(r, 300));
+
             const label = () => panel.querySelector('.floater-panel-result');
             const waitFor = async (avoid = '...') => {
                 for (let i = 0; i < 80; i++) {

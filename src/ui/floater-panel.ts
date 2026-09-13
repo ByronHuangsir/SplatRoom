@@ -58,7 +58,7 @@ class FloaterPanel extends Container {
 
     // Enable toggle
     private _enabledToggle: BooleanInput;
-    private _fltEnabled = true;
+    private _fltEnabled = false;
 
     private _sensitivity = 40;
     private _clusterDetail = 50;      // 0..100 -> voxel size = spacing x lerp(24, 8); higher = finer
@@ -96,13 +96,13 @@ class FloaterPanel extends Container {
         header.append(icon);
         header.append(titleLabel);
 
-        // Toggle switch on the right side of the header. Detection is cheap enough to be on by
-        // default (a strided sample for the counts), so the panel starts active and the toggle
-        // is there to switch the whole thing off.
+        // Toggle switch on the right side of the header. Off by default: the detection runs over the
+        // whole model and its criterion is a heuristic (see floater-removal.ts for the calibration),
+        // so the tool waits to be switched on rather than showing numbers nobody asked for.
         const toggleWrapper = new Container({ class: 'floater-panel-header-toggle' });
         this._enabledToggle = new BooleanInput({
             type: 'toggle',
-            value: true
+            value: this._fltEnabled
         });
         this._enabledToggle.on('change', (v: boolean) => this._updateEnabled(v));
         toggleWrapper.dom.addEventListener('click', (e: MouseEvent) => e.stopPropagation());

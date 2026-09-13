@@ -557,6 +557,43 @@ class SettingsPanel extends Container {
             selFootprintSlider.value = value;
         });
 
+        // selection depth THICKNESS: how far behind the front-most surface a screen
+        // selection reaches, as a percentage of the model's diagonal. 0 keeps the
+        // historical "visible layer only" behaviour; > 0 turns the selection into a
+        // slab along the view, the same idea as the sphere brush's thickness slider.
+        const selThicknessRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const selThicknessLabel = new Label({
+            class: 'settings-panel-row-label',
+            text: 'Selection: depth thickness (% of model)'
+        });
+        const selThicknessSlider = new SliderInput({
+            class: 'settings-panel-row-slider',
+            min: 0,
+            max: 20,
+            step: 0.5,
+            precision: 1,
+            value: (events.invoke('selection.depthThickness') as number) ?? 0
+        });
+        selThicknessRow.append(selThicknessLabel);
+        selThicknessRow.append(selThicknessSlider);
+        // PCUI's SliderInput fires 'change' when its value is set programmatically,
+        // so writing the current flag into the slider would immediately write a
+        // clamped value (the slider's max) back into the flag - a feedback loop that
+        // silently rewrote the thickness set by the API. Guard the echo.
+        let selThicknessUpdating = false;
+        selThicknessSlider.on('change', (value: number) => {
+            if (!selThicknessUpdating) {
+                events.fire('selection.setDepthThickness', value);
+            }
+        });
+        events.on('selection.depthThickness', (value: number) => {
+            selThicknessUpdating = true;
+            selThicknessSlider.value = value;
+            selThicknessUpdating = false;
+        });
+
         // brush size / thickness (the sphere brush's two sliders):
         //   size      = the brush radius in css pixels (same value the [ and ] keys change)
         //   thickness = how deep along the view direction the stroke reaches, in the same
@@ -651,6 +688,7 @@ class SettingsPanel extends Container {
         this.append(gpuRow);
         this.append(selSurfaceRow);
         this.append(selFootprintRow);
+        this.append(selThicknessRow);
         this.append(brushSizeRow);
         this.append(brushThicknessRow);
         this.append(resetRow);

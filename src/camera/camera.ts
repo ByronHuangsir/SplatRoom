@@ -1148,6 +1148,17 @@ class Camera extends Element {
         return this.picker.readIds(x, y, width, height);
     }
 
+    // render the depth pass (front-most surface depth per pixel), used by the
+    // sphere brush and by the screen selections' depth thickness
+    depthPrep(splat: Splat) {
+        this.picker.prepareDepth(splat);
+    }
+
+    // normalized depths (0-1) at scattered normalized screen positions, after depthPrep
+    readDepths(points: { x: number, y: number }[]) {
+        return this.picker.readDepths(points);
+    }
+
     docSerialize() {
         const pack3 = (v: Vec3) => [v.x, v.y, v.z];
 

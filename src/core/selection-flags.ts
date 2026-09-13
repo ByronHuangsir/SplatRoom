@@ -15,12 +15,20 @@ import { Events } from './events';
 //              center falls outside it. The value is continuous in [0, 1] (as
 //              upstream's footprint slider is): 1 = the full rendered
 //              footprint, 0.5 = half of it, and so on.
+//   depthThickness: how far BEHIND the front-most surface a screen selection
+//              reaches, as a percentage of the model's diagonal. 0 keeps the
+//              historical behaviour (only the visible layer can be selected,
+//              one id per pixel); > 0 widens it into a slab, the same idea as the
+//              sphere brush's thickness slider, implemented by renderig the depth
+//              pass once and testing every splat against it (see
+//              splat/selection-band.ts).
 //
-// Both persist; the defaults (depth off, footprint 0) are SplatRoom's historical
-// centre-based behaviour.
+// All persist; the defaults (depth off, footprint 0, thickness 0) are SplatRoom's
+// historical centre-based behaviour.
 
 let useDepth = false;
 let footprint = 0;
+let depthThickness = 0;
 // what the toggle (toolbar button / Shift+M) restores when it turns footprint
 // back on: the last non-zero value the user picked, so a slider setting survives
 // a toggle round trip
@@ -57,6 +65,8 @@ const registerSelectionFlags = (events: Events) => {
     if (footprint > 0) {
         lastFootprint = footprint;
     }
+    const storedThickness = Number.parseFloat(readStored('splatroom.selDepthThickness') ?? '');
+    depthThickness = Number.isFinite(storedThickness) ? Math.max(0, Math.min(50, storedThickness)) : 0;
 
     const setUseDepth = (value: boolean) => {
         if (value !== useDepth) {
@@ -83,13 +93,23 @@ const registerSelectionFlags = (events: Events) => {
 
     events.function('selection.useDepth', () => useDepth);
     events.function('selection.footprint', () => footprint);
+    events.function('selection.depthThickness', () => depthThickness);
     events.on('selection.setUseDepth', setUseDepth);
     events.on('selection.setFootprint', setFootprint);
     events.on('selection.toggleUseDepth', () => setUseDepth(!useDepth));
     events.on('selection.toggleFootprint', () => setFootprint(footprint > 0 ? 0 : lastFootprint));
+    events.on('selection.setDepthThickness', (value: number) => {
+        const next = Number.isFinite(value) ? Math.max(0, Math.min(50, value)) : 0;
+        if (next !== depthThickness) {
+            depthThickness = next;
+            store('splatroom.selDepthThickness', String(next));
+            events.fire('selection.depthThickness', next);
+        }
+    });
 };
 
 const getUseDepth = () => useDepth;
 const getFootprint = () => footprint;
+const getDepthThickness = () => depthThickness;
 
-export { registerSelectionFlags, getUseDepth, getFootprint };
+export { registerSelectionFlags, getUseDepth, getFootprint, getDepthThickness };
