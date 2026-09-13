@@ -498,7 +498,7 @@
     "panel.floater": "浮遊物",
     "panel.floater.enable": "有効",
     "panel.floater.sensitivity": "感度",
-    "panel.floater.sensitivityHint": "値が大きいほど多く削除されます。40 前後から始めて、カウントにカーソルを合わせると検出結果を確認できます。",
+    "panel.floater.sensitivityHint": "値が大きいほど多く削除されます（40 前後から）。周囲に何もない点だけが対象なので、表面に張り付いた大きな点や透明な点は選ばれません。かたまりの浮遊物は下の「連結クラスター」を使ってください。",
     "panel.floater.remove": "浮遊物を削除",
     "panel.floater.selectOnly": "選択のみ",
     "panel.floater.details": "不透明度 {{opacity}} · 体積 {{volume}} · 孤立度 {{isolation}} · 距離 {{distance}}",

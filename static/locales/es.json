@@ -498,7 +498,7 @@
     "panel.floater": "Elementos flotantes",
     "panel.floater.enable": "Activar",
     "panel.floater.sensitivity": "Sensibilidad",
-    "panel.floater.sensitivityHint": "Un valor más alto elimina más. Empieza en torno a 40 y pasa el cursor sobre el contador para ver qué se ha detectado.",
+    "panel.floater.sensitivityHint": "Un valor más alto elimina más (empieza en 40). Solo cuentan los que no tienen nada alrededor: los grandes o transparentes pegados a la superficie no se tocan; para nubes enteras usa el filtro de clústeres de abajo.",
     "panel.floater.remove": "Eliminar elementos flotantes",
     "panel.floater.selectOnly": "Solo seleccionar",
     "panel.floater.details": "Opacidad {{opacity}} · Volumen {{volume}} · Aislamiento {{isolation}} · Distancia {{distance}}",

@@ -498,7 +498,7 @@
     "panel.floater": "Schwebeteilchen",
     "panel.floater.enable": "Aktivieren",
     "panel.floater.sensitivity": "Empfindlichkeit",
-    "panel.floater.sensitivityHint": "Höhere Werte entfernen mehr. Beginne bei etwa 40 und fahre über den Zähler, um zu sehen, was erkannt wurde.",
+    "panel.floater.sensitivityHint": "Höhere Werte entfernen mehr (Start etwa 40). Gezählt wird nur, was ringsum allein steht: große oder transparente Punkte direkt auf der Oberfläche bleiben unberührt – für ganze Wolken den Cluster-Filter unten nutzen.",
     "panel.floater.remove": "Schwebeteilchen entfernen",
     "panel.floater.selectOnly": "Nur auswählen",
     "panel.floater.details": "Deckkraft {{opacity}} · Volumen {{volume}} · Isolation {{isolation}} · Entfernung {{distance}}",

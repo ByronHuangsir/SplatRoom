@@ -498,7 +498,7 @@
     "panel.floater": "Floaters",
     "panel.floater.enable": "Enable",
     "panel.floater.sensitivity": "Sensitivity",
-    "panel.floater.sensitivityHint": "Higher removes more. Start around 40, hover the count to see what was detected.",
+    "panel.floater.sensitivityHint": "Higher removes more (start around 40). Only gaussians with nothing around them count: large or transparent ones that hug the surface are left alone - use the cluster filter below for whole patches.",
     "panel.floater.remove": "Remove Floaters",
     "panel.floater.selectOnly": "Select only",
     "panel.floater.details": "Opacity {{opacity}} · Volume {{volume}} · Isolation {{isolation}} · Distance {{distance}}",

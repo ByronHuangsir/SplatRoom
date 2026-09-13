@@ -135,8 +135,11 @@ class FloaterPanel extends Container {
         resultRow.append(this._resultLabel);
         this._contentContainer.append(resultRow);
 
-        // Actions: select only (review first) / remove
+        // Actions: select only (review first) / remove.
+        // PCUI's `class` takes a single token (a space-separated string throws in DOMTokenList.add),
+        // so the extra layout class is added through ClassName#add.
         const btnRow = new Container({ class: 'floater-panel-row' });
+        btnRow.class.add('floater-panel-btn-row');
         this._selectBtn = new Button({ class: 'floater-panel-select-btn', text: '' });
         i18n.bindText(this._selectBtn, 'panel.floater.selectOnly');
         this._selectBtn.on('click', () => this._apply(false));
@@ -212,6 +215,7 @@ class FloaterPanel extends Container {
         this._contentContainer.append(clusterResultRow);
 
         const clusterBtnRow = new Container({ class: 'floater-panel-row' });
+        clusterBtnRow.class.add('floater-panel-btn-row');
         this._clusterSelectBtn = new Button({ class: 'floater-panel-select-btn' });
         i18n.bindText(this._clusterSelectBtn, 'panel.floater.selectOnly');
         this._clusterSelectBtn.on('click', () => this._applyClusters(false));

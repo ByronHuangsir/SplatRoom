@@ -498,7 +498,7 @@
     "panel.floater": "去浮云",
     "panel.floater.enable": "启动",
     "panel.floater.sensitivity": "灵敏度",
-    "panel.floater.sensitivityHint": "数值越高删除越多。建议从 40 开始，鼠标悬停计数可查看检出来源。",
+    "panel.floater.sensitivityHint": "数值越高删除越多（建议 40 起）。只看“旁边有没有人”：贴着表面的大点、透明点不会被误选；成团的飘云请用下面的「连通簇」。",
     "panel.floater.remove": "移除浮云",
     "panel.floater.selectOnly": "仅选中",
     "panel.floater.details": "透明 {{opacity}} · 体积 {{volume}} · 隔离 {{isolation}} · 距离 {{distance}}",

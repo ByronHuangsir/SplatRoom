@@ -115,19 +115,55 @@
         line-height: 24px;
     }
 
-    // ---- remove button ----
+    // ---- action buttons (select-only / remove) ----
+    // Both actions share one row and split it evenly: the panel is narrow, so a
+    // content-sized button would clip its label ("仅选中" used to be cut off while the
+    // 100%-wide remove button took the whole row).
+    .floater-panel-btn-row {
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        gap: 6px;
+    }
+
+    .floater-panel-select-btn,
     .floater-panel-remove-btn {
-        width: 100%;
+        flex: 1 1 0;
+        min-width: 0;
+        width: auto;
         height: 28px;
+        padding: 0 6px;
         font-size: 11px;
         font-weight: 600;
         border-radius: 4px;
-        background-color: #1a4a1a;
-        color: #55cc55;
         border: none;
         cursor: pointer;
         text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         transition: background-color 0.1s ease, color 0.1s ease;
+    }
+
+    // select only: the harmless action, styled like the panel's other neutral buttons
+    .floater-panel-select-btn {
+        background-color: $bcg-dark;
+        color: $text-secondary;
+
+        &:hover {
+            background-color: $bcg-lighter;
+            color: $clr-active;
+        }
+
+        &:active {
+            background-color: $clr-hilight;
+            color: $clr-active;
+        }
+    }
+
+    .floater-panel-remove-btn {
+        background-color: #1a4a1a;
+        color: #55cc55;
 
         &:hover {
             background-color: #226622;

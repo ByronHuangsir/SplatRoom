@@ -498,7 +498,7 @@
     "panel.floater": "부유물",
     "panel.floater.enable": "사용",
     "panel.floater.sensitivity": "민감도",
-    "panel.floater.sensitivityHint": "값이 높을수록 더 많이 제거됩니다. 40 정도에서 시작하고, 개수 위에 마우스를 올리면 감지된 항목을 확인할 수 있습니다.",
+    "panel.floater.sensitivityHint": "값이 높을수록 더 많이 제거됩니다(40 정도부터). 주변에 아무것도 없는 점만 대상이므로 표면에 붙은 크거나 투명한 점은 선택되지 않습니다. 뭉쳐 있는 부유물은 아래의 연결된 클러스터를 사용하세요.",
     "panel.floater.remove": "부유물 제거",
     "panel.floater.selectOnly": "선택만",
     "panel.floater.details": "불투명도 {{opacity}} · 부피 {{volume}} · 고립도 {{isolation}} · 거리 {{distance}}",
