@@ -506,94 +506,6 @@ class SettingsPanel extends Container {
         gpuRow.append(gpuLabel);
         gpuRow.append(gpuSelection);
 
-        // selection depth / footprint (V3, SuperSplat 3 semantics):
-        // "depth" = only splats visible on the surface can be selected,
-        // "footprint" = the hit test uses a fraction of the splat's rendered
-        // gaussian extent instead of its center point (0 = centers, 1 = the full
-        // footprint, in between = partial coverage, like upstream's slider).
-        // Labels inline until localised; both apply to the very next selection.
-        const selSurfaceRow = new Container({
-            class: 'settings-panel-row'
-        });
-        const selSurfaceLabel = new Label({
-            class: 'settings-panel-row-label',
-            text: 'Selection: depth (surface only)'
-        });
-        const selSurfaceToggle = new BooleanInput({
-            type: 'toggle',
-            class: 'settings-panel-row-toggle',
-            value: !!events.invoke('selection.useDepth')
-        });
-        selSurfaceRow.append(selSurfaceLabel);
-        selSurfaceRow.append(selSurfaceToggle);
-        selSurfaceToggle.on('change', (value: boolean) => {
-            events.fire('selection.setUseDepth', value);
-        });
-        events.on('selection.useDepth', (value: boolean) => {
-            selSurfaceToggle.value = value;
-        });
-
-        const selFootprintRow = new Container({
-            class: 'settings-panel-row'
-        });
-        const selFootprintLabel = new Label({
-            class: 'settings-panel-row-label',
-            text: 'Selection: footprint (coverage)'
-        });
-        const selFootprintSlider = new SliderInput({
-            class: 'settings-panel-row-slider',
-            min: 0,
-            max: 1,
-            step: 0.05,
-            precision: 2,
-            value: events.invoke('selection.footprint') as number
-        });
-        selFootprintRow.append(selFootprintLabel);
-        selFootprintRow.append(selFootprintSlider);
-        selFootprintSlider.on('change', (value: number) => {
-            events.fire('selection.setFootprint', value);
-        });
-        events.on('selection.footprint', (value: number) => {
-            selFootprintSlider.value = value;
-        });
-
-        // selection depth THICKNESS: how far behind the front-most surface a screen
-        // selection reaches, as a percentage of the model's diagonal. 0 keeps the
-        // historical "visible layer only" behaviour; > 0 turns the selection into a
-        // slab along the view, the same idea as the sphere brush's thickness slider.
-        const selThicknessRow = new Container({
-            class: 'settings-panel-row'
-        });
-        const selThicknessLabel = new Label({
-            class: 'settings-panel-row-label',
-            text: 'Selection: depth thickness (% of model)'
-        });
-        const selThicknessSlider = new SliderInput({
-            class: 'settings-panel-row-slider',
-            min: 0,
-            max: 20,
-            step: 0.5,
-            precision: 1,
-            value: (events.invoke('selection.depthThickness') as number) ?? 0
-        });
-        selThicknessRow.append(selThicknessLabel);
-        selThicknessRow.append(selThicknessSlider);
-        // PCUI's SliderInput fires 'change' when its value is set programmatically,
-        // so writing the current flag into the slider would immediately write a
-        // clamped value (the slider's max) back into the flag - a feedback loop that
-        // silently rewrote the thickness set by the API. Guard the echo.
-        let selThicknessUpdating = false;
-        selThicknessSlider.on('change', (value: number) => {
-            if (!selThicknessUpdating) {
-                events.fire('selection.setDepthThickness', value);
-            }
-        });
-        events.on('selection.depthThickness', (value: number) => {
-            selThicknessUpdating = true;
-            selThicknessSlider.value = value;
-            selThicknessUpdating = false;
-        });
-
         // brush size / thickness (the sphere brush's two sliders):
         //   size      = the brush radius in css pixels (same value the [ and ] keys change)
         //   thickness = how deep along the view direction the stroke reaches, in the same
@@ -686,9 +598,6 @@ class SettingsPanel extends Container {
         this.append(showCameraInfoRow);
         this.append(lodRow);
         this.append(gpuRow);
-        this.append(selSurfaceRow);
-        this.append(selFootprintRow);
-        this.append(selThicknessRow);
         this.append(brushSizeRow);
         this.append(brushThicknessRow);
         this.append(resetRow);

@@ -59,9 +59,7 @@ const popupConfig: Record<string, CategoryConfig> = {
             { id: 'select.all', localeKey: 'popup.shortcuts.select-all' },
             { id: 'select.none', localeKey: 'popup.shortcuts.deselect-all' },
             { id: 'select.invert', localeKey: 'popup.shortcuts.invert-selection' },
-            { id: 'select.delete', localeKey: 'popup.shortcuts.delete-selected-splats' },
-            { id: 'selection.toggleUseDepth', localeKey: 'popup.shortcuts.toggle-selection-depth' },
-            { id: 'selection.toggleFootprint', localeKey: 'popup.shortcuts.toggle-selection-footprint' }
+            { id: 'select.delete', localeKey: 'popup.shortcuts.delete-selected-splats' }
         ],
         hints: [
             { displayKey: 'Shift', localeKey: 'popup.shortcuts.add-to-selection' },

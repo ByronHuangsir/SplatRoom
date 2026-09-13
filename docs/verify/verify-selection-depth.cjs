@@ -1,23 +1,24 @@
-// Headless verification for the V3 selection depth / footprint / sphere brush
-// work (SuperSplat-aligned quadrants + single-dispatch brush).
+// Headless verification for the V3 screen-selection paths and the selection ops.
 //
-// Boots the built app in headless Edge (swiftshader WebGL), imports a small
-// synthetic gaussian PLY, then drives every selection path and reports:
-//   - page errors and console errors (shader compile failures show up here)
-//   - how many splats each path selected (proves the pass actually ran)
+// Since 3.7.9 every screen-space gesture (rect / lasso / mask stroke / click) runs the same
+// CPU pass: project every splat, keep the ones inside the 2D region, keep those inside the
+// depth range (default 0 / 100 = the whole model). This suite drives each entry point plus
+// the modifier ops (set / add / remove / intersect) and the 3D tools that are unchanged
+// (sphere, box, sphere brush), so a regression in any of them is visible.
 //
-// usage: node docs/verify/verify-selection-depth.cjs [url]
+// usage: node docs/verify/verify-selection-depth.cjs "<url>" [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const URL = process.argv[2] || 'http://localhost:3100/';
+const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
+const MODEL = process.argv[3] || 'test-model.ply';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
     const browser = await puppeteer.launch({
         executablePath: EDGE, headless: 'new',
-        args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
+        args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']
     });
 
     const errors = [];
@@ -41,26 +42,25 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await page.waitForFunction('!!window.scene', { timeout: 60000 });
         await sleep(2000);
 
-        // import the synthetic model through the app's own import entry point
-        const imported = await page.evaluate(async () => {
-            const buf = await (await fetch('./test-model.ply')).arrayBuffer();
-            const file = new File([buf], 'test-model.ply');
-            await window.scene.events.invoke('import', [{ filename: 'test-model.ply', contents: file }]);
+        const imported = await page.evaluate(async (m) => {
+            const buf = await (await fetch('./' + m)).arrayBuffer();
+            await window.scene.events.invoke('import', [{ filename: m, contents: new File([buf], m) }]);
             return buf.byteLength;
-        });
+        }, MODEL);
 
-        await page.waitForFunction(
-            "window.scene.getElementsByType('splat').length > 0", { timeout: 60000 });
+        await page.waitForFunction("window.scene.getElementsByType('splat').length > 0", { timeout: 60000 });
         await sleep(2500);
 
         const result = await page.evaluate(async () => {
             const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             const scene = window.scene;
             const events = scene.events;
-            const splat = scene.getElementsByType('splat')[0];
+            const splat = scene.getElementsByType('splat').slice(-1)[0];
 
-            events.fire('selection.set', splat);
+            events.fire('selection', splat);
             await sleep(500);
+            events.fire('camera.focus');
+            await sleep(1200);
 
             const state = splat.splatData.getProp('state');
             const countSelected = () => {
@@ -71,76 +71,76 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 return n;
             };
 
-            const out = { numSplats: splat.splatData.numSplats, steps: [], toggles: {} };
-            // Mat4 / Vec3 / Quat helpers built from instances the app exposes
+            const out = { numSplats: splat.splatData.numSplats, steps: [], flags: {} };
             const Mat4Ctor = scene.camera.mainCamera.getWorldTransform().constructor;
             const Vec3Ctor = scene.camera.mainCamera.getPosition().constructor;
             const QuatCtor = scene.camera.mainCamera.getRotation().constructor;
 
             const selectNone = async () => {
                 events.fire('select.none');
-                // wait until the queued ops have actually cleared the selection,
-                // otherwise a late-applying previous step confounds the count
                 const deadline = Date.now() + 5000;
                 while (Date.now() < deadline && countSelected() !== 0) {
                     await sleep(200);
                 }
             };
 
-            // record the selected count once it has settled (async GPU work)
             const record = async (name, timeoutMs = 20000) => {
                 const deadline = Date.now() + timeoutMs;
                 let last = -1;
                 let stable = 0;
                 while (Date.now() < deadline) {
-                    await sleep(300);
+                    await sleep(250);
                     const now = countSelected();
-                    if (now === last && now > 0) {
+                    if (now === last) {
                         if (++stable >= 2) break;
                     } else {
                         stable = 0;
                     }
                     last = now;
                 }
-                out.steps.push({ name, selected: countSelected() });
+                const selected = countSelected();
+                out.steps.push({ name, selected });
+                return selected;
             };
 
             const rect = { start: { x: 0.25, y: 0.25 }, end: { x: 0.75, y: 0.75 } };
+            const wide = { start: { x: 0.05, y: 0.05 }, end: { x: 0.95, y: 0.95 } };
+            const left = { start: { x: 0.05, y: 0.25 }, end: { x: 0.45, y: 0.75 } };
+            const right = { start: { x: 0.55, y: 0.25 }, end: { x: 0.95, y: 0.75 } };
 
-            // 1. centers (both toggles off)
-            events.fire('selection.setFootprint', 0);
-            events.fire('selection.setUseDepth', false);
+            // the range is a straight replacement of the old depth/footprint flags
+            events.fire('selection.resetDepthRange');
+            await sleep(200);
+
+            // 1. rect, set
             await selectNone();
-            await events.invoke('select.rect', 'add', rect);
-            await record('rect / centers');
+            await events.invoke('select.rect', 'set', rect);
+            const rectSet = await record('rect / set');
 
-            // 2. footprint (depth off): projected gaussian extent vs rect
-            events.fire('selection.setFootprint', 1);
+            // 2. the same rect again with add: an already selected region adds nothing
+            await events.invoke('select.rect', 'add', rect);
+            const rectAddSame = await record('rect / add (same region)');
+
+            // 3. add a disjoint region: the selection has to grow
+            await events.invoke('select.rect', 'add', right);
+            const rectAddOther = await record('rect / add (disjoint region)');
+
+            // 4. intersect with the right region: only the overlap survives
+            await events.invoke('select.rect', 'intersect', right);
+            const rectIntersect = await record('rect / intersect');
+
+            // 5. remove the right region: back to nothing
+            await events.invoke('select.rect', 'remove', right);
+            const rectRemove = await record('rect / remove');
+
+            // 6. a wide rect, then a narrow one, proves 'set' replaces rather than adds
             await selectNone();
-            await events.invoke('select.rect', 'add', rect);
-            await record('rect / footprint 1.00');
+            await events.invoke('select.rect', 'set', wide);
+            const wideSet = await record('rect / set (wide)');
+            await events.invoke('select.rect', 'set', left);
+            const leftSet = await record('rect / set (left half, replaces)');
 
-            // 2b. the footprint value is continuous: partial coverage has to land
-            // between the center test and the full footprint
-            events.fire('selection.setFootprint', 0.35);
-            await selectNone();
-            await events.invoke('select.rect', 'add', rect);
-            await record('rect / footprint 0.35');
-
-            // 3. depth without footprint: visible picks narrowed to centers
-            events.fire('selection.setFootprint', 0);
-            events.fire('selection.setUseDepth', true);
-            await selectNone();
-            await events.invoke('select.rect', 'add', rect);
-            await record('rect / depth');
-
-            // 4. depth + footprint: visible coverage in the region
-            events.fire('selection.setFootprint', 1);
-            await selectNone();
-            await events.invoke('select.rect', 'add', rect);
-            await record('rect / depth+footprint');
-
-            // 5. mask stroke (footprint on, depth off) + 6. mask with depth on
+            // 7. mask stroke (lasso / polygon / 2D brush entry point)
             const canvas = document.createElement('canvas');
             canvas.width = scene.canvas.clientWidth;
             canvas.height = scene.canvas.clientHeight;
@@ -153,39 +153,63 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             ctx.lineTo(canvas.width * 0.7, canvas.height * 0.5);
             ctx.stroke();
 
-            events.fire('selection.setFootprint', 1);
-            events.fire('selection.setUseDepth', false);
             await selectNone();
-            await events.invoke('select.byMask', 'add', canvas, ctx);
-            await record('mask / footprint');
+            await events.invoke('select.byMask', 'set', canvas, ctx);
+            const maskSet = await record('mask / set');
 
-            events.fire('selection.setUseDepth', true);
+            // 8. click (select.point): with the default range it is a column through the model.
+            // The click goes to the projected position of a real splat read back from the
+            // model - the synthetic test model is sparse (points ~6 px apart on screen), so
+            // clicking a fixed (0.5, 0.5) can land between splats and legitimately select
+            // nothing, which would test the model rather than the path.
+            const vp = new Mat4Ctor().mul2(scene.camera.camera.projectionMatrix, scene.camera.camera.viewMatrix).data;
+            const world = splat.worldTransform.data;
+            const px_ = splat.splatData.getProp('x');
+            const py_ = splat.splatData.getProp('y');
+            const pz_ = splat.splatData.getProp('z');
+            const target = (() => {
+                const { width, height } = scene.targetSize;
+                const cx = width * 0.5;
+                const cy = height * 0.5;
+                let best = null;
+                let bestDistance = Infinity;
+                for (let i = 0; i < splat.splatData.numSplats; i++) {
+                    const lx = px_[i], ly = py_[i], lz = pz_[i];
+                    const wx = world[0] * lx + world[4] * ly + world[8] * lz + world[12];
+                    const wy = world[1] * lx + world[5] * ly + world[9] * lz + world[13];
+                    const wz = world[2] * lx + world[6] * ly + world[10] * lz + world[14];
+                    const cw = vp[3] * wx + vp[7] * wy + vp[11] * wz + vp[15];
+                    if (cw <= 0) continue;
+                    const sx = ((vp[0] * wx + vp[4] * wy + vp[8] * wz + vp[12]) / cw * 0.5 + 0.5) * width;
+                    const sy = (1 - ((vp[1] * wx + vp[5] * wy + vp[9] * wz + vp[13]) / cw * 0.5 + 0.5)) * height;
+                    const distance = Math.hypot(sx - cx, sy - cy);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = { x: sx / width, y: sy / height };
+                    }
+                }
+                return best;
+            })();
+
             await selectNone();
-            await events.invoke('select.byMask', 'add', canvas, ctx);
-            await record('mask / depth');
+            await events.invoke('select.point', 'set', target);
+            const pointSet = await record('point / set');
 
-            // 7. sphere volume: center test vs footprint (support-function) test
-            // with a radius that does NOT cover the whole model, so the two
-            // criteria have to disagree
+            // 9. sphere volume (GPU intersect, unchanged)
             const t = new Mat4Ctor();
-            const rot = new QuatCtor();
-            const scale = new Vec3Ctor(0.8, 0.8, 0.8);
-            const center = splat.entity.getPosition();
-            t.setTRS(center, rot, scale);
-            events.fire('selection.setFootprint', 0);
-            events.fire('selection.setUseDepth', false);
+            t.setTRS(splat.entity.getPosition(), new QuatCtor(), new Vec3Ctor(0.8, 0.8, 0.8));
             await selectNone();
-            events.fire('select.bySphere', 'add', t);
-            await record('sphere / centers (r=0.4)');
-            events.fire('selection.setFootprint', 1);
-            await selectNone();
-            events.fire('select.bySphere', 'add', t);
-            await record('sphere / footprint (r=0.4)');
+            events.fire('select.bySphere', 'set', t);
+            const sphereSet = await record('sphere / set');
 
-            // 8. sphere brush path (batched depth picks + capsule intersect)
-            events.fire('selection.setFootprint', 0);
-            events.fire('selection.setUseDepth', false);
+            // 10. box volume (GPU intersect, unchanged)
+            const tb = new Mat4Ctor();
+            tb.setTRS(splat.entity.getPosition(), new QuatCtor(), new Vec3Ctor(0.8, 0.8, 0.8));
             await selectNone();
+            events.fire('select.byBox', 'set', tb);
+            const boxSet = await record('box / set');
+
+            // 11. sphere brush (batched depth picks + capsule intersect, unchanged)
             const brushCanvas = document.createElement('canvas');
             brushCanvas.width = scene.canvas.clientWidth;
             brushCanvas.height = scene.canvas.clientHeight;
@@ -201,51 +225,89 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             for (let i = 0; i <= 20; ++i) {
                 points.push({ x: 0.35 + (0.3 * i) / 20, y: 0.5, radius: 30 });
             }
-            await events.invoke('select.bySphereBrush', 'add', points, brushCanvas);
-            await record('sphere brush (path)');
-
-            // 9. same brush with footprint on (extent-widened capsules)
-            events.fire('selection.setFootprint', 1);
             await selectNone();
-            await events.invoke('select.bySphereBrush', 'add', points, brushCanvas);
-            await record('sphere brush (path, footprint)');
+            await events.invoke('select.bySphereBrush', 'set', points, brushCanvas);
+            const brushSet = await record('sphere brush / set');
 
-            // read the toggle state back so a stale bundle cannot masquerade as a
-            // passing run
-            out.toggles.depth = events.invoke('selection.useDepth');
-            out.toggles.footprint = events.invoke('selection.footprint');
-            events.fire('selection.setUseDepth', true);
-            await sleep(120);
-            out.toggles.depthAfterSet = events.invoke('selection.useDepth');
-            events.fire('selection.setUseDepth', false);
-            // toggle returns to the last non-zero value, not always 1
-            events.fire('selection.setFootprint', 0.35);
-            await sleep(120);
-            events.fire('selection.toggleFootprint');
-            await sleep(120);
-            out.toggles.footprintAfterToggleOff = events.invoke('selection.footprint');
-            events.fire('selection.toggleFootprint');
-            await sleep(120);
-            out.toggles.footprintAfterToggleOn = events.invoke('selection.footprint');
-            events.fire('selection.setFootprint', 0);
+            // 12. the depth range API round-trips and clamps
+            out.flags.defaultRange = JSON.stringify(events.invoke('selection.depthRange'));
+            events.fire('selection.setDepthRange', { near: 30, far: 70 });
+            await sleep(150);
+            out.flags.setRange = JSON.stringify(events.invoke('selection.depthRange'));
+            // near past far: the pair is kept ordered
+            events.fire('selection.setDepthRange', { near: 80, far: 20 });
+            await sleep(150);
+            out.flags.crossedRange = JSON.stringify(events.invoke('selection.depthRange'));
+            events.fire('selection.resetDepthRange');
+            await sleep(150);
+            out.flags.resetRange = JSON.stringify(events.invoke('selection.depthRange'));
 
             return out;
         });
 
-        // ordering checks: the footprint value must be continuous, i.e. partial
-        // coverage sits between the center test and the full footprint
         const byName = Object.fromEntries(result.steps.map(s => [s.name, s.selected]));
-        const centers = byName['rect / centers'];
-        const half = byName['rect / footprint 0.35'];
-        const full = byName['rect / footprint 1.00'];
+        const rectSet = byName['rect / set'];
+        const rectAddSame = byName['rect / add (same region)'];
+        const rectAddOther = byName['rect / add (disjoint region)'];
+        const rectIntersect = byName['rect / intersect'];
+        const rectRemove = byName['rect / remove'];
+        const wideSet = byName['rect / set (wide)'];
+        const leftSet = byName['rect / set (left half, replaces)'];
+
         const checks = [
-            { name: 'footprint 1.00 covers at least the centers', pass: full >= centers, detail: `${full} vs ${centers}` },
-            { name: 'footprint 0.35 sits between centers and full', pass: half >= centers && half <= full, detail: `${centers} <= ${half} <= ${full}` },
-            { name: 'toggle restores the last footprint value', pass: Math.abs(result.toggles.footprintAfterToggleOn - 0.35) < 1e-6, detail: String(result.toggles.footprintAfterToggleOn) }
+            { name: 'rect set selects through the model', pass: rectSet > 0, detail: `${rectSet} splats` },
+            {
+                name: 'add over an already selected region is idempotent',
+                pass: rectAddSame === rectSet,
+                detail: `${rectSet} -> ${rectAddSame}`
+            },
+            {
+                name: 'add over a disjoint region grows the selection',
+                pass: rectAddOther > rectSet,
+                detail: `${rectSet} -> ${rectAddOther}`
+            },
+            {
+                name: 'intersect keeps only the overlap',
+                pass: rectIntersect > 0 && rectIntersect <= rectAddOther,
+                detail: `${rectAddOther} -> ${rectIntersect}`
+            },
+            {
+                name: 'remove clears the region',
+                pass: rectRemove === 0,
+                detail: `${rectIntersect} -> ${rectRemove}`
+            },
+            {
+                name: 'set replaces the selection (narrow after wide)',
+                pass: wideSet > 0 && leftSet > 0 && leftSet < wideSet,
+                detail: `wide ${wideSet} -> left half ${leftSet}`
+            },
+            { name: 'the mask stroke path selects', pass: byName['mask / set'] > 0, detail: `${byName['mask / set']} splats` },
+            { name: 'the click path selects', pass: byName['point / set'] > 0, detail: `${byName['point / set']} splats` },
+            { name: 'the sphere volume still selects', pass: byName['sphere / set'] > 0, detail: `${byName['sphere / set']} splats` },
+            { name: 'the box volume still selects', pass: byName['box / set'] > 0, detail: `${byName['box / set']} splats` },
+            { name: 'the sphere brush still selects', pass: byName['sphere brush / set'] > 0, detail: `${byName['sphere brush / set']} splats` },
+            {
+                name: 'the depth range round-trips, clamps and resets',
+                pass: result.flags.defaultRange === '{"near":0,"far":100}' &&
+                    result.flags.setRange === '{"near":30,"far":70}' &&
+                    result.flags.crossedRange === '{"near":20,"far":80}' &&
+                    result.flags.resetRange === '{"near":0,"far":100}',
+                detail: JSON.stringify(result.flags)
+            },
+            { name: 'no console errors', pass: errors.length === 0, detail: errors.slice(0, 2).join(' | ') || 'clean' }
         ];
 
-        console.log(JSON.stringify({ importedBytes: imported, ...result, checks, failed: checks.filter(c => !c.pass).length, errors, warnings: warnings.slice(0, 20) }, null, 2));
-        if (checks.some(c => !c.pass) || errors.length) process.exitCode = 1;
+        console.log(JSON.stringify({
+            url: URL,
+            importedBytes: imported,
+            backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
+            ...result,
+            checks,
+            failed: checks.filter(c => !c.pass).length,
+            errors,
+            warnings: warnings.slice(0, 20)
+        }, null, 2));
+        if (checks.some(c => !c.pass)) process.exitCode = 1;
     } catch (err) {
         console.log(JSON.stringify({ fatal: String(err).slice(0, 800), errors, warnings: warnings.slice(0, 20) }, null, 2));
         process.exitCode = 1;

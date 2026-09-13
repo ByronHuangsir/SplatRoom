@@ -190,6 +190,69 @@ class UnhideAllOp extends StateOp {
     }
 }
 
+// 屏幕选择的"深度范围"（选区深度：最近/最远）专用：把选区**完全替换**成给定的掩码，
+// 而且可以**原地重放** —— 用户拖滑块时同一个历史条目要反复应用新的范围。
+//
+// 用一个 SelectOp('set', mask) 也能选出同样的结果，但它记的是"受影响的行"（当前选中状态与掩码
+// 不一致的那些），换一个范围再应用一次之后，undo 会退回到上一个中间状态而不是手势之前的状态。
+// 这里改成保存两个快照（pre = 手势之前的选中行，post = 现在的范围选出的行），do 就是
+// "清掉 pre（以及上一次 do 写下的行）、写上 post"，undo 就是反过来 —— 幂等，所以同一个 op 可以
+// 带着新的 post 重复 do()，历史里只留一条（拖动滑块不会刷出一堆撤销步）。
+//
+// 第二次 do() 必须把**上一次的范围**也清掉：只清 pre 的话，收窄范围时上一版选中的行会留
+// 在选区里（367 个点收窄到 40% 仍然是 367 个 —— 这个 bug 记一笔）。
+class SelectRangeOp implements EditOp {
+    name = 'selectRange';
+
+    splat: Splat;
+
+    private pre: IndexRanges;
+
+    private post: IndexRanges;
+
+    // what the last successful do() wrote, so a re-apply clears it too
+    private applied: IndexRanges | null = null;
+
+    constructor(splat: Splat, pre: IndexRanges, post: IndexRanges) {
+        this.splat = splat;
+        this.pre = pre;
+        this.post = post;
+    }
+
+    /** 换一个范围（滑块动了）：调用方随后重新 do() 即可。 */
+    setPost(post: IndexRanges) {
+        this.post = post;
+    }
+
+    async do() {
+        const { state } = this.splat;
+        state.clearBits(this.pre, State.selected);
+        if (this.applied) {
+            state.clearBits(this.applied, State.selected);
+        }
+        state.setBits(this.post, State.selected);
+        this.applied = this.post;
+        await this.splat.updateState(State.selected);
+    }
+
+    async undo() {
+        const { state } = this.splat;
+        if (this.applied) {
+            state.clearBits(this.applied, State.selected);
+        }
+        state.setBits(this.pre, State.selected);
+        this.applied = null;
+        await this.splat.updateState(State.selected);
+    }
+
+    destroy() {
+        this.splat = null;
+        this.pre = null;
+        this.post = null;
+        this.applied = null;
+    }
+}
+
 class DeleteSelectionOp extends StateOp {
     name = 'deleteSelection';
 
@@ -643,6 +706,7 @@ export {
     SelectNoneOp,
     SelectInvertOp,
     SelectOp,
+    SelectRangeOp,
     HideSelectionOp,
     UnhideAllOp,
     DeleteSelectionOp,

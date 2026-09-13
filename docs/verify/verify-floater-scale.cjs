@@ -57,8 +57,14 @@ const gen = JSON.parse(require('child_process').execFileSync(process.execPath, [
             await new Promise(r => setTimeout(r, 800));
 
             const panel = document.getElementById('floater-panel');
-            const header = panel.querySelector('.panel-header');
-            header.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            // the panel is off by default (3.7.7 on): the header's toggle is the switch, and
+            // clicking the panel header itself no longer enables it, so without this the
+            // panel keeps reading "--" and only the tooltip assertions fail
+            const toggle = panel.querySelector('.floater-panel-header-toggle .pcui-boolean-input-toggle');
+            if (toggle) {
+                toggle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                toggle.click();
+            }
             await new Promise(r => setTimeout(r, 500));
 
             let text = '--';

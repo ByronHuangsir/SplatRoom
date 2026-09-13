@@ -3,10 +3,11 @@ import { Asset, Color, GSplatData, GSplatResource, Mat4, path, Quat, Texture, Ve
 
 import { serializeGrade, deserializeGrade } from './color-grade-file';
 import { EditHistory } from '../core/edit-history';
-import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp, EditOp } from '../core/edit-ops';
+import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, SelectRangeOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp, EditOp } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
-import { getDepthThickness, getFootprint, getUseDepth } from '../core/selection-flags';
+import { IndexRanges } from '../core/index-ranges';
+import { getDepthRange } from '../core/selection-flags';
 import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../geometry/planar-fix';
 import { semanticSelect } from '../geometry/semantic-select';
 import { refineSurface, refineSurfaceLevel2, SurfaceRefineLevel2Params } from '../geometry/surface-refiner';
@@ -15,7 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
-import { selectDepthBand } from '../splat/selection-band';
+import { SelectionRangeRegion, SelectionRangeView, selectRange, rangeDistances, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -274,9 +275,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             const splatCount = scene.getElementsByType(ElementType.splat).length;
             if (splatCount <= 1) {
                 scene.camera.focus();
-                // 鎵撳紑妯″瀷榛樿涓績妯″紡锛氶噸缃负 centers 瑙嗚妯″紡骞跺叧闂?
-                // 涓績鐐?鐜彔鍔狅紙鏄剧ず妯″瀷鏈綋锛岃€岄潪楂樻柉杈圭晫/鐜級锛?
-                // 閬垮厤鎸佷箙鍖栫殑 rings/overlay 鍋忓ソ褰卞搷榛樿鍛堢幇銆?
+                // 打开模型默认中心模式：重置为 centers 视觉模式并关闭
+                // 中心点/环绕叠加（显示模型本体，而非高斯边界/环），
+                // 避免持久化的 rings/overlay 偏好影响默认呈现。
                 setCameraMode('centers');
                 events.fire('camera.setOverlay', false);
 
@@ -780,12 +781,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
     });
 
-    // ---- selection depth & footprint (V3, SuperSplat 3 semantics) ----------
-    // The flags themselves live in ./selection-flags (registered before the UI
-    // is built, since the settings panel reads them while constructing).
+    // ---- selection helpers -------------------------------------------------
     // GPU intersect + fire + release inside one queued task so the gpu readback
     // is ordered relative to other queued history ops (rapid drag + undo,
-    // drag-while-camera-settling, etc).
+    // drag-while-camera-settling, etc). Used by the 3D shapes (sphere / box) and
+    // the sphere brush; the screen-space tools run on the CPU range pass below.
     const runSelectIntersect = (splat: Splat, op: 'add'|'remove'|'set'|'intersect', options: any) => {
         return scene.commandQueue.enqueue(async () => {
             const data = await scene.dataProcessor.intersect(options, splat);
@@ -797,49 +797,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
     };
 
-    // GPU intersect only; hands back the pooled mask buffer (caller owns it and
-    // must release it via dataProcessor.releaseMask).
-    const intersectHits = (splat: Splat, options: any): Promise<Uint8Array> => {
-        return scene.commandQueue.enqueue(() => scene.dataProcessor.intersect(options, splat));
-    };
-
-    // narrow a GPU center mask to the splats the id pick reported as visible in
-    // the region: the depth-ON "surface" selection (SuperSplat: visible set 鈭?
-    // centers in region). Mutates and returns the buffer it is given.
-    const retainVisibleIds = (hits: Uint8Array, ids: Uint32Array, numSplats: number): Uint8Array => {
-        const visible = new Set<number>();
-        for (let i = 0; i < ids.length; ++i) {
-            if (ids[i] < numSplats) {
-                visible.add(ids[i]);
-            }
-        }
-        for (let i = 0; i < numSplats; ++i) {
-            if (hits[i] === 255 && !visible.has(i)) {
-                hits[i] = 0;
-            }
-        }
-        return hits;
-    };
-
-    // Visible-footprint id pass over a normalized rectangle (front-most splats
-    // whose rendered gaussian covers any pixel of the region).
-    const pickRectIds = async (splat: Splat, op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
-        scene.camera.pickPrep(splat, op);
-        const pick = await scene.camera.pickRect(
-            rect.start.x,
-            rect.start.y,
-            rect.end.x - rect.start.x,
-            rect.end.y - rect.start.y
-        );
-        return new Uint32Array(new Set(pick)).sort();
-    };
-
     // transform maps the unit sphere (diameter 1) to world space
     events.on('select.bySphere', async (op: 'add'|'remove'|'set'|'intersect', transform: Mat4) => {
         for (const splat of selectedSplats()) {
             await runSelectIntersect(splat, op, {
-                sphere: { transform },
-                footprint: getFootprint()
+                sphere: { transform }
             });
         }
     });
@@ -848,8 +810,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     events.on('select.byBox', async (op: 'add'|'remove'|'set'|'intersect', transform: Mat4) => {
         for (const splat of selectedSplats()) {
             await runSelectIntersect(splat, op, {
-                box: { transform },
-                footprint: getFootprint()
+                box: { transform }
             });
         }
     });
@@ -883,7 +844,6 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             near: camera.near,
             far: camera.far
         };
-        const footprint = getFootprint();
         const pixelScale = camera.worldSizePerPixel(1);
         const ortho = camera.ortho;
 
@@ -949,7 +909,6 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                         sphereBrush: {
                             points: pathPoints,
                             mask,
-                            footprint,
                             thickness: brushThickness,
                             viewDir
                         }
@@ -968,252 +927,242 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
     });
 
-    // which machinery a screen-space gesture runs on (SuperSplat 3 semantics):
-    //   depth ON              -> per-pixel id pick (front-most wins, op-aware)
-    //   depth OFF, footprint  -> footprint intersect through all layers
-    //   depth OFF, no footprint -> centers intersect
-    const screenSelectionMethod = (): 'pick' | 'footprint' | 'centers' => {
-        if (getUseDepth()) return 'pick';
-        return getFootprint() > 0 ? 'footprint' : 'centers';
+    // ---- screen selection: 2D region × depth range (V3, 选区深度) ----------
+    // Every screen-space gesture (rect / lasso / polygon / 2D brush / click) now runs the
+    // same CPU pass: project every splat, keep the ones whose pixel falls inside the 2D
+    // region, and keep those whose distance along the gesture's view axis lies inside
+    // [最近, 最远] - a percentage of the model's own depth extent. The default 0 / 100 is
+    // "穿透整个模型完整选择"; anything narrower carves a slab out of that column.
+    //
+    // There is no id pick, no footprint widening and no depth-pass readback any more: the
+    // whole test is splat/selection-range.ts, one projection loop per gesture.
+    //
+    // The gesture is remembered so the two sliders can re-cut it live: select from the
+    // front, orbit to the side, drag 最近 / 最远 and the slab shrinks along the *gesture's*
+    // view axis (a world-space slab that does not drift when the camera moves). Any other
+    // history op drops it.
+
+    type RangeEntry = {
+        splat: Splat;
+        op: SelectRangeOp;
+        // camera pose captured with the gesture (viewProjection / viewDir / worldTransform…)
+        view: SelectionRangeView;
+        // the model's depth extent along that pose's view axis, used to re-derive the range
+        extent: { min: number, max: number };
+        // selection bits as they were before the gesture, locked rows excluded (that is
+        // SelectOp's notion of valid): add / remove / intersect recombine off this
+        preMask: Uint8Array;
+        opKind: 'add' | 'remove' | 'set' | 'intersect';
     };
 
-    // ---- selection depth thickness (the settings panel's slider) -----------
-    // The depth method above can only ever pick the front-most splat of a pixel, so
-    // a screen selection is one layer thick. With a thickness it becomes a slab:
-    // render the depth pass once, read the front surface depth over the region in a
-    // single batched readback, then test every splat against it on the CPU (see
-    // splat/selection-band.ts). Returns null when the thickness is 0, in which case
-    // the caller keeps the historical id-pick path.
-    const depthBandMask = async (
-        splat: Splat,
-        regionContains: (px: number, py: number) => boolean,
-        bounds: { x0: number, y0: number, x1: number, y1: number }
-    ): Promise<Uint8Array | null> => {
-        const thicknessPct = getDepthThickness();
-        if (thicknessPct <= 0) {
-            return null;
+    type RangeGesture = {
+        region: SelectionRangeRegion;
+        entries: RangeEntry[];
+    };
+
+    let rangeGesture: RangeGesture | null = null;
+    const rangeOps = new Set<SelectRangeOp>();
+
+    // any other edit invalidates the remembered gesture: its post mask no longer describes
+    // the selection. Undo/redo of the gesture's own op keeps it (moving a slider re-applies)
+    events.on('edit.apply', (op: EditOp) => {
+        if (rangeGesture && !rangeOps.has(op as SelectRangeOp)) {
+            rangeGesture = null;
         }
+    });
 
-        const { width, height } = scene.targetSize;
-        const x0 = Math.max(0, Math.min(width - 1, Math.floor(bounds.x0)));
-        const y0 = Math.max(0, Math.min(height - 1, Math.floor(bounds.y0)));
-        const x1 = Math.max(0, Math.min(width - 1, Math.ceil(bounds.x1)));
-        const y1 = Math.max(0, Math.min(height - 1, Math.ceil(bounds.y1)));
-        if (x1 < x0 || y1 < y0) {
-            return null;
-        }
-
-        const bound = scene.bound;
-        const diag = bound ? bound.halfExtents.length() * 2 : 1;
-        const thickness = Math.max(1e-6, diag * thicknessPct * 0.01);
-
-        // the front-most surface depth of every region pixel, in one readback
-        scene.camera.depthPrep(splat);
-        const step = (x1 - x0 + 1) * (y1 - y0 + 1) > 400000 ? 4 : 2;
-        const columns = Math.floor((x1 - x0) / step) + 1;
-        const rows = Math.floor((y1 - y0) / step) + 1;
-        const points: { x: number, y: number }[] = new Array(columns * rows);
-        let w = 0;
-        for (let row = 0; row < rows; row++) {
-            for (let column = 0; column < columns; column++) {
-                points[w++] = {
-                    x: (x0 + column * step + 0.5) / width,
-                    y: (y0 + row * step + 0.5) / height
-                };
-            }
-        }
-        const depths = await scene.camera.readDepths(points);
-
-        const frontDepth = (px: number, py: number): number | null => {
-            const column = Math.min(columns - 1, Math.max(0, Math.round((px - x0) / step)));
-            const row = Math.min(rows - 1, Math.max(0, Math.round((py - y0) / step)));
-            const value = depths[row * columns + column];
-            return typeof value === 'number' ? value : null;
-        };
-
+    const poseSnapshot = () => {
         const camera = scene.camera;
+        const { width, height } = scene.targetSize;
         const viewProjection = new Mat4().mul2(camera.camera.projectionMatrix, camera.camera.viewMatrix);
         const cameraPosition = camera.mainCamera.getPosition();
         const viewDir = camera.mainCamera.getRotation().transformVector(Vec3.FORWARD, new Vec3());
-
-        return selectDepthBand(splat, {
-            region: { contains: regionContains },
-            frontDepth,
+        return {
             viewProjection: viewProjection.data,
-            worldTransform: splat.worldTransform.data,
-            cameraPosition: { x: cameraPosition.x, y: cameraPosition.y, z: cameraPosition.z },
-            viewDir: { x: viewDir.x, y: viewDir.y, z: viewDir.z },
-            near: camera.near,
-            far: camera.far,
-            thickness,
+            cameraPosition: vec3Like(cameraPosition),
+            viewDir: vec3Like(viewDir),
             width,
             height
-        });
+        };
     };
 
-    events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
-        const method = screenSelectionMethod();
-        const rectOptions: any = {
-            rect: { x1: rect.start.x, y1: rect.start.y, x2: rect.end.x, y2: rect.end.y }
-        };
+    // the model's depth extent along the pose's view axis: the world bound is the cheap
+    // path, a per-splat scan the fallback (the WebGPU bound readback returns zeros, see
+    // splat.updateLocalBounds, and a degenerate extent would select nothing at all)
+    const poseExtent = (splat: Splat, pose: ReturnType<typeof poseSnapshot>) => {
+        return viewExtentFromBound(splat.worldBound, pose.cameraPosition, pose.viewDir) ??
+            viewExtentFromSplats(splat, splat.worldTransform.data, pose.cameraPosition, pose.viewDir) ??
+            { min: 0, max: 1 };
+    };
 
-        for (const splat of selectedSplats()) {
-            if (method === 'centers') {
-                await runSelectIntersect(splat, op, rectOptions);
-            } else if (method === 'footprint') {
-                // the splat's projected gaussian extent vs the rect, through all
-                // depths (a wider test than the center test)
-                await runSelectIntersect(splat, op, { ...rectOptions, footprint: getFootprint() });
-            } else {
-                // depth: a slab of the given thickness behind the visible surface when
-                // the thickness slider is set, otherwise the historical one-layer pick
-                const { width, height } = scene.targetSize;
-                const px0 = Math.min(rect.start.x, rect.end.x) * width;
-                const px1 = Math.max(rect.start.x, rect.end.x) * width;
-                const py0 = Math.min(rect.start.y, rect.end.y) * height;
-                const py1 = Math.max(rect.start.y, rect.end.y) * height;
-                const band = await depthBandMask(
-                    splat,
-                    (px, py) => px >= px0 && px <= px1 && py >= py0 && py <= py1,
-                    { x0: px0, y0: py0, x1: px1, y1: py1 }
-                );
-                if (band) {
-                    events.fire('edit.add', new SelectOp(splat, op, band));
+    const rangeCombine = {
+        set: (had: boolean, hit: boolean) => hit,
+        add: (had: boolean, hit: boolean) => had || hit,
+        remove: (had: boolean, hit: boolean) => had && !hit,
+        intersect: (had: boolean, hit: boolean) => had && hit
+    };
+
+    // one entry's post mask for a given range: the 2D hit mask recombined with the
+    // selection the gesture started from
+    const rangePost = (gesture: RangeGesture, entry: RangeEntry, near: number, far: number): IndexRanges => {
+        const distances = rangeDistances(entry.extent.min, entry.extent.max, near, far);
+        const mask = selectRange(entry.splat, gesture.region, { ...entry.view, ...distances });
+        const combine = rangeCombine[entry.opKind];
+        const preMask = entry.preMask;
+        return IndexRanges.fromPredicate(entry.splat.splatData.numSplats, i => combine(preMask[i] !== 0, mask[i] === 255));
+    };
+
+    // run a screen gesture: capture the pose, build one op per splat, hand them to history
+    const runRangeSelection = async (
+        region: SelectionRangeRegion,
+        opKind: 'add' | 'remove' | 'set' | 'intersect',
+        splats: Splat[]
+    ) => {
+        if (!splats.length) {
+            return;
+        }
+
+        const pose = poseSnapshot();
+        const { near, far } = getDepthRange();
+        const entries: RangeEntry[] = [];
+        const combine = rangeCombine[opKind];
+
+        for (const splat of splats) {
+            const state = splat.splatData.getProp('state') as Uint8Array;
+            const numSplats = splat.splatData.numSplats;
+            if (!state || !numSplats) {
+                continue;
+            }
+
+            const extent = poseExtent(splat, pose);
+            const distances = rangeDistances(extent.min, extent.max, near, far);
+            const view: SelectionRangeView = {
+                ...pose,
+                worldTransform: splat.worldTransform.data,
+                ...distances
+            };
+
+            // the selection as it stands, minus locked rows: a hidden splat is locked AND
+            // still carries the selected bit (see HideSelectionOp)
+            const preMask = new Uint8Array(numSplats);
+            for (let i = 0; i < numSplats; i++) {
+                if ((state[i] & State.selected) !== 0 && (state[i] & State.locked) === 0) {
+                    preMask[i] = 255;
+                }
+            }
+
+            const hit = selectRange(splat, region, view);
+            const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
+            const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
+
+            entries.push({
+                splat,
+                op: new SelectRangeOp(splat, pre, post),
+                view,
+                extent,
+                preMask,
+                opKind
+            });
+        }
+
+        // applied through history so every gesture stays one undo step
+        for (const entry of entries) {
+            await editHistory.add(entry.op);
+        }
+
+        rangeGesture = entries.length ? { region, entries } : null;
+        rangeOps.clear();
+        entries.forEach(entry => rangeOps.add(entry.op));
+    };
+
+    // live re-cut while a depth-range slider moves. Recomputed as fast as the CPU pass
+    // allows and always with the newest value: a drag fires 'change' far faster than a
+    // 900k-splat pass finishes, so intermediate values are dropped rather than queued.
+    let rangePumpBusy = false;
+    let rangePending: { near: number, far: number } | null = null;
+
+    const pumpRange = async () => {
+        if (rangePumpBusy) {
+            return;
+        }
+        rangePumpBusy = true;
+        try {
+            while (rangePending) {
+                const range = rangePending;
+                const gesture = rangeGesture;
+                rangePending = null;
+                if (!gesture) {
                     continue;
                 }
-
-                // visible splats in the rect, narrowed to centers in the
-                // rect when the footprint toggle is off (SuperSplat's
-                // centers+depth == the visible surface)
-                const ids = await pickRectIds(splat, op, rect);
-                if (getFootprint() > 0 || !ids.length) {
-                    events.fire('edit.add', new SelectOp(splat, op, ids));
-                } else {
-                    const center = await intersectHits(splat, rectOptions);
-                    events.fire('edit.add', new SelectOp(splat, op, retainVisibleIds(center, ids, splat.splatData.numSplats)));
-                    scene.dataProcessor.releaseMask(center);
-                }
-            }
-        }
-    });
-
-    events.function('select.byMask', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
-        const method = screenSelectionMethod();
-
-        // snapshot the stroke into an op-private texture: a cached texture could
-        // be repainted by a later stroke before the queued intersect reads it
-        const maskTexture = new Texture(scene.graphicsDevice);
-        maskTexture.setSource(canvas);
-
-        // visible-footprint pass: front-most splats whose rendered gaussian
-        // covers a stroked pixel of the mask.
-        const pickMaskIds = async (splat: Splat) => {
-            const mask = context.getImageData(0, 0, canvas.width, canvas.height);
-
-            // calculate mask bound so we limit pixel operations
-            let mx0 = mask.width - 1;
-            let my0 = mask.height - 1;
-            let mx1 = 0;
-            let my1 = 0;
-            for (let y = 0; y < mask.height; ++y) {
-                for (let x = 0; x < mask.width; ++x) {
-                    if (mask.data[(y * mask.width + x) * 4 + 3] === 255) {
-                        mx0 = Math.min(mx0, x);
-                        my0 = Math.min(my0, y);
-                        mx1 = Math.max(mx1, x);
-                        my1 = Math.max(my1, y);
-                    }
-                }
-            }
-
-            // Convert mask bounds to normalized coordinates
-            const nx0 = mx0 / mask.width;
-            const ny0 = my0 / mask.height;
-            const nx1 = (mx1 + 1) / mask.width;
-            const ny1 = (my1 + 1) / mask.height;
-            const nw = nx1 - nx0;
-            const nh = ny1 - ny0;
-
-            scene.camera.pickPrep(splat, op);
-            const pick = await scene.camera.pickRect(nx0, ny0, nw, nh);
-
-            // Calculate actual pixel dimensions for iteration
-            const { width, height } = scene.targetSize;
-
-            // Convert normalized coordinates to render target pixels
-            const px = Math.floor(nx0 * width);
-            const py = Math.floor(ny0 * height);
-            const pw = Math.max(1, Math.ceil((nx0 + nw) * width) - px);
-            const ph = Math.max(1, Math.ceil((ny0 + nh) * height) - py);
-
-            const selected = new Set<number>();
-            for (let y = 0; y < ph; ++y) {
-                for (let x = 0; x < pw; ++x) {
-                    const mx = Math.floor((nx0 + x / width) * mask.width);
-                    const my = Math.floor((ny0 + y / height) * mask.height);
-                    if (mask.data[(my * mask.width + mx) * 4] === 255) {
-                        selected.add(pick[(ph - 1 - y) * pw + x]);
-                    }
-                }
-            }
-
-            return new Uint32Array(selected).sort();
-        };
-
-        try {
-            for (const splat of selectedSplats()) {
-                if (method === 'centers') {
-                    await runSelectIntersect(splat, op, { mask: maskTexture });
-                } else if (method === 'footprint') {
-                    // the splat's projected gaussian extent vs the stroke, through
-                    // all depths (a wider test than the center test)
-                    await runSelectIntersect(splat, op, { mask: maskTexture, footprint: getFootprint() });
-                } else {
-                    // depth: a slab of the given thickness behind the visible surface
-                    // when the thickness slider is set, otherwise the historical
-                    // one-layer pick (visible splats under the stroke, narrowed to
-                    // centers in the stroke when the footprint toggle is off)
-                    const { width, height } = scene.targetSize;
-                    const band = await depthBandMask(
-                        splat,
-                        (px, py) => {
-                            const mx = Math.floor((px / width) * canvas.width);
-                            const my = Math.floor((py / height) * canvas.height);
-                            if (mx < 0 || my < 0 || mx >= canvas.width || my >= canvas.height) {
-                                return false;
-                            }
-                            return context.getImageData(mx, my, 1, 1).data[3] > 0;
-                        },
-                        { x0: 0, y0: 0, x1: width - 1, y1: height - 1 }
-                    );
-                    if (band) {
-                        events.fire('edit.add', new SelectOp(splat, op, band));
-                        continue;
-                    }
-
-                    const ids = await pickMaskIds(splat);
-                    if (getFootprint() > 0 || !ids.length) {
-                        events.fire('edit.add', new SelectOp(splat, op, ids));
-                    } else {
-                        const center = await intersectHits(splat, { mask: maskTexture });
-                        events.fire('edit.add', new SelectOp(splat, op, retainVisibleIds(center, ids, splat.splatData.numSplats)));
-                        scene.dataProcessor.releaseMask(center);
-                    }
+                for (const entry of gesture.entries) {
+                    entry.op.setPost(rangePost(gesture, entry, range.near, range.far));
+                    await scene.commandQueue.enqueue(() => entry.op.do());
                 }
             }
         } finally {
-            maskTexture.destroy();
+            rangePumpBusy = false;
         }
+    };
+
+    events.on('selection.depthRange', (range: { near: number, far: number }) => {
+        if (!rangeGesture) {
+            return;
+        }
+        rangePending = range;
+        void pumpRange();
     });
 
-    // ---- L1/L2 璇箟鍖哄煙閫夋嫨锛堝湴闈?/ 姘村煙锛?---
-    // 鐢?RANSAC 骞抽潰妫€娴?+ 姘村煙鐗瑰緛鎶?鍦伴潰/姘撮潰"楂樻柉閫変腑锛?55 鎺╃爜锛夛紝
-    // 澶嶇敤鐜版湁 SelectOp 閫夊尯绠＄嚎锛涘彲閰嶅悎"鐔ㄥ钩"锛坰emantic.flatten锛夈€?
+    events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
+        const { width, height } = scene.targetSize;
+        const px0 = Math.min(rect.start.x, rect.end.x) * width;
+        const px1 = Math.max(rect.start.x, rect.end.x) * width;
+        const py0 = Math.min(rect.start.y, rect.end.y) * height;
+        const py1 = Math.max(rect.start.y, rect.end.y) * height;
+
+        await runRangeSelection(
+            { contains: (px, py) => px >= px0 && px <= px1 && py >= py0 && py <= py1 },
+            op,
+            selectedSplats()
+        );
+    });
+
+    // lasso / polygon / 2D brush strokes: the region is the stroke's own alpha, read out
+    // of the canvas ONCE. The old path called getImageData per candidate splat, which on
+    // a 931k model meant hundreds of thousands of canvas reads inside the selection loop.
+    events.function('select.byMask', async (op: 'add'|'remove'|'set'|'intersect', canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
+        const { width, height } = scene.targetSize;
+        const image = context.getImageData(0, 0, canvas.width, canvas.height);
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const alpha = new Uint8Array(cw * ch);
+        for (let i = 0; i < alpha.length; i++) {
+            alpha[i] = image.data[i * 4 + 3];
+        }
+
+        await runRangeSelection(
+            {
+                contains: (px, py) => {
+                    const mx = Math.floor((px / width) * cw);
+                    const my = Math.floor((py / height) * ch);
+                    if (mx < 0 || my < 0 || mx >= cw || my >= ch) {
+                        return false;
+                    }
+                    return alpha[my * cw + mx] > 0;
+                }
+            },
+            op,
+            selectedSplats()
+        );
+    });
+
+    // ---- L1/L2 语义区域选择（地面 / 水域）----
+    // 用 RANSAC 平面检测 + 水域特征把"地面/水面"高斯选中（255 掩码），
+    // 复用现有 SelectOp 选区管线；可配合"熨平"（semantic.flatten）。
     events.function('semantic.select', async (region: 'ground' | 'water' | 'both', selectOp: 'add'|'remove'|'set'|'intersect' = 'set') => {
         const splat = events.invoke('selection') as Splat;
         if (!splat) return { ok: false, reason: 'no-selection' } as const;
         const result = await semanticSelect(splat, { region });
-        // 鎺╃爜 1 鈫?255锛圫electOp 绾﹀畾 255 = hit锛?
+        // 掩码 0/1 → 0/255（SelectOp 约定 255 = hit）
         const mask = new Uint8Array(result.selection.length);
         for (let i = 0; i < result.selection.length; i++) {
             mask[i] = result.selection[i] ? 255 : 0;
@@ -1227,8 +1176,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         } as const;
     });
 
-    // 璇箟鍦伴潰鐔ㄥ钩锛氳瘑鍒渶澶у钩闈㈠悗鎵ц applyFix锛堢啫骞?+ 琛ユ紡锛夛紝
-    // 缁撴灉鐩存帴鏇挎崲 splat 鏁版嵁锛堝厛鍋氶獙璇佺敤锛涘巻鍙插寲鍚庣画鎺ュ叆锛夈€?
+    // 语义地面熨平：识别最大平面后执行 applyFix（整平 + 补漏），
+    // 结果直接替换 splat 数据（先做验证用；历史化后续接入）。
     events.function('semantic.flatten', async (options?: { detect?: { distanceTol?: number; iterations?: number; minInliers?: number }; fix?: object }) => {
         const splat = events.invoke('selection') as Splat;
         if (!splat) return { ok: false, reason: 'no-selection' } as const;
@@ -1240,7 +1189,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
         if (!result.fixed) return { ok: false, reason: 'no-plane' } as const;
 
-        // GSplatData 鈫?Asset锛堝鐢?surfaceRefine 鐨?undo/redo 妯″紡锛?
+        // GSplatData → Asset（沿用 surfaceRefine 的 undo/redo 模式）
         const device = splat.scene.app.graphicsDevice;
         const undoResource = new GSplatResource(device, splat.splatData);
         const undoAsset = new Asset('semantic-flatten-undo', 'gsplat', {
@@ -1273,61 +1222,23 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         } as const;
     });
 
+    // a click without a drag: the region is a small box under the cursor (a strict single
+    // pixel is too brittle - on a coarse model no splat lands exactly there, and touch
+    // input has its own slack), so with the default range the click selects the column
+    // through the model that the rect tool would. The depth-range sliders narrow it.
     events.function('select.point', async (op: 'add'|'remove'|'set'|'intersect', point: { x: number, y: number }) => {
         const { width, height } = scene.targetSize;
         const clickX = Math.min(width - 1, Math.max(0, Math.floor(point.x * width)));
         const clickY = Math.min(height - 1, Math.max(0, Math.floor(point.y * height)));
+        const slack = 3;
 
-        // front-most visible splat exactly under the cursor
-        const pickPixel = async (splat: Splat): Promise<number | undefined> => {
-            scene.camera.pickPrep(splat, op);
-            const pickResult = await scene.camera.pickRect(
-                point.x,
-                point.y,
-                1 / width,
-                1 / height
-            );
-            return pickResult[0];
-        };
-
-        for (const splat of selectedSplats()) {
-            const method = screenSelectionMethod();
-            const rect1px: any = {
-                rect: {
-                    x1: point.x,
-                    y1: point.y,
-                    x2: point.x + 1 / width,
-                    y2: point.y + 1 / height
-                }
-            };
-
-            if (method === 'centers') {
-                await runSelectIntersect(splat, op, rect1px);
-            } else if (method === 'footprint') {
-                // footprint click: any splat whose projected extent covers the
-                // clicked pixel (a wider test than the center test)
-                await runSelectIntersect(splat, op, { ...rect1px, footprint: getFootprint() });
-            } else {
-                // depth clicks deliberately ignore the footprint toggle and pick
-                // the front-most splat under the cursor (requiring a visible
-                // center at the clicked pixel would make clicking rarely land).
-                // With a thickness the click picks the slab behind that pixel.
-                const band = await depthBandMask(
-                    splat,
-                    (px, py) => px === clickX && py === clickY,
-                    { x0: clickX - 2, y0: clickY - 2, x1: clickX + 2, y1: clickY + 2 }
-                );
-                if (band) {
-                    events.fire('edit.add', new SelectOp(splat, op, band));
-                    continue;
-                }
-
-                const pickId = await pickPixel(splat);
-                if (pickId !== undefined) {
-                    events.fire('edit.add', new SelectOp(splat, op, new Uint32Array([pickId])));
-                }
-            }
-        }
+        await runRangeSelection(
+            {
+                contains: (px, py) => Math.abs(px - clickX) <= slack && Math.abs(py - clickY) <= slack
+            },
+            op,
+            selectedSplats()
+        );
     });
 
     // Eyedropper selection with SelectOp so undo/redo and selection state updates remain consistent.

@@ -1,24 +1,24 @@
-import { BooleanInput, Container, Label, SliderInput } from '@playcanvas/pcui';
+import { Button, Container, Label, SliderInput } from '@playcanvas/pcui';
 
 import { i18n } from './localization';
 import { Events } from '../core/events';
 
 /**
- * 选择工具的**深度条**：点开屏幕选择工具（矩形/套索/多边形/2D 笔刷）时浮出来的小工具栏，
- * 里面是一个"深度"开关 + 一个深度滑块。
+ * 选择工具的**深度条**：点开屏幕选择工具时浮出来的小工具栏，里面是"选区深度"的
+ * 最近 / 最远 两个滑块（外加一个重置）。
  *
- * 参照用户给的线上编辑器（data.good360vr.com/editor）：那边点开选择工具就会出现深度滑块，而我们的深度
- * 原本只藏在设置面板里，用起来要先翻面板，和"边选边调"的工作流不搭。
+ * 对齐线上编辑器（data.good360vr.com/editor，SUPERSPLAT v2 那套）：选中区域时，默认
+ * **穿透整个模型**完整选择，再拖最近 / 最远把这段穿透空间切出想要的板层。所以滑块
+ * 一启动就有效 —— 不需要先开什么开关，0 / 100 就是"整段"。
  *
- * 两个控件的作用：
- *   - 深度开关 = `selection.useDepth`：开 = 只作用于可见表面（每像素最前面的高斯），关 = 穿透所有层；
- *   - 深度滑块 = `selection.depthThickness`（占模型对角线的百分比，0 = 只选一层）：大于 0 时选择变成
- *     "前表面往后 T 的一段带"，判定在 splat/selection-band.ts。滑块一离开 0 会自动把深度开关打开 ——
- *     厚度只有在深度模式下才有意义，省得用户调了没反应。
+ *   - 最近 / 最远 = `selection.depthRange`（占模型自身深度范围的百分比）；
+ *   - 拖动即**实时重切当前选区**（同一个历史条目，不会刷出一堆撤销步）；
+ *   - 重置 = 回到 0 / 100（完整穿透）。
  *
- * 只挂在屏幕选择工具上：球刷有自己的"厚度"滑块（沿视线的板状体），不需要再来一个深度滑块。
+ * 只挂在会用到它的工具上（矩形/套索/多边形/2D 笔刷/快速填充）；球体、盒体是三维体选择，
+ * 球刷有自己的"厚度"（贴着表面往里的板层），都不需要再来一套视线深度。
  */
-const TOOLS_WITH_DEPTH = ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection'];
+const TOOLS_WITH_RANGE = ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection'];
 
 class SelectionDepthBar {
     constructor(events: Events, parent: HTMLElement) {
@@ -33,81 +33,94 @@ class SelectionDepthBar {
             e.stopPropagation();
         });
 
-        const depthLabel = new Label({ class: 'select-toolbar-label' });
-        i18n.bindText(depthLabel, 'select-toolbar.depth');
+        const title = new Label({ class: 'select-toolbar-label', text: '' });
+        i18n.bindText(title, 'select-toolbar.selectionDepth');
 
-        const depthToggle = new BooleanInput({
-            type: 'toggle',
-            class: 'select-toolbar-toggle',
-            value: !!events.invoke('selection.useDepth')
-        });
+        const nearLabel = new Label({ class: 'select-toolbar-label', text: '' });
+        i18n.bindText(nearLabel, 'select-toolbar.depthNear');
 
-        const thicknessLabel = new Label({ class: 'select-toolbar-label' });
-        i18n.bindText(thicknessLabel, 'select-toolbar.depthThickness');
-
-        const thickness = new SliderInput({
+        const near = new SliderInput({
             class: 'select-toolbar-slider',
             min: 0,
-            max: 20,
-            step: 0.5,
-            precision: 1,
-            value: (events.invoke('selection.depthThickness') as number) ?? 0
+            max: 100,
+            step: 1,
+            precision: 0,
+            value: 0
         });
 
-        bar.append(depthLabel);
-        bar.append(depthToggle);
+        const farLabel = new Label({ class: 'select-toolbar-label', text: '' });
+        i18n.bindText(farLabel, 'select-toolbar.depthFar');
+
+        const far = new SliderInput({
+            class: 'select-toolbar-slider',
+            min: 0,
+            max: 100,
+            step: 1,
+            precision: 0,
+            value: 100
+        });
+
+        const reset = new Button({ class: 'select-toolbar-button', text: '' });
+        i18n.bindText(reset, 'select-toolbar.depthReset');
+
+        bar.append(title);
         bar.append(new Container({ class: 'select-toolbar-separator' }));
-        bar.append(thicknessLabel);
-        bar.append(thickness);
+        bar.append(nearLabel);
+        bar.append(near);
+        bar.append(farLabel);
+        bar.append(far);
+        bar.append(new Container({ class: 'select-toolbar-separator' }));
+        bar.append(reset);
         parent.appendChild(bar.dom);
 
-        // PCUI fires 'change' when the value is set programmatically, so the echo back into the
-        // control has to be guarded (otherwise writing the flag in would write a clamped value back)
+        // PCUI fires 'change' when a value is set programmatically, so the echo back into
+        // the controls has to be guarded (otherwise a clamped value would be written back)
         let updating = false;
 
-        const syncEnabled = () => {
-            const useDepth = !!events.invoke('selection.useDepth');
-            depthToggle.value = useDepth;
-            thickness.enabled = useDepth;
-            thickness.class[useDepth ? 'remove' : 'add']('dimmed');
+        const range = () => (events.invoke('selection.depthRange') as { near: number, far: number }) ?? { near: 0, far: 100 };
+
+        const sync = () => {
+            const { near: nearValue, far: farValue } = range();
+            updating = true;
+            near.value = nearValue;
+            far.value = farValue;
+            updating = false;
+            // the title lights up while the selection is not the full through-pass
+            const narrowed = nearValue > 0 || farValue < 100;
+            title.class[narrowed ? 'add' : 'remove']('active');
         };
 
-        depthToggle.on('change', (value: boolean) => {
+        near.on('change', (value: number) => {
             if (!updating) {
-                events.fire('selection.setUseDepth', value);
+                events.fire('selection.setDepthRange', { near: value });
             }
         });
 
-        thickness.on('change', (value: number) => {
+        far.on('change', (value: number) => {
             if (!updating) {
-                if (value > 0 && !events.invoke('selection.useDepth')) {
-                    // a thickness without depth would do nothing, so switch depth on with it
-                    events.fire('selection.setUseDepth', true);
-                }
-                events.fire('selection.setDepthThickness', value);
+                events.fire('selection.setDepthRange', { far: value });
             }
         });
 
-        events.on('selection.useDepth', () => syncEnabled());
-        events.on('selection.depthThickness', (value: number) => {
-            updating = true;
-            thickness.value = value;
-            updating = false;
+        reset.on('click', () => {
+            events.fire('selection.resetDepthRange');
         });
+
+        events.on('selection.depthRange', () => sync());
 
         // the bar follows the active tool
         events.on('tool.activated', (name: string) => {
-            const visible = TOOLS_WITH_DEPTH.includes(name);
+            const visible = TOOLS_WITH_RANGE.includes(name);
             bar.hidden = !visible;
             if (visible) {
-                syncEnabled();
+                sync();
             }
         });
         events.on('tool.deactivated', () => {
             bar.hidden = true;
         });
 
-        syncEnabled();
+        sync();
     }
 }
 

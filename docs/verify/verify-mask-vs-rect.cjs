@@ -76,9 +76,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 return countSelected();
             };
 
-            // depth + footprint so both paths pick the visible surface
-            events.fire('selection.setUseDepth', true);
-            events.fire('selection.setFootprint', 1);
+            // the default depth range (0 / 100) makes both paths run the same
+            // through-model pass, so the stroke and the rect are directly comparable
+            events.fire('selection.resetDepthRange');
 
             // a stroke canvas covering either the upper or the lower half band
             const makeStroke = (y0) => {

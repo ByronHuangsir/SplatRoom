@@ -56,21 +56,21 @@
         background-color: $bcg-dark;
     }
 
-    // the selection depth bar: a depth toggle plus its thickness slider, shown while a
-    // screen-space selection tool is active (rect / lasso / polygon / 2d brush)
+    // the selection depth bar ("选区深度"): 最近 / 最远 sliders plus a reset, shown while a
+    // screen-space selection tool is active (rect / lasso / polygon / 2d brush / flood)
     #selection-depth-bar {
-        .select-toolbar-toggle {
-            margin: 0px 4px 0px 0px;
+        .select-toolbar-slider {
+            width: 130px;
+            margin: 0px 8px 0px 6px;
         }
 
-        .select-toolbar-slider {
-            width: 180px;
-            margin: 0px 8px 0px 6px;
+        // the title lights up while the selection is narrower than the full through-pass
+        .select-toolbar-label.active {
+            color: $clr-active;
+        }
 
-            // the thickness only does anything in depth mode, so it dims while depth is off
-            &.dimmed {
-                opacity: 0.45;
-            }
+        .select-toolbar-button {
+            margin-left: 4px;
         }
     }
 

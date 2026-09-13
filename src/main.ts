@@ -109,8 +109,8 @@ const main = async () => {
     // root events object
     const events = new Events();
 
-    // selection depth / footprint flags: registered up front because the
-    // settings panel reads them while it is being constructed
+    // selection depth range (选区深度: 最近 / 最远) flags: registered up front because
+    // the depth bar reads them while it is being constructed
     registerSelectionFlags(events);
 
     // tool modules (src/tool-modules) — register module events (compare.open, …)

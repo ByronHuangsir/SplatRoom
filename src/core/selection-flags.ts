@@ -1,44 +1,35 @@
 import { Events } from './events';
 
-// Selection depth / footprint state (V3, SuperSplat 3 semantics).
+// Selection depth range (V3, "选区深度" —— 最近 / 最远).
 //
-// This lives in its own module so it can be registered before the UI is built:
-// the settings panel reads these values while it is constructed, which happens
-// before the editor registers its handlers.
+// 屏幕选择工具默认**穿透整个模型**：只要高斯的投影落在 2D 选择区域里就选中，不管有多深。
+// 这两个值把这段穿透空间再切一刀，是**占模型自身深度范围的百分比**（沿手势当时的视轴量取）：
 //
-//   useDepth : only splats visible on the surface can be selected. Screen-space
-//              gestures then run on the per-pixel id pick (front-most wins),
-//              which is SuperSplat's "selection depth".
-//   footprint: 0 tests the splat's center point; >0 widens the hit test by a
-//              fraction of the splat's rendered gaussian extent, so a splat
-//              whose visible cover touches the region counts even when its
-//              center falls outside it. The value is continuous in [0, 1] (as
-//              upstream's footprint slider is): 1 = the full rendered
-//              footprint, 0.5 = half of it, and so on.
-//   depthThickness: how far BEHIND the front-most surface a screen selection
-//              reaches, as a percentage of the model's diagonal. 0 keeps the
-//              historical behaviour (only the visible layer can be selected,
-//              one id per pixel); > 0 widens it into a slab, the same idea as the
-//              sphere brush's thickness slider, implemented by renderig the depth
-//              pass once and testing every splat against it (see
-//              splat/selection-band.ts).
+//   near = 0   -> 从模型最近的一端开始选
+//   far  = 100 -> 一直选到最远的一端
 //
-// All persist; the defaults (depth off, footprint 0, thickness 0) are SplatRoom's
-// historical centre-based behaviour.
+// 所以 0 / 100 就是"完整穿透"（默认）。0 与 100 之间是同一段区间，两个值夹出要保留的板层；
+// 判定在 splat/selection-range.ts。
+//
+// 这个模块独立于 UI：选区深度浮条在构建时就读取这些值，而 editor 的处理器注册得更晚。
+// 值会持久化，重启后保持。
 
-let useDepth = false;
-let footprint = 0;
-let depthThickness = 0;
-// what the toggle (toolbar button / Shift+M) restores when it turns footprint
-// back on: the last non-zero value the user picked, so a slider setting survives
-// a toggle round trip
-let lastFootprint = 1;
+const NEAR_KEY = 'splatroom.selDepthNear';
+const FAR_KEY = 'splatroom.selDepthFar';
 
-const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const DEFAULT_NEAR = 0;
+const DEFAULT_FAR = 100;
 
-const readStored = (key: string, legacyKey?: string) => {
+let depthNear = DEFAULT_NEAR;
+let depthFar = DEFAULT_FAR;
+
+const clampPct = (value: number, fallback: number) => {
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : fallback;
+};
+
+const readStored = (key: string) => {
     try {
-        return localStorage.getItem(key) ?? (legacyKey ? localStorage.getItem(legacyKey) : null);
+        return localStorage.getItem(key);
     } catch {
         return null;
     }
@@ -50,66 +41,50 @@ const store = (key: string, value: string) => {
     } catch { /* storage unavailable */ }
 };
 
-// legacy keys stored '0' / '1'; both parse as numbers, so an old preference
-// carries over unchanged
-const readFootprint = () => {
-    const raw = readStored('splatroom.selFootprint', 'splatroom.selUseFootprint');
-    if (raw === null) return 0;
-    const value = Number.parseFloat(raw);
-    return Number.isFinite(value) ? clamp01(value) : 0;
+// 两个值互相约束：最近不能越过最远。写进来的是一整对时按大小排好；只写一个值时按
+// "双柄 range" 的手感**顶开对面那个柄**（拖最近越过最远，最远跟着走），而不是把手里的值丢掉。
+const order = (near: number, far: number) => {
+    const n = clampPct(near, DEFAULT_NEAR);
+    const f = clampPct(far, DEFAULT_FAR);
+    return n <= f ? { near: n, far: f } : { near: f, far: n };
 };
 
 const registerSelectionFlags = (events: Events) => {
-    useDepth = readStored('splatroom.selUseDepth', 'splatroom.selSurfaceOnly') === '1';
-    footprint = readFootprint();
-    if (footprint > 0) {
-        lastFootprint = footprint;
-    }
-    const storedThickness = Number.parseFloat(readStored('splatroom.selDepthThickness') ?? '');
-    depthThickness = Number.isFinite(storedThickness) ? Math.max(0, Math.min(50, storedThickness)) : 0;
+    const stored = order(
+        Number.parseFloat(readStored(NEAR_KEY) ?? ''),
+        Number.parseFloat(readStored(FAR_KEY) ?? '')
+    );
+    depthNear = stored.near;
+    depthFar = stored.far;
 
-    const setUseDepth = (value: boolean) => {
-        if (value !== useDepth) {
-            useDepth = value;
-            store('splatroom.selUseDepth', value ? '1' : '0');
-            events.fire('selection.useDepth', value);
-        }
-    };
-
-    // accepts any value in [0, 1]; the hit test scales the splat extent by it,
-    // so fractional values give partial-coverage selections
-    const setFootprint = (value: number) => {
-        const next = Number.isFinite(value) ? clamp01(value) : 0;
-        if (next === footprint) {
+    const setRange = (near: number, far: number) => {
+        const next = order(near, far);
+        if (next.near === depthNear && next.far === depthFar) {
             return;
         }
-        footprint = next;
-        if (next > 0) {
-            lastFootprint = next;
-        }
-        store('splatroom.selFootprint', String(next));
-        events.fire('selection.footprint', next);
+        depthNear = next.near;
+        depthFar = next.far;
+        store(NEAR_KEY, String(next.near));
+        store(FAR_KEY, String(next.far));
+        events.fire('selection.depthRange', { near: next.near, far: next.far });
     };
 
-    events.function('selection.useDepth', () => useDepth);
-    events.function('selection.footprint', () => footprint);
-    events.function('selection.depthThickness', () => depthThickness);
-    events.on('selection.setUseDepth', setUseDepth);
-    events.on('selection.setFootprint', setFootprint);
-    events.on('selection.toggleUseDepth', () => setUseDepth(!useDepth));
-    events.on('selection.toggleFootprint', () => setFootprint(footprint > 0 ? 0 : lastFootprint));
-    events.on('selection.setDepthThickness', (value: number) => {
-        const next = Number.isFinite(value) ? Math.max(0, Math.min(50, value)) : 0;
-        if (next !== depthThickness) {
-            depthThickness = next;
-            store('splatroom.selDepthThickness', String(next));
-            events.fire('selection.depthThickness', next);
+    events.function('selection.depthRange', () => ({ near: depthNear, far: depthFar }));
+    events.on('selection.setDepthRange', (value: { near?: number, far?: number }) => {
+        const movedNear = value?.near !== undefined;
+        const movedFar = value?.far !== undefined;
+        let near = movedNear ? value.near : depthNear;
+        let far = movedFar ? value.far : depthFar;
+        if (movedNear && !movedFar && near > far) {
+            far = near;
+        } else if (movedFar && !movedNear && far < near) {
+            near = far;
         }
+        setRange(near, far);
     });
+    events.on('selection.resetDepthRange', () => setRange(DEFAULT_NEAR, DEFAULT_FAR));
 };
 
-const getUseDepth = () => useDepth;
-const getFootprint = () => footprint;
-const getDepthThickness = () => depthThickness;
+const getDepthRange = () => ({ near: depthNear, far: depthFar });
 
-export { registerSelectionFlags, getUseDepth, getFootprint, getDepthThickness };
+export { registerSelectionFlags, getDepthRange, DEFAULT_NEAR, DEFAULT_FAR };

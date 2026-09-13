@@ -36,12 +36,6 @@ const defaultShortcuts: Record<string, ShortcutBinding> = {
     'select.invert': { keys: ['i'], ctrl: 'required' },
     'select.delete': { keys: ['Delete', 'Backspace'] },
 
-    // Selection depth / footprint (SuperSplat 3 toggles: N = depth, M =
-    // footprint there; M is already the centers/rings view toggle here, so the
-    // footprint toggle takes shift+M instead)
-    'selection.toggleUseDepth': { keys: ['n'] },
-    'selection.toggleFootprint': { keys: ['m'], shift: 'required' },
-
     // Clipboard
     'edit.copy': { keys: ['c'], ctrl: 'required', capture: true },
     'edit.cut': { keys: ['x'], ctrl: 'required', capture: true },

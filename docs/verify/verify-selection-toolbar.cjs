@@ -1,5 +1,5 @@
 // Headless verification for the SuperSplat-style selection toolbar:
-//   - the depth / footprint mode toggles exist, swap icons and drive the flags
+//   - the depth / footprint mode buttons are gone (the depth range bar replaced them)
 //   - grouped tool buttons (polygon+lasso, eyedropper+flood) toggle on a short
 //     press and open their popup on a press-and-hold
 //   - the sphere brush button activates the tool
@@ -41,41 +41,14 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             const visible = (el) => !!el && el.style.display !== 'none';
             const icons = (el) => Array.from(el.querySelectorAll('svg'));
 
-            // --- the two selection mode toggles ---
-            const depthBtn = byId('bottom-toolbar-selection-mode');
-            const footBtn = byId('bottom-toolbar-selection-footprint');
-            check('depth toggle exists', !!depthBtn);
-            check('footprint toggle exists', !!footBtn);
-            if (!depthBtn || !footBtn) return out;
-
-            check('depth toggle has 2 icons', icons(depthBtn).length === 2, icons(depthBtn).length);
-            check('footprint toggle has 2 icons', icons(footBtn).length === 2, icons(footBtn).length);
-
-            // initial state: depth off, footprint 0 -> off icon + centers icon
-            const depthIcons = icons(depthBtn);
-            const footIcons = icons(footBtn);
-            check('depth starts with the off icon', visible(depthIcons[1]) && !visible(depthIcons[0]));
-            check('footprint starts on centers', visible(footIcons[0]) && !visible(footIcons[1]));
-
-            // click depth -> flag on, icon swapped, aria-pressed
-            depthBtn.click();
-            await sleep(150);
-            check('depth click sets the flag', events.invoke('selection.useDepth') === true);
-            check('depth click swaps the icon', visible(depthIcons[0]) && !visible(depthIcons[1]));
-            check('depth aria-pressed updated', depthBtn.getAttribute('aria-pressed') === 'true');
-            depthBtn.click();
-            await sleep(150);
-            check('depth click toggles back', events.invoke('selection.useDepth') === false);
-
-            // click footprint -> footprint 1, rings icon
-            footBtn.click();
-            await sleep(150);
-            check('footprint click sets the value', events.invoke('selection.footprint') === 1);
-            check('footprint click swaps the icon', visible(footIcons[1]) && !visible(footIcons[0]));
-            check('footprint aria-pressed updated', footBtn.getAttribute('aria-pressed') === 'true');
-            footBtn.click();
-            await sleep(150);
-            check('footprint click toggles back', events.invoke('selection.footprint') === 0);
+            // --- the removed selection mode buttons (选择深度 / 选择覆盖范围) ---
+            // they were replaced by the depth range bar, so the old toolbar buttons and
+            // their flag API must be gone rather than left as dead controls
+            check('depth toggle removed from the toolbar', !byId('bottom-toolbar-selection-mode'));
+            check('footprint toggle removed from the toolbar', !byId('bottom-toolbar-selection-footprint'));
+            check('the useDepth flag API is gone', events.invoke('selection.useDepth') === undefined);
+            check('the footprint flag API is gone', events.invoke('selection.footprint') === undefined);
+            check('the depth range API is present', typeof events.invoke('selection.depthRange') === 'object');
 
             // --- grouped tool buttons ---
             const polygonGroup = byId('bottom-toolbar-polygon');

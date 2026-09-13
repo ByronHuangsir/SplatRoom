@@ -134,8 +134,7 @@ const shapeCase = (page, kind, scaleFactor) => page.evaluate(async (k, s) => {
         worldCenter: [+worldCenter.x.toFixed(4), +worldCenter.y.toFixed(4), +worldCenter.z.toFixed(4)],
         expected,
         actual: splat.numSelected,
-        footprint: scene.events.invoke('selection.footprint'),
-        useDepth: scene.events.invoke('selection.useDepth')
+        depthRange: scene.events.invoke('selection.depthRange')
     };
 }, kind, scaleFactor);
 

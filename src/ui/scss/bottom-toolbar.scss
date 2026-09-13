@@ -41,27 +41,6 @@
     background-color: $bcg-primary;
 }
 
-// selection mode toggles (depth / footprint): a plain icon button that swaps
-// its icon for the on/off (or centers/rings) state
-.bottom-toolbar-selection-mode-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 38px;
-    height: 38px;
-    margin: 0px 1px;
-    padding: 0;
-    border: 0;
-    border-radius: 2px;
-    background-color: $bcg-primary;
-
-    svg {
-        width: 20px;
-        height: 20px;
-        color: $clr-default;
-    }
-}
-
 // tool group buttons carry a corner triangle, the usual flyout marker,
 // so users know press-and-hold reveals more tools
 .bottom-toolbar-group {

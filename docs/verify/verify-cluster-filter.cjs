@@ -53,11 +53,14 @@ const gen = JSON.parse(require('child_process').execFileSync(process.execPath, [
             await new Promise(r => setTimeout(r, 400));
 
             const panel = document.getElementById('floater-panel');
-            const toggleEl = panel.querySelector('.floater-panel-header-toggle .pcui-boolean-input, .floater-panel-header-toggle input, .floater-panel-header-toggle [role=switch]')
-                ?? panel.querySelector('.floater-panel-header-toggle');
-            toggleEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            toggleEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            toggleEl.click();
+            // the panel is off by default (3.7.7 on): the switch is the toggle inside the
+            // header row. A click on the wrapper (pcui-boolean-input) does not flip it, so
+            // aim at the toggle element itself the way verify-floater-detect does.
+            const toggleEl = panel.querySelector('.floater-panel-header-toggle .pcui-boolean-input-toggle');
+            if (toggleEl) {
+                toggleEl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                toggleEl.click();
+            }
             await new Promise(r => setTimeout(r, 1500));   // debounced detection
 
             const results = Array.from(panel.querySelectorAll('.floater-panel-result'));
