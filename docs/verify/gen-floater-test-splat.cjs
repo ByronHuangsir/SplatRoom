@@ -9,13 +9,13 @@
 //   blobs         12 / 25 / 40 gaussians at 3 units out on +X / +Y / +Z, well clear of everything.
 //   strays         5 single gaussians alone in space.
 //
-// The detector keys on ONE thing now: how empty the space around a gaussian is, measured at a scale
-// tied to the point spacing (see splat/floater-removal.ts). Everything genuinely isolated qualifies,
-// so the 5 strays AND the 77 points of the detached islands are selected (82), while the surface
-// patch and the main cloud are not. Detached islands used to be left to the connected-cluster filter;
-// the density rule now catches them too, and the cluster filter is kept for its own semantics
-// ("delete clusters below a size threshold" / "keep the largest cluster only", which the density rule
-// has no notion of).
+// The detector keys on TWO things now: how empty the space around a gaussian is (at a scale tied to the
+// point spacing), measured together with how faint the gaussian is. The faintness clause exists because
+// on the user's real scan the room surfaces are sampled as coarsely as the floaters, so sparseness alone
+// selected the walls and floor (see docs/V3-WebGPU-现状.md 6.31). Consequence for this model: the 5 strays
+// are still selected (nothing around them at all -> the count clause alone decides, whatever the opacity),
+// while the 77 opaque points of the detached islands fall to the connected-cluster filter, which is where
+// whole patches belong anyway. The surface patch and the main cloud are never selected.
 //
 // usage: node docs/verify/gen-floater-test-splat.cjs [outPath]
 const fs = require('fs');
@@ -141,8 +141,9 @@ console.log(JSON.stringify({
     strays: STRAYS,
     floaterBlobs: BLOBS.reduce((n, b) => n + b.count, 0),
     expected: {
-        // 去浮云 的密度判据：空间上真正孤立的东西全都算，所以是 5 个散点 + 77 个游离小团的点
-        floaterDetectorSelects: STRAYS + BLOBS.reduce((n, b) => n + b.count, 0),
+        // 去浮云 的判据是"几乎空的 且 偏透明"：孤立散点无论透明度都会命中（邻居数低于 hardLimit 那一支），
+        // 而这 3 团 island 的 opacity 是 0.95（不透明），所以留给下方"连通簇"处理
+        floaterDetectorSelects: STRAYS,
         strays: STRAYS,
         detachedIslands: BLOBS.reduce((n, b) => n + b.count, 0),
         mustNotSelect: ATTACHED,                                           // surface detail

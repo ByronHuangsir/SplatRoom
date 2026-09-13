@@ -7,16 +7,13 @@
 //   strays         5 single gaussians alone in space                        -> real floaters
 //   blobs      12/25/40 gaussian clumps 3 units away                        -> detached islands
 //
-// The detector used to OR four loose rules (transparency, abnormal volume, low neighbour count,
-// distance from the centroid); the first two hit the surface patch (measured: all 40 selected, 117
-// in total). It now keys on ONE thing - how empty the space around a gaussian is, at a scale tied to
-// the point spacing (34.5x the median nearest-neighbour distance) - so all 82 genuinely isolated
-// gaussians are selected (5 strays + the 77 points of the detached islands) and nothing on the
-// surface is. Detached islands used to be left to the cluster filter; the density rule catches them
-// too now, and the cluster filter keeps its own size-threshold semantics.
-//
-// The scale fix itself (a real 931k scan used to select almost nothing because the "point spacing"
-// estimate was the scene size, 226x too large) is pinned separately by verify-floater-scale.cjs.
+// The detector keys on TWO things: how empty the space around a gaussian is (at a scale tied to the
+// point spacing, 34.5x the median nearest-neighbour distance) and how faint the gaussian is. The
+// faintness clause was added after the user reported that on a real scan the tool "deleted the walls,
+// windows, floor and tabletop": there, the room surfaces are sampled as coarsely as the floaters, so
+// sparseness alone cannot tell them apart (measured in docs/V3-WebGPU-现状.md 6.31). A gaussian with
+// almost NO neighbours is selected whatever its opacity, so the 5 lone strays here are still found,
+// while the 3 opaque detached islands (12/25/40 points) now fall to the connected-cluster filter.
 //
 // usage: node docs/verify/verify-floater-detect.cjs "<url>" [model]
 const fs = require('fs');
@@ -152,11 +149,11 @@ const inspect = async (page, model) => {
 
         const checks = [
             {
-                name: 'the detector selects every isolated gaussian (strays + detached islands)',
+                name: 'the detector selects every lone stray, whatever its opacity',
                 pass: floaterRun.selected === expectedSelects && floaterRun.detachedPicked === expectedSelects,
-                detail: `selected ${floaterRun.selected} of ${floaterRun.numSplats}, expected ${expectedSelects} ` +
-                    `(${gen.expected.strays} strays + ${gen.expected.detachedIslands} detached-island points; ` +
-                    `classified ${floaterRun.detachedPicked} beyond r=1.5) (panel said ${floaterRun.countText}, breakdown ${floaterRun.breakdown})`
+                detail: `selected ${floaterRun.selected} of ${floaterRun.numSplats}, expected ${expectedSelects} strays ` +
+                    `(classified ${floaterRun.detachedPicked} beyond r=1.5; the ${gen.expected.detachedIslands} opaque ` +
+                    `points of the detached islands are the cluster filter's job) (panel said ${floaterRun.countText}, breakdown ${floaterRun.breakdown})`
             },
             {
                 name: 'no surface-hugging gaussian is selected',

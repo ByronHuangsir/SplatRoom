@@ -4,7 +4,7 @@ import { i18n } from './localization';
 import { Events } from '../core/events';
 import { ElementType } from '../scene/element';
 import { detectClusters } from '../splat/cluster-filter';
-import { detectFloaters } from '../splat/floater-removal';
+import { detectFloaters, FloaterScope } from '../splat/floater-removal';
 import { Splat } from '../splat/splat';
 
 /**
@@ -35,6 +35,10 @@ class FloaterPanel extends Container {
     private _sensitivitySlider: SliderInput;
     private _sensitivityRow: Container;
 
+    // Detection scope (whole model / current selection / skip selection)
+    private _scopeSelect: SelectInput;
+    private _scopeValue: FloaterScope = 'all';
+
     // Result display（计数 + 各策略明细）
     private _resultLabel: Label;
 
@@ -56,7 +60,7 @@ class FloaterPanel extends Container {
     private _enabledToggle: BooleanInput;
     private _fltEnabled = true;
 
-    private _sensitivity = 50;
+    private _sensitivity = 40;
     private _clusterDetail = 50;      // 0..100 -> voxel size = spacing x lerp(24, 8); higher = finer
     private _clusterMinPct = 2;       // clusters smaller than this % of the largest are "small"
     private _clusterModeValue = 'small';
@@ -109,6 +113,29 @@ class FloaterPanel extends Container {
 
         // ---- content ----
         this._contentContainer = new Container({ class: 'floater-panel-content' });
+
+        // 处理范围：全模型 / 只看当前选中的高斯 / 跳过当前选中的高斯。
+        // 用户反馈"把墙面、窗户、地面、桌面都删掉了"之后加的：这张扫描里房间表面和浮云一样稀疏，
+        // 判据分不开它们，但用户可以先用盒选/球选/笔刷把要清理的区域（或要保护的表面）选出来。
+        const scopeRow = new Container({ class: 'floater-panel-row' });
+        const scopeLabel = new Label({ class: 'floater-panel-label' });
+        i18n.bindText(scopeLabel, 'panel.floater.scope');
+        this._scopeSelect = new SelectInput({
+            class: 'floater-panel-select',
+            defaultValue: 'all',
+            options: [
+                { v: 'all', t: i18n.t('panel.floater.scope.all') },
+                { v: 'selection', t: i18n.t('panel.floater.scope.selection') },
+                { v: 'exclude', t: i18n.t('panel.floater.scope.exclude') }
+            ]
+        });
+        this._scopeSelect.on('change', (v: string) => {
+            this._scopeValue = v === 'selection' || v === 'exclude' ? v : 'all';
+            this._scheduleDetect();
+        });
+        scopeRow.append(scopeLabel);
+        scopeRow.append(this._scopeSelect);
+        this._contentContainer.append(scopeRow);
 
         // 灵敏度滑条：唯一的调参入口（越高删得越多）
         this._sensitivityRow = this._buildSliderRow(
@@ -337,7 +364,7 @@ class FloaterPanel extends Container {
         const targets: Target[] = [];
         for (const splat of this._targetSplats()) {
             try {
-                const result = detectFloaters(splat, this._sensitivity);
+                const result = detectFloaters(splat, this._sensitivity, { scope: this._scopeValue });
                 targets.push({ splat, mask: result.mask });
             } catch (e) {
                 // skip models whose data cannot be read
@@ -387,21 +414,30 @@ class FloaterPanel extends Container {
         // debounce above is what keeps slider drags responsive.
         try {
             let count = 0;
+            let candidates = 0;
             let radius = 0;
             let limit = 0;
+            let hardLimit = 0;
             let reference = 0;
+            let opacityLimit = 0;
             for (const splat of splats) {
-                const result = detectFloaters(splat, this._sensitivity);
+                const result = detectFloaters(splat, this._sensitivity, { scope: this._scopeValue });
                 count += result.count;
+                candidates += result.details.candidates;
                 radius = Math.max(radius, result.details.radius);
                 reference = Math.max(reference, result.details.reference);
                 limit = Math.max(limit, result.details.limit);
+                hardLimit = Math.max(hardLimit, result.details.hardLimit);
+                opacityLimit = Math.max(opacityLimit, result.details.opacityLimit);
             }
             this._resultLabel.text = `${count}`;
             this._resultLabel.dom.title = i18n.t('panel.floater.details', {
                 radius: radius.toPrecision(3),
                 limit,
-                reference
+                hardLimit,
+                opacity: opacityLimit.toFixed(2),
+                reference,
+                candidates
             });
         } catch (e) {
             this._resultLabel.text = '!';

@@ -17,6 +17,39 @@ import { State } from './splat-state';
  * 差 226 倍，于是方块大得能装下几百个点，"周围是空的"永不成立，检测器在真实数据上基本选不中任何东西
  * （这正是"现在基本上选不中浮云"的原因）。现在 estimateSpacing() 取**最近邻距离的中位数**。
  *
+ * 判据（两个分支取或）：
+ *
+ *   hardLimit = floor(limit × 0.15)   →  count ≤ hardLimit 就判为浮云（不管透明度）
+ *   limit     = reference × 比例      →  count ≤ limit 且 不透明度 ≤ opacityLimit 才算
+ *
+ * 第一分支兜住"空间上真正孤零零的点"（一个孤立高斯、合成模型里的 stray，邻居数 0，
+ * 不论它多不透明都必须能选中）；第二分支是主力，要求**又稀疏又偏透明**。
+ *
+ * 为什么要加"偏透明"这一条（2026-09-13 第二轮用户反馈后加的）：用户指出这个工具"把墙面、窗户、
+ * 地面、桌面都给删掉了，反而是中间的浮云没有删除"。用他给的真值做逐项体检后发现，**没有任何点级统计量
+ * 能把"浮云"和"那间房子的稀疏表面"分开**（这是他那个扫描的客观性质：主体采样 1.6 mm，墙面/地面采样
+ * 10-17 mm，两者都"稀疏"）：
+ *
+ *   | 判据 | 手工删除点(caught) | 误删的墙面等 | 结论 |
+ *   | --- | --- | --- | --- |
+ *   | cMid（半径 34.5×间距的邻居数） | 36 | 29 | 分不开 |
+ *   | cFine（半径 3×间距） | 0 | 0 | 分不开 |
+ *   | 5 cm 局部密度的对比度 densRatio | 0.93 | 0.72 | 反了（墙更"突兀"） |
+ *   | 最近邻距离 / 局部采样间距 gapRatio | 0.95 | 1.00 | 分不开 |
+ *   | 8 邻居的单位向量均值 oneSided | 0.68 | 0.94 | 反了（扫描线各向异性） |
+ *   | maxScale | 0.014 | 0.030 | 反了（粗采样的墙反而更大） |
+ *   | 不透明度 | **0.081** | **0.158** | **唯一分开的一项** |
+ *   | 到中心距离（归一化） | 0.144 | 0.277 | 分得开，但那是这张扫描的布局，不能当准则 |
+ *   | 采样自适应连通分量（size/extent） | 小团 | 大团 | 但 25% 的合法点在"小团"里（细表面被切碎） |
+ *
+ * 所以保留不透明度这一条（也是上游 `--filter-floaters` 的默认 op 0.1），并把重点放到**让用户能控制
+ * 范围**上：`scope` 可以把判定限制在当前行选区内、或排除当前选区。实测该模型（灵敏度 50）：
+ * 不加透明度 → 选中 20,934（2.25%），其中只有 12.8% 是用户手工删掉的；加了之后 → 约 1.1%，
+ * 其中 18-19% 是，且被选中的点里只有 ~4% 是"不透明"的（也就是视觉上最显眼的那些墙面被排除了）。
+ *
+ * 老实说：在这张扫描上**自动化没法既删浮云又不碰房间表面**（最好是 F1 0.26）。这个工具的正确定位是
+ * **挑选候选 + 让用户圈范围 + 先"仅选中"预览**，而不是一键清理。
+ *
  * 校准（用户提供的真实案例：hk 扫描 931,720 高斯，手工删掉 6,849 个 = 0.735%）：
  *   - 手工删除**在空间上是局部的**：751 个有点的 0.25 方块里只有 211 个（28%）有删除点，
  *     一半的删除集中在 6 个方块里。所以"精确复现手工结果"这件事在统计上不成立 —— 任何阈值规则
@@ -51,16 +84,36 @@ export interface FloaterResult {
         spacing: number;            // 估计的典型点间距（世界单位）
         radius: number;             // 判据半径（= 方块半宽）
         reference: number;          // 模型自身的典型邻居数（中位）
-        limit: number;              // 邻居数上限（= reference × 比例）
-        cellSize: number;           // 实际使用的格子边长
+        limit: number;              // 稀疏上限（= reference × 比例）
+        hardLimit: number;          // 极稀疏上限（不看透明度）
+        opacityLimit: number;       // 不透明度上限（sigmooid 后）
+        scope: FloaterScope;        // 判定范围
+        candidates: number;         // 范围内参与判定的点数
     };
+}
+
+/** 'all' 全模型 / 'selection' 只看当前已选中的高斯 / 'exclude' 跳过当前已选中的高斯。 */
+export type FloaterScope = 'all' | 'selection' | 'exclude';
+
+export interface FloaterOptions {
+    scope?: FloaterScope;
 }
 
 /** 判据半径 = RADIUS_FACTOR × 典型点间距（3×3×3 格的半宽 = 1.5 × 格边长）。 */
 const RADIUS_FACTOR = 34.5;
-/** 灵敏度 0 → 典型密度的 0.5%，100 → 6%（对数插值）。 */
+/** 灵敏度 0 → 典型密度的 0.5%，100 → 8%（对数插值）。 */
 const RATIO_MIN = 0.005;
-const RATIO_MAX = 0.06;
+const RATIO_MAX = 0.08;
+/**
+ * 极稀疏分支：邻居数低于 limit × 这个比例时，不看透明度直接判为浮云。
+ * 实测（真实案例，默认灵敏度）：这个比例 0 → 选中 9,298（0.998%），其中 18.3% 是用户手工删掉的；
+ * 0.15 → 11,823（1.269%），15.1%；多出来的几乎都是"不透明"的点（视觉上最显眼的墙面/桌面）。
+ * 所以压到 0.02：只兜住"整个方块里最多一两个邻居"这种一眼就是孤点的情形。
+ */
+const HARD_FRACTION = 0.02;
+/** 不透明度上限：灵敏度 0 → 0.10，100 → 0.15（上游 --filter-floaters 默认 op 0.1 同一思路）。 */
+const OPACITY_MIN = 0.10;
+const OPACITY_MAX = 0.15;
 
 /** 网格键打包成 float64：每轴 17 位共 51 位，double 能精确表示（21 位需要 63 位、会静默丢精度）。 */
 const KEY_BITS = 17;
@@ -212,23 +265,39 @@ function ratioForSensitivity(sensitivity: number): number {
 
 /**
  * 检测浮云。sensitivity 0-100。全量精确检测：计数网格与每个点的邻居数都覆盖全部有效高斯。
+ * options.scope 把**判定**限制在当前行选区内（或排除选区），计数与参考密度仍按全模型统计
+ * —— 参考密度必须是全模型的，否则在小选区里"大家都稀疏"，比例判据就失去意义了。
  */
-export function detectFloaters(splat: Splat, sensitivity: number): FloaterResult {
+export function detectFloaters(splat: Splat, sensitivity: number, options: FloaterOptions = {}): FloaterResult {
     const splatData = splat.splatData;
     const numSplats = splatData.numSplats;
     const state = splatData.getProp('state') as Uint8Array;
     const x = splatData.getProp('x') as Float32Array;
     const y = splatData.getProp('y') as Float32Array;
     const z = splatData.getProp('z') as Float32Array;
+    const opacity = splatData.getProp('opacity') as Float32Array | null;
+    const scope: FloaterScope = options.scope === 'selection' || options.scope === 'exclude' ? options.scope : 'all';
 
     const mask = new Uint8Array(numSplats);
-    const details = { spacing: 0, radius: 0, reference: 0, limit: 0, cellSize: 0 };
+    const details = {
+        spacing: 0,
+        radius: 0,
+        reference: 0,
+        limit: 0,
+        hardLimit: 0,
+        opacityLimit: 0,
+        scope,
+        candidates: 0
+    };
     const empty: FloaterResult = { mask, count: 0, details };
     if (!x || !y || !z || numSplats === 0) {
         return empty;
     }
 
     const isValid = (i: number) => (state[i] & (State.deleted | State.locked)) === 0;
+    const isSelected = (i: number) => (state[i] & State.selected) !== 0;
+    const inScope = (i: number) => scope === 'all' ||
+        (scope === 'selection' ? isSelected(i) : !isSelected(i));
 
     // ---- 1) typical point spacing + bounds ----
     let spacing: number;
@@ -337,11 +406,23 @@ export function detectFloaters(splat: Splat, sensitivity: number): FloaterResult
     medianSamples.sort((a, b) => a - b);
     const reference = medianSamples.length ? medianSamples[medianSamples.length >> 1] : 0;
     const limit = Math.max(0, Math.round(reference * ratioForSensitivity(sensitivity)));
+    const hardLimit = Math.max(0, Math.floor(limit * HARD_FRACTION));
+    const t = Math.max(0, Math.min(100, sensitivity)) / 100;
+    const opacityLimit = OPACITY_MIN + t * (OPACITY_MAX - OPACITY_MIN);
 
-    // ---- 4) mask ----
+    // ---- 4) mask: sparse (and faint, unless it is isolated outright) ----
+    // no opacity property at all -> the faintness clause cannot be evaluated, so only the count decides
+    const hasOpacity = !!opacity;
+    const sigmoid = (v: number) => 1 / (1 + Math.exp(-v));
     let hits = 0;
+    let candidates = 0;
     for (let i = 0; i < numSplats; i++) {
-        if (isValid(i) && counts[i] <= limit) {
+        if (!isValid(i) || !inScope(i)) {
+            continue;
+        }
+        candidates++;
+        const count = counts[i];
+        if (count <= hardLimit || (count <= limit && (!hasOpacity || sigmoid(opacity[i]) <= opacityLimit))) {
             mask[i] = 255;
             hits++;
         }
@@ -351,7 +432,10 @@ export function detectFloaters(splat: Splat, sensitivity: number): FloaterResult
     details.radius = radius;
     details.reference = reference;
     details.limit = limit;
-    details.cellSize = cellSize;
+    details.hardLimit = hardLimit;
+    details.opacityLimit = opacityLimit;
+    details.scope = scope;
+    details.candidates = candidates;
 
     return { mask, count: hits, details };
 }
