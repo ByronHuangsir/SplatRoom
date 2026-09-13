@@ -597,7 +597,13 @@ export function createAnalysisOverlay(): AnalysisOverlay {
         const pointG: number[] = [];
         const pointB: number[] = [];
 
-        const fovRad = (50 * Math.PI) / 180;  // default scene FOV
+        // Pixels per world unit at one unit of depth, taken straight from the projection matrix
+        // instead of assuming a 50° vertical fov: m11 (column-major index 5) is 1/tan(fovY/2) for
+        // a perspective projection, so this follows whatever fov the camera actually has. The
+        // panel's 视野 slider used to move the camera while the overlay kept computing radii for a
+        // fixed 50°, which made every floater marker drift as soon as the fov changed.
+        const projScaleY = projMat.data[5];
+        const fovFactor = projScaleY * ch * 0.5;
 
         for (let i = 0; i < sample; i++) {
             const idx = Math.min(n - 1, i * step);
@@ -632,7 +638,7 @@ export function createAnalysisOverlay(): AnalysisOverlay {
                     // compute the floater's true projected radius from its
                     // actual gaussian scales (s0/s1/s2) and distance to
                     // camera.  size on screen ≈ max_scale / dist · fovFactor
-                    const camDist = Math.max(0.005, ndcDepthToDist(sz, fovRad, ch));
+                    const camDist = Math.max(0.005, ndcDepthToDist(sz));
                     let maxScale = 0.5;  // sensible default world-unit radius
                     try {
                         const s0 = gsplatData.getProp('scale_0') as Float32Array;
@@ -646,9 +652,6 @@ export function createAnalysisOverlay(): AnalysisOverlay {
                             maxScale = Math.max(a, b, c);
                         }
                     } catch (_) {}
-                    // fovFactor: pixels per world unit at distance 1 ≈
-                    // canvas_h / (2 * tan(fov/2)) ≈ canvas_h / 0.93
-                    const fovFactor = ch / (2 * Math.tan(fovRad / 2));
                     let screenR = (maxScale / camDist) * fovFactor;
                     // 原始范围 [8, 80] —— 大圆点形成柔和覆盖
                     screenR = Math.max(8, Math.min(80, screenR));
@@ -687,11 +690,10 @@ export function createAnalysisOverlay(): AnalysisOverlay {
             } catch (_) {}
             return 0.5;
         }
-        function ndcDepthToDist(ndcZ: number, fov: number, canvasH: number): number {
-            // ndcZ is in [-1, 1] after perspective division.
-            // Approximate camera distance from ndc depth.
-            // For typical perspective: dist ≈ near / ndc_at_X (rough)
-            // Simpler: map ndc to a pseudo-distance using FOV
+        // ndcZ is in [-1, 1] after perspective division: map it to a pseudo-distance. (The fov and
+        // canvas-height parameters this used to take were never read - screen size is scaled by
+        // fovFactor at the call site instead.)
+        function ndcDepthToDist(ndcZ: number): number {
             if (ndcZ >= 1.0) return 100;
             if (ndcZ <= -1.0) return 100;
             const t = (ndcZ + 1) * 0.5;   // 0..1
@@ -1132,9 +1134,27 @@ export function createAnalysisOverlay(): AnalysisOverlay {
             };
             const srcCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
             if (srcCtx) {
-                // Read in coarse blocks (one per grid cell) for performance.
-                // Each grid cell covers (cw/gw × ch/gh) source pixels — sample
-                // a small NxN patch and average luma.
+                // Read the whole source rect ONCE and sample it from memory. This used to call
+                // getImageData inside the cell × 3×3-patch loop, i.e. up to gw·gh·9 = 82,944
+                // readbacks per refresh (every 5th frame), each of them synchronising the canvas.
+                // The sampling below is the same: a 2×2 block average around each patch point,
+                // clamped to the read region.
+                const readX = Math.max(0, Math.floor(sRect.x));
+                const readY = Math.max(0, Math.floor(sRect.y));
+                const readW = Math.max(1, Math.min(sourceCanvas.width - readX, Math.ceil(sRect.w)));
+                const readH = Math.max(1, Math.min(sourceCanvas.height - readY, Math.ceil(sRect.h)));
+                const srcPixels = srcCtx.getImageData(readX, readY, readW, readH).data;
+
+                // luma of one source pixel, or -1 when outside the read region
+                const lumaAt = (px: number, py: number) => {
+                    const lx = px - readX;
+                    const ly = py - readY;
+                    if (lx < 0 || ly < 0 || lx >= readW || ly >= readH) return -1;
+                    const o = (ly * readW + lx) * 4;
+                    // Rec. 709 luma
+                    return (0.2126 * srcPixels[o] + 0.7152 * srcPixels[o + 1] + 0.0722 * srcPixels[o + 2]) / 255;
+                };
+
                 const N = 3;  // 3×3 sample patch per cell
                 for (let gy = 0; gy < gh; gy++) {
                     for (let gx = 0; gx < gw; gx++) {
@@ -1153,14 +1173,15 @@ export function createAnalysisOverlay(): AnalysisOverlay {
                                 if (px < 0 || py < 0 ||
                                     px >= sourceCanvas.width || py >= sourceCanvas.height) continue;
                                 // Sample 2×2 block average (smooths noise)
-                                const d = srcCtx.getImageData(
-                                    Math.max(0, px - 1), Math.max(0, py - 1), 2, 2
-                                ).data;
-                                for (let i = 0; i < 4; i++) {
-                                    const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
-                                    // Rec. 709 luma
-                                    sumL += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-                                    cnt++;
+                                const bx = Math.max(0, px - 1);
+                                const by = Math.max(0, py - 1);
+                                for (let oy = 0; oy < 2; oy++) {
+                                    for (let ox = 0; ox < 2; ox++) {
+                                        const l = lumaAt(bx + ox, by + oy);
+                                        if (l < 0) continue;
+                                        sumL += l;
+                                        cnt++;
+                                    }
                                 }
                             }
                         }

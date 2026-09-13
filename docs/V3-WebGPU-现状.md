@@ -879,6 +879,56 @@ discards stray floaters"）：把高斯中心量化到体素、对**被占用的
   shape-selection 双后端 / edit-hide / grade-crop / volume-dim / centers / pip ×2 / effects /
   export-image / equirect / ortho / palette / webgpu-fallback / diag 7/7），`npm run check` 全绿。
 
+### 6.28 第二十五轮：对比工具两处修正 + 文案补译（并查出一个新的真缺陷）
+
+用户从待办里挑了三项：对比工具的浮云标记跟随实际 FOV、对比工具表面破洞模式的回读性能、补齐
+gamepad 等一批未翻译文案。做完后**前两项都被证明是"潜伏问题"**，另外查出一个真缺陷，如实记录。
+
+**（1）浮云标记半径改为跟随实际 FOV —— 正确但当前的测试场景看不出来**
+
+- 旧代码 `src/compare/compare-analysis.ts:600` 写死 `const fovRad = (50 * Math.PI) / 180;`，
+  用它算 `fovFactor = ch / (2·tan(fovRad/2))`（像素/世界单位），而面板的"视野"滑条是 10–120、
+  默认 50 —— 调过视野后每个浮云标记的半径就与实际不符。
+- 现在直接从**投影矩阵**取这个比例：`fovFactor = projMat.data[5]（即 m11）× ch / 2`，对任何 FOV
+  都对（透视矩阵里 m11 = 1/tan(fovY/2)）。顺带把 `ndcDepthToDist(ndcZ, fov, canvasH)` 里**从来没被
+  读过**的两个参数删掉。
+- **实测对比（before/after 双构建，FOV 20/50/80 的浮云黄标记像素数）**：两者完全相同
+  （41872 / 37481 / 30145）。原因查清了：半径最后被 `Math.max(8, Math.min(80, r))` 夹住，而
+  test-model 的浮云都在 8 px 下界上，所以**在这类小尺度模型上这个修正不可见**；只有当未夹紧的半径
+  落进 (8, 80) 区间（近距离/大浮云）时差异才显现 —— 例如 maxScale 0.5、距离 5 时：FOV 50 → 96 px、
+  FOV 80 → 60 px。也就是说这是一处**潜在正确性修正**，不是当前可见的 bug。
+- 没有为它加回归脚本：夹紧区间会让"标记半径随 FOV 变化"的断言在默认测试场景里必假，写不出有意义的
+  阈值断言。
+
+**（2）表面破洞模式的回读 —— 路径本身就是死的（新发现）**
+
+- 旧代码在 `cell × 3×3 patch` 四层循环里调用 `srcCtx.getImageData(px-1, py-1, 2, 2)`，网格最大
+  96²（`:1043`）→ **每次刷新最多 82,944 次回读**，且每 5 帧重跑；注释却写着"Read in coarse blocks
+  (one per grid cell) for performance"，与代码相反。
+- 已改成**整块读一次**（`getImageData(readX, readY, readW, readH)`）+ 从缓冲区做同样的 2×2 均值
+  （夹紧到读取区域），采样语义不变。
+- **但 instrument 后发现这条路径根本没执行**：在 `?mode=compare` 页面里劫持
+  `CanvasRenderingContext2D.prototype.getImageData` 统计，开破洞模式并拖动相机触发刷新后
+  **调用次数为 0**（修复前后都是 0）。原因是 `compare-scene.ts` 把**应用自己的渲染 canvas** 当作
+  "source canvas" 传进分析（`setAnalysisMode` → `this.canvas`），而一个已经拿到 WebGL/WebGPU
+  上下文的 canvas **无法再给出 2D 上下文**：实测 `document.querySelector('canvas').getContext('2d')`
+  返回 `null` → `if (srcCtx)` 守卫直接跳过 → **"按像素明暗找洞"这一半信号从来没参与过判定**，
+  破洞模式实际只用了高斯透射率/暗度那一路。
+- 所以这一项的真实性质是：**把死代码加固了**（顺手把注释与实现改成一致），用户可见的收益为零。
+  真正该修的是"让像素信号可用" —— 需要像主程序那样从渲染目标回读（`colorBuffer.read(..., immediate)`
+  或先渲染到离屏 canvas 再读），再把像素交给分析，属于一处功能修复，已向用户说明并待确认。
+
+**（3）文案补译**
+
+- 7 个语言各补译 27–29 条（共 **192 个值**）：`gamepad.*`、`dialog.control-customize.*` 两个整块，
+  外加 `menu.render.image.current/keyframes`、`popup.export.iterations`、`menu.file.export.viewer`、
+  `panel.settings.tone-mapping.filmic`。翻法都以该语言**已有的同概念译法**为准（如
+  `gamepad.settings.presets.xbox`、`panel.camera.axis.pitch`）。
+- 另有 **52 条有意保留英文**（专有名词与纯技术词：ACES2 / Ping Pong / Screenshot / Codec / Bitrate /
+  Jitter / Orbit / Gamepad / Drone，以及在该语言中拼写相同的 Position、Rotation、Saturation 等），
+  逐条给了理由。
+- `npm run lint:locales` 676 键全同步 ✓；`git diff` 为 192 insertions / 192 deletions，无附带改动。
+
 
 
 
