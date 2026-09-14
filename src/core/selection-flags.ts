@@ -65,10 +65,13 @@ const store = (keys: { low: string, high: string, outerLow: string, outerHigh: s
     } catch { /* storage unavailable */ }
 };
 
-/** 把四个值夹进值域并维持 outerLow ≤ low ≤ high ≤ outerHigh。 */
+/** 把四个值夹进值域并维持 outerLow ≤ low ≤ high ≤ outerHigh。步长 0.1（见 range-slider 的非线性映射）。 */
+const round1 = (value: number) => Math.round(value * 10) / 10;
+
 const normalize = (axis: Axis, limits: Limits): Axis => {
     const pick = (value: number, fallback: number) => {
-        return Number.isFinite(value) ? Math.max(limits.min, Math.min(limits.max, value)) : fallback;
+        return Number.isFinite(value) ?
+            round1(Math.max(limits.min, Math.min(limits.max, value))) : fallback;
     };
     const next = {
         outerLow: pick(axis.outerLow, FULL.outerLow),
