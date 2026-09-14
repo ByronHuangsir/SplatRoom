@@ -1,25 +1,23 @@
-import { Container, Label, NumericInput } from '@playcanvas/pcui';
+import { Container, Label } from '@playcanvas/pcui';
 
 import { i18n } from './localization';
 
 /**
- * 四柄 range 控件：`外柄 …内柄` 一对夹住一个轴标签，两对之间是选区。
+ * 四柄 range 控件，严格按设计稿的 `----o 近 o-------o 远 o----` 来排：
  *
- *   ----o 近 o-------o 远 o----      o = 滑块（外柄 / 内柄）
+ *   - **4 个圆柄都在同一条轨道上**：每端一对 = 外柄（扩边到哪）+ 内柄（现在选到哪）；
+ *   - **轴标签（近/远、左/右、上/下）画在轨道上、就在那对柄的中间**（不是放在行两端）；
+ *   - 两端露出的是空轨道（外扩余地），两个内柄之间是选区；
+ *   - 两柄之间那一段（半透明橙）= 扩边多吃进来的部分，默认零扩边时是空的；
+ *   - **行里没有数字框**：数值在拖动时贴在柄旁边浮出，平时收在柄的 tooltip 里。
  *
- * 每个轴有两个"层次"：
- *   - **内柄**（内层的两个）= 选区边界（裁到哪），和上一版的双柄一样；
- *   - **外柄**（外层的两个）= **扩边到哪**：外柄与内柄之间那段（半透明橙）就是"扩边多吃进来的部分"。
+ * 为了让"一对柄"永远看得出是两个柄、并给中间的字留位置，外柄的**绘制位置**在离内柄太近时
+ * 会往外让开一个"标签宽 + 6px"的固定间隙（纯视觉，数值语义不变：拖动时按这个间隙换算回真实值，
+ * 所以柄始终跟着指针走）。零扩边时两个柄就是这样一个在里一个在外、中间是轴标签的样子。
  *
- * 两者默认重合（不扩边），此时行为与只有内柄时完全一致。拖动手感（链式约束
- * outerLow ≤ low ≤ high ≤ outerHigh 始终成立）：
- *   - 外柄**向外**拖 → 扩边量变大（选区变大）；
- *   - 外柄**向内**拖 → 先把扩边量收到 0，继续拖就带着内柄一起收（收边）；
- *   - 内柄向外拖 → 外柄跟着走（整段平移，扩边量保持）。
- *
- * 用 DOM 搭（PCUI 只有单柄滑块，也没有多柄 range）。拖动、点击轨道、方向键（Shift ×10）、
- * 数值框输入都能改；写回控件时用 `updating` 守卫（PCUI 赋值会触发 change），
- * `Number.isFinite` 兜底（坏值不会渲染成 NaN% 和空数值框）。
+ * 拖动规则（链式约束 `outerLow ≤ low ≤ high ≤ outerHigh` 恒成立）：
+ *   - 拖**内柄**：外柄跟着一起走（扩边量保持）→ 往里拖就是收边、整段一起缩；
+ *   - 拖**外柄**往外：扩边量变大；往里越过内柄：扩边量先收到 0，再继续拖就顶着内柄一起走。
  */
 export interface RangeValue {
     /** 内柄：选区边界 */
@@ -48,6 +46,12 @@ export interface RangeSliderOptions {
 type HandleName = 'outerLow' | 'low' | 'high' | 'outerHigh';
 
 const HANDLES: HandleName[] = ['outerLow', 'low', 'high', 'outerHigh'];
+const SIDES: Record<HandleName, 'low' | 'high'> = {
+    outerLow: 'low',
+    low: 'low',
+    high: 'high',
+    outerHigh: 'high'
+};
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -55,13 +59,17 @@ class RangeSlider {
     /** 整行（PCUI Container 的 dom），调用方把它 append 进面板 */
     row: HTMLElement;
 
-    private inputs: Record<HandleName, NumericInput>;
-
     private track: HTMLDivElement;
 
     private fills: { marginLow: HTMLDivElement, core: HTMLDivElement, marginHigh: HTMLDivElement };
 
     private handles: Record<HandleName, HTMLDivElement>;
+
+    private lowLabel: Label;
+
+    private highLabel: Label;
+
+    private readout: HTMLDivElement;
 
     private min: number;
 
@@ -71,14 +79,17 @@ class RangeSlider {
 
     private onChange: (value: RangeValue) => void;
 
-    private updating = false;
-
-    // which handle the current drag owns, and how far the pointer was from its centre when the
-    // drag started (so grabbing a handle off-centre - the outer rings are grabbed at their rim -
-    // does not make it jump to the pointer on the first move)
+    // which handle the current drag owns, and how far the pointer was from its value when the drag
+    // started (grabbing a handle off-centre must not make it snap under the pointer)
     private dragging: HandleName | null = null;
 
     private grabOffset = 0;
+
+    // the visual gap that keeps the two handles of a pair apart and leaves room for the label
+    private gap = 34;
+
+    // the labels the gap was measured for (so the reflow happens on locale changes only)
+    private gapText = '';
 
     constructor(options: RangeSliderOptions) {
         const { axis, lowKey, highKey, min, max } = options;
@@ -92,79 +103,60 @@ class RangeSlider {
         const highLabel = new Label({ class: 'select-range-label', text: '' });
         i18n.bindText(highLabel, highKey);
 
-        const makeInput = (handle: HandleName) => {
-            const input = new NumericInput({
-                class: 'select-range-value',
-                min,
-                max,
-                step: 1,
-                precision: 0,
-                value: 0
-            });
-            input.dom.setAttribute('data-handle', handle);
-            return input;
-        };
-
-        this.inputs = {
-            outerLow: makeInput('outerLow'),
-            low: makeInput('low'),
-            high: makeInput('high'),
-            outerHigh: makeInput('outerHigh')
-        };
-
         // the track is plain DOM: PCUI's slider has a single handle and no range concept
         const track = document.createElement('div');
         track.classList.add('select-range-track');
 
         const marginLow = document.createElement('div');
-        marginLow.classList.add('select-range-fill', 'select-range-margin');
+        marginLow.classList.add('select-range-fill', 'select-range-margin', 'select-range-margin-low');
         const core = document.createElement('div');
         core.classList.add('select-range-fill');
         const marginHigh = document.createElement('div');
-        marginHigh.classList.add('select-range-fill', 'select-range-margin');
-        track.appendChild(marginLow);
-        track.appendChild(core);
-        track.appendChild(marginHigh);
+        marginHigh.classList.add('select-range-fill', 'select-range-margin', 'select-range-margin-high');
+
+        const readout = document.createElement('div');
+        readout.classList.add('select-range-readout');
 
         this.handles = {} as Record<HandleName, HTMLDivElement>;
         for (const name of HANDLES) {
             const handle = document.createElement('div');
             handle.classList.add('select-range-handle');
+            handle.classList.add(SIDES[name] === 'low' ? 'select-range-handle-low' : 'select-range-handle-high');
             if (name === 'outerLow' || name === 'outerHigh') {
                 handle.classList.add('select-range-handle-outer');
             }
             handle.setAttribute('data-handle', name);
             handle.tabIndex = 0;
             handle.title = i18n.t('select-toolbar.rangeHandleHint');
-            track.appendChild(handle);
             this.handles[name] = handle;
         }
-        // the outer handles are drawn *under* the inner dots but are larger rings, so their rim
-        // has to be the topmost thing there: the inner handles come after them in DOM order,
-        // which would put the inner dot on top of the ring's rim as well
+
+        // paint order: fills, then the outer rings, then the inner dots, then the labels and the
+        // readout on top
+        track.appendChild(marginLow);
+        track.appendChild(core);
+        track.appendChild(marginHigh);
         for (const name of ['outerLow', 'outerHigh'] as HandleName[]) {
-            this.handles[name].style.zIndex = '0';
+            track.appendChild(this.handles[name]);
         }
         for (const name of ['low', 'high'] as HandleName[]) {
-            this.handles[name].style.zIndex = '1';
+            track.appendChild(this.handles[name]);
         }
 
-        // layout: 最近 [外][内] [====track====] [内][外] 最远
-        // the outer handle's field sits outside its inner one, mirroring the handles
-        row.append(lowLabel);
-        row.append(this.inputs.outerLow);
-        row.append(this.inputs.low);
         const wrap = document.createElement('div');
         wrap.classList.add('select-range-track-wrap');
         wrap.appendChild(track);
         row.dom.appendChild(wrap);
-        row.append(this.inputs.high);
-        row.append(this.inputs.outerHigh);
-        row.append(highLabel);
+        row.dom.appendChild(lowLabel.dom);
+        row.dom.appendChild(highLabel.dom);
+        row.dom.appendChild(readout);
 
         this.row = row.dom;
         this.track = track;
         this.fills = { marginLow, core, marginHigh };
+        this.lowLabel = lowLabel;
+        this.highLabel = highLabel;
+        this.readout = readout;
         this.min = min;
         this.max = max;
         this._value = { ...options.value };
@@ -172,24 +164,15 @@ class RangeSlider {
 
         this.commit(this._value, false);
 
-        for (const name of HANDLES) {
-            this.inputs[name].on('change', (value: number) => {
-                if (!this.updating) {
-                    this.setHandle(name, value);
-                }
-            });
-        }
-
         // dragging: capture on the track so the pointer can leave the small handle
         const beginDrag = (name: HandleName) => (e: PointerEvent) => {
             e.preventDefault();
             e.stopPropagation();
             this.dragging = name;
-            // keep the grab offset: an outer ring is grabbed at its rim, ~8px off centre, and
-            // the handle must not snap under the pointer
-            this.grabOffset = this.valueAt(e.clientX) - this._value[name];
+            this.grabOffset = this.valueForPointer(e.clientX, name) - this._value[name];
             track.setPointerCapture(e.pointerId);
             this.handles[name].classList.add('dragging');
+            this.showReadout(name, this._value[name]);
         };
 
         for (const name of HANDLES) {
@@ -198,7 +181,9 @@ class RangeSlider {
 
         track.addEventListener('pointermove', (e: PointerEvent) => {
             if (this.dragging) {
-                this.setHandle(this.dragging, this.valueAt(e.clientX) - this.grabOffset);
+                const value = this.valueForPointer(e.clientX, this.dragging) - this.grabOffset;
+                this.setHandle(this.dragging, value);
+                this.showReadout(this.dragging, this._value[this.dragging]);
             }
         });
 
@@ -207,6 +192,7 @@ class RangeSlider {
                 const name = this.dragging;
                 this.dragging = null;
                 this.handles[name].classList.remove('dragging');
+                this.readout.classList.remove('visible');
                 if (track.hasPointerCapture(e.pointerId)) {
                     track.releasePointerCapture(e.pointerId);
                 }
@@ -218,25 +204,28 @@ class RangeSlider {
 
         // a click on the empty track moves the nearest handle there
         track.addEventListener('pointerdown', (e: PointerEvent) => {
+            if (this.dragging) {
+                return;
+            }
             if (e.target === track || (e.target as HTMLElement).classList.contains('select-range-fill')) {
                 e.preventDefault();
                 e.stopPropagation();
-                const position = this.valueAt(e.clientX);
+                const at = this.valueAt(e.clientX);
                 let nearest: HandleName = HANDLES[0];
                 let best = Infinity;
                 for (const name of HANDLES) {
-                    const distance = Math.abs(this._value[name] - position);
+                    const distance = Math.abs(this._value[name] - at);
                     if (distance < best) {
                         best = distance;
                         nearest = name;
                     }
                 }
                 this.dragging = nearest;
-                // a jump-to-click drag has no offset
                 this.grabOffset = 0;
                 track.setPointerCapture(e.pointerId);
                 this.handles[nearest].classList.add('dragging');
-                this.setHandle(nearest, position);
+                this.setHandle(nearest, at);
+                this.showReadout(nearest, this._value[nearest]);
             }
         });
 
@@ -263,6 +252,7 @@ class RangeSlider {
         return { ...this._value };
     }
 
+    /** 轨道上的像素位置 → 值（不考虑外柄的让位间隙）。 */
     private valueAt(clientX: number) {
         const rect = this.track.getBoundingClientRect();
         if (rect.width <= 0) {
@@ -273,10 +263,34 @@ class RangeSlider {
     }
 
     /**
+     * 指针位置 → 该柄的值。外柄在"离内柄太近"时被绘制成让开一个间隙，所以指针要先补回间隙；
+     * 一旦外柄的真实位置已经超出间隙（正在往外扩），就按真实位置换算 —— 两种情况在边界上连续。
+     */
+    private valueForPointer(clientX: number, name: HandleName) {
+        if (name !== 'outerLow' && name !== 'outerHigh') {
+            return this.valueAt(clientX);
+        }
+        const rect = this.track.getBoundingClientRect();
+        const span = this.max - this.min;
+        if (rect.width <= 0 || span === 0) {
+            return this.min;
+        }
+        const gapValue = (this.gap / rect.width) * span;
+        const side = SIDES[name];
+        const inner = side === 'low' ? this._value.low : this._value.high;
+        const innerPx = rect.left + ((inner - this.min) / span) * rect.width;
+        if (side === 'low') {
+            // the drawn position is min(valuePos, innerPos - gap)
+            return clientX >= innerPx - this.gap ?
+                this.valueAt(clientX + this.gap) : this.valueAt(clientX);
+        }
+        return clientX <= innerPx + this.gap ?
+            this.valueAt(clientX - this.gap) : this.valueAt(clientX);
+    }
+
+    /**
      * 移动一个柄，并维持链式约束 `outerLow ≤ low ≤ high ≤ outerHigh`：
-     *
-     *   - 内柄（low / high）：**外柄跟着一起走**（扩边量保持不变）—— 所以把内柄往里拖就是"收边"，
-     *     整段（含扩边带）一起缩；
+     *   - 内柄（low / high）：**外柄跟着一起走**（扩边量保持不变）—— 往里拖就是收边；
      *   - 外柄（outerLow / outerHigh）：往外拖 = 扩边量变大；往里拖过内柄 = 扩边量先收到 0，
      *     再继续拖就带着内柄一起走（把内柄顶过去）。
      */
@@ -306,7 +320,6 @@ class RangeSlider {
             if (value <= next.low) {
                 next.outerLow = value;
             } else {
-                // dragged inward past the inner handle: the margin collapses, the box follows
                 next.low = value;
                 next.outerLow = value;
                 if (next.low > next.high) {
@@ -332,9 +345,9 @@ class RangeSlider {
         this.commit(next);
     }
 
-    // normalized value, pushed into the DOM/inputs
+    // normalized value, pushed into the DOM
     private commit(value: RangeValue, notify = true) {
-        // a bad caller (or a stale stored value) must not render NaN% and blank fields
+        // a bad caller (or a stale stored value) must not render NaN% and blank the fields
         const previous = this._value ?? { low: this.min, high: this.max, outerLow: this.min, outerHigh: this.max };
         const pick = (candidate: number, fallback: number) => {
             return Number.isFinite(candidate) ? clamp(Math.round(candidate), this.min, this.max) : fallback;
@@ -359,27 +372,72 @@ class RangeSlider {
         }
     }
 
+    /** 外柄让开的视觉间隙：够放下中间的轴标签，并留一点呼吸。 */
+    private updateGap() {
+        const text = `${this.lowLabel.text}|${this.highLabel.text}`;
+        if (text === this.gapText) {
+            return;
+        }
+        const width = Math.max(this.lowLabel.dom.offsetWidth, this.highLabel.dom.offsetWidth);
+        if (width <= 0) {
+            // not in the document yet (the panel is appended after construction): measure again
+            // on the next render instead of caching a bogus width
+            return;
+        }
+        this.gapText = text;
+        // a 30px floor keeps the three rows visually aligned (the widest label here is two CJK
+        // characters) while a long translation still gets the room it needs
+        this.gap = Math.max(34, width + 8);
+    }
+
     private render() {
+        this.updateGap();
+
         const { low, high, outerLow, outerHigh } = this._value;
         const span = this.max - this.min;
         const percent = (value: number) => (span === 0 ? 0 : ((value - this.min) / span) * 100);
 
-        this.fills.marginLow.style.left = `${percent(outerLow)}%`;
-        this.fills.marginLow.style.width = `${percent(low) - percent(outerLow)}%`;
-        this.fills.core.style.left = `${percent(low)}%`;
-        this.fills.core.style.width = `${percent(high) - percent(low)}%`;
-        this.fills.marginHigh.style.left = `${percent(high)}%`;
-        this.fills.marginHigh.style.width = `${percent(outerHigh) - percent(high)}%`;
+        const lowPct = percent(low);
+        const highPct = percent(high);
+        const outerLowPct = percent(outerLow);
+        const outerHighPct = percent(outerHigh);
 
-        for (const name of HANDLES) {
-            this.handles[name].style.left = `${percent(this._value[name])}%`;
-        }
+        // the outer handles are pushed outward when they would sit on top of their inner partner
+        const drawnLow = `min(${outerLowPct}%, calc(${lowPct}% - ${this.gap}px))`;
+        const drawnHigh = `max(${outerHighPct}%, calc(${highPct}% + ${this.gap}px))`;
+        this.handles.low.style.left = `${lowPct}%`;
+        this.handles.high.style.left = `${highPct}%`;
+        this.handles.outerLow.style.left = drawnLow;
+        this.handles.outerHigh.style.left = drawnHigh;
 
-        this.updating = true;
-        for (const name of HANDLES) {
-            this.inputs[name].value = this._value[name];
-        }
-        this.updating = false;
+        // the labels sit halfway between the two *drawn* handles of their pair (which is what
+        // puts them inside the pair even when the expansion is zero)
+        this.lowLabel.dom.style.left = `calc((${drawnLow} + ${lowPct}%) / 2)`;
+        this.highLabel.dom.style.left = `calc((${highPct}% + ${drawnHigh}) / 2)`;
+
+        // the core band spans the inner handles, the margins the eaten part (empty when 0)
+        this.fills.core.style.left = `${lowPct}%`;
+        this.fills.core.style.width = `${highPct - lowPct}%`;
+        this.fills.marginLow.style.left = drawnLow;
+        this.fills.marginLow.style.width = `calc(${lowPct}% - (${drawnLow}))`;
+        this.fills.marginHigh.style.left = drawnHigh;
+        this.fills.marginHigh.style.width = `calc((${drawnHigh}) - ${highPct}%)`;
+        this.fills.marginLow.classList[outerLow < low ? 'add' : 'remove']('visible');
+        this.fills.marginHigh.classList[outerHigh > high ? 'add' : 'remove']('visible');
+
+        // the values live in the tooltips: no numeric fields in the row (per the design)
+        this.handles.outerLow.title = `${i18n.t('select-toolbar.rangeHandleHint')} — ${outerLow}`;
+        this.handles.low.title = `${i18n.t('select-toolbar.rangeHandleHint')} — ${low}`;
+        this.handles.high.title = `${i18n.t('select-toolbar.rangeHandleHint')} — ${high}`;
+        this.handles.outerHigh.title = `${i18n.t('select-toolbar.rangeHandleHint')} — ${outerHigh}`;
+    }
+
+    /** 拖动时把数值贴在柄旁边浮出来（平时不占地方、也不显示数字框）。 */
+    private showReadout(name: HandleName, value: number) {
+        const target = this.handles[name];
+        this.readout.textContent = String(value);
+        this.readout.style.left = target.style.left;
+        this.readout.classList.add('visible');
     }
 }
 

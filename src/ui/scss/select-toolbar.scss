@@ -93,33 +93,26 @@
         }
     }
 
-    // one axis: 低端标签 [外][内] [====●--●----●--●====] [内][外] 高端标签
+    // one axis, exactly like the design sketch: `----o 近 o-------o 远 o----`
+    // the row is just the track; the handles and the two axis labels live ON it
     .select-range-row {
+        position: relative;
         display: flex;
         flex-direction: row;
         align-items: center;
-        gap: 5px;
     }
 
+    // the axis labels sit on the track, between the two handles of their pair
     .select-range-label {
-        min-width: 22px;
+        position: absolute;
+        top: 50%;
+        transform: translate(-50%, -50%);
         margin: 0px;
         color: $text-secondary;
-        text-align: center;
-    }
-
-    // the numeric fields stay narrow: they are for reading/exact entry, the drag is the point
-    .select-range-value {
-        width: 36px;
-        height: 20px;
-        margin: 0px;
-        line-height: 20px;
-
-        > input {
-            margin: 0px 0px 0px 4px;
-            padding: 0px;
-            height: 20px;
-        }
+        font-size: 11px;
+        line-height: 1;
+        pointer-events: none;
+        white-space: nowrap;
     }
 
     .select-range-track-wrap {
@@ -154,7 +147,9 @@
     }
 
     // the span between the two INNER handles = the box being selected;
-    // the two outer segments (outer handle -> inner handle) are what 扩边 added
+    // the two outer segments (outer handle -> inner handle) are what 扩边 added. These are
+    // drawn *under* the handles, and the margin bands at zero expansion are hidden entirely
+    // (nothing has been eaten yet), so the row reads as the design's plain line + 4 circles.
     .select-range-fill {
         position: absolute;
         top: 50%;
@@ -167,21 +162,30 @@
         &.select-range-margin {
             height: 2px;
             margin-top: -1px;
-            opacity: 0.5;
+            opacity: 0.55;
+            visibility: hidden;
+
+            &.visible {
+                visibility: visible;
+            }
         }
     }
 
     .select-range-handle {
         position: absolute;
         top: 50%;
-        width: 12px;
-        height: 12px;
-        margin: -6px 0px 0px -6px;
+        // border-box so the element's centre is exactly its `left` position (a content-box
+        // border would shift every handle 2px right of its value)
+        box-sizing: border-box;
+        width: 14px;
+        height: 14px;
+        margin: -7px 0px 0px -7px;
         border: 2px solid $bcg-primary;
         border-radius: 50%;
         background-color: $clr-default;
         cursor: grab;
         touch-action: none;
+        z-index: 2;
 
         &:hover,
         &.dragging {
@@ -198,21 +202,42 @@
         }
     }
 
-    // the outer (扩边) handles are one step down in the hierarchy: a hollow ring drawn *under*
-    // the inner dot, and larger than it. At zero expansion the two are concentric (a bullseye),
-    // so the ring's rim stays visible - and grabbable - instead of hiding behind the dot:
-    // the dot is 12px, the ring 20px, which leaves a 4px grab band on every side.
+    // the outer (扩边) handles: hollow rings, one step down in the hierarchy, drawn under the
+    // inner dots. The widget keeps them a fixed visual gap outside their partner so a pair
+    // always reads as `o 近 o` (with the axis label in between) instead of a single bullseye.
     .select-range-handle-outer {
-        width: 20px;
-        height: 20px;
-        margin: -10px 0px 0px -10px;
+        width: 18px;
+        height: 18px;
+        margin: -9px 0px 0px -9px;
         background-color: transparent;
         border-color: $clr-default;
+        z-index: 1;
 
         &:hover,
         &.dragging {
             background-color: transparent;
             border-color: $clr-hilight;
+        }
+    }
+
+    // the value floats next to the handle while it is being dragged (there are no numeric
+    // fields in the row: the readout is transient, the value lives in the handle tooltip)
+    .select-range-readout {
+        position: absolute;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        padding: 0px 4px;
+        border-radius: 2px;
+        background-color: $bcg-darkest;
+        color: $text-primary;
+        font-size: 11px;
+        line-height: 14px;
+        pointer-events: none;
+        visibility: hidden;
+        z-index: 3;
+
+        &.visible {
+            visibility: visible;
         }
     }
 

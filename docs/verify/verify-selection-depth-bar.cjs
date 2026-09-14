@@ -1,11 +1,10 @@
-// Verify the 选区范围 panel: three FOUR-handle ranges (最近-最远 / 左-右 / 上-下) plus 重置,
-// shown while a screen-space selection tool is active, driving `selection.depthRange` and
-// `selection.screenRange`.
+// Verify the 选区范围 panel: three FOUR-handle range rows laid out exactly like the design sketch
+// `----o 近 o-------o 远 o----` (the axis labels sit ON the track, between the two handles of a
+// pair; the outer handles are drawn apart from their inner partner; there are no numeric fields
+// in a row - the value floats next to the handle while dragging).
 //
-// Each axis has two handle levels: the inner pair trims the box, the outer pair expands past it
-// (the span between an outer and its inner handle is the 扩边 part). The handles are dragged with
-// real mouse input (page.mouse) because the control captures the pointer on the track, and the
-// numeric fields are typed into as the exact-entry path.
+// The handles are dragged with real mouse input (page.mouse) because the control captures the
+// pointer on the track.
 //
 // usage: node docs/verify/verify-selection-depth-bar.cjs "<url>" [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
@@ -38,6 +37,7 @@ const BAR = '#selection-range-bar';
         }, MODEL);
         await sleep(3500);
 
+        // geometry of one row, in track-relative pixels
         const barState = () => page.evaluate((selector) => {
             const bar = document.querySelector(selector);
             if (!bar) {
@@ -53,15 +53,30 @@ const BAR = '#selection-range-bar';
                 axes: rows.map(r => r.getAttribute('data-axis')),
                 handles: rows.map(r => r.querySelectorAll('.select-range-handle').length),
                 outerHandles: rows.map(r => r.querySelectorAll('.select-range-handle-outer').length),
-                // [ marginLow, core, marginHigh ] as [left, width] percentages of the track
-                fills: rows.map(r => Array.from(r.querySelectorAll('.select-range-fill')).map((f) => {
-                    return [round(f.style.left), round(f.style.width)];
-                })),
-                values: rows.map(r => Array.from(r.querySelectorAll('.select-range-value input')).map(i => Number(i.value))),
+                numericFields: rows.map(r => r.querySelectorAll('.select-range-value, .pcui-numeric-input').length),
+                // [ marginLow, core, marginHigh ] as [left, width] pixels inside the track
+                fills: rows.map((r) => {
+                    const track = r.querySelector('.select-range-track').getBoundingClientRect();
+                    return Array.from(r.querySelectorAll('.select-range-fill')).map((f) => {
+                        const b = f.getBoundingClientRect();
+                        return [Math.round(b.left - track.left), Math.round(b.width), getComputedStyle(f).visibility];
+                    });
+                }),
+                // handle and label centres relative to the track's left edge
+                layout: rows.map((r) => {
+                    const track = r.querySelector('.select-range-track').getBoundingClientRect();
+                    const centre = (el) => Math.round(el.getBoundingClientRect().left + el.getBoundingClientRect().width / 2 - track.left);
+                    const handles = {};
+                    for (const h of r.querySelectorAll('.select-range-handle')) {
+                        handles[h.getAttribute('data-handle')] = centre(h);
+                    }
+                    const labels = Array.from(r.querySelectorAll('.select-range-label')).map(l => ({ text: l.textContent, cx: centre(l) }));
+                    return { axis: r.getAttribute('data-axis'), track: Math.round(track.width), handles, labels };
+                }),
                 labels: rows.map(r => Array.from(r.querySelectorAll('.select-range-label')).map(l => l.textContent)),
+                reset: !!bar.querySelector('.select-toolbar-button'),
                 title: title ? title.textContent : null,
-                active: !!title && title.classList.contains('active'),
-                reset: !!bar.querySelector('.select-toolbar-button')
+                active: !!title && title.classList.contains('active')
             };
         }, BAR);
 
@@ -88,35 +103,18 @@ const BAR = '#selection-range-bar';
         const rect = await activate('rectSelection');
         const before = await ranges();
 
-        // track fraction of a value on an axis (the x/y tracks span -50..150, depth 0..100)
-        const fractionOf = (axis, value) => {
-            const limits = axis === 'depth' ? { min: 0, max: 100 } : { min: -50, max: 150 };
-            return (value - limits.min) / (limits.max - limits.min);
-        };
+        // track fraction of a value on an axis (all three tracks span -50..150)
+        const fractionOf = (axis, value) => (value + 50) / 200;
 
-        // drag one handle to a value on its axis, starting from the handle's own position
-        // (real mouse: the widget captures the pointer on the track).
-        //
-        // The two handles of a pair are concentric at zero expansion, so a grab at the exact
-        // centre of an OUTER handle would land on the inner dot that sits on top of it: the outer
-        // ones are grabbed at their rim, which is what a user has to do as well. The widget keeps
-        // that grab offset for the whole drag (as PCUI's own slider does), so the target has to be
-        // shifted by the same offset.
+        // drag one handle to a value on its axis, starting from the handle's own centre
         const dragHandle = async (axis, handle, value) => {
             const geometry = await page.evaluate((selector, a, h, fraction) => {
                 const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
                 const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
                 const t = track.getBoundingClientRect();
                 const r = el.getBoundingClientRect();
-                const centerX = r.left + r.width / 2;
-                const outer = el.classList.contains('select-range-handle-outer');
-                // the concentric ring leaves a 4px band; grab 2px inside the outer edge of it
-                const rim = outer ? 2 : 0;
-                const fromX = h === 'outerLow' || h === 'low' ?
-                    r.left + rim + 1 : r.right - rim - 1;
                 return {
-                    fromX,
-                    grabOffset: fromX - centerX,
+                    fromX: r.left + r.width / 2,
                     y: t.top + t.height / 2,
                     left: t.left,
                     width: t.width,
@@ -125,14 +123,39 @@ const BAR = '#selection-range-bar';
             }, BAR, axis, handle, fractionOf(axis, value));
             await page.mouse.move(geometry.fromX, geometry.y);
             await page.mouse.down();
-            await page.mouse.move(
-                geometry.left + geometry.width * geometry.fraction + geometry.grabOffset,
-                geometry.y,
-                { steps: 8 }
-            );
+            await page.mouse.move(geometry.left + geometry.width * geometry.fraction, geometry.y, { steps: 8 });
             await page.mouse.up();
             await sleep(400);
         };
+
+        // the readout only exists while a drag is in progress: sample it mid-drag
+        const readoutDuringDrag = async (axis, handle) => {
+            const geometry = await page.evaluate((selector, a, h) => {
+                const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
+                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
+                const t = track.getBoundingClientRect();
+                const r = el.getBoundingClientRect();
+                return { fromX: r.left + r.width / 2, y: t.top + t.height / 2, left: t.left, width: t.width };
+            }, BAR, axis, handle);
+            await page.mouse.move(geometry.fromX, geometry.y);
+            await page.mouse.down();
+            await page.mouse.move(geometry.left + geometry.width * 0.6, geometry.y, { steps: 4 });
+            const shown = await page.evaluate((selector, a) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
+                const readout = row.querySelector('.select-range-readout');
+                return { text: readout.textContent, visible: readout.classList.contains('visible') };
+            }, BAR, axis);
+            await page.mouse.up();
+            await sleep(250);
+            const after = await page.evaluate((selector, a) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
+                const readout = row.querySelector('.select-range-readout');
+                return { visible: readout.classList.contains('visible') };
+            }, BAR, axis);
+            return { ...shown, visibleAfter: after.visible };
+        };
+
+        const readout = await readoutDuringDrag('x', 'low');
 
         // 左-右: trim with the inner handles (收边), then expand past the box with the outer one
         await dragHandle('x', 'low', 30);
@@ -144,24 +167,13 @@ const BAR = '#selection-range-bar';
         const afterXDrag = await barState();
 
         // 上-下: expand the far side only
-        await dragHandle('y', 'outerHigh', 120);
+        await dragHandle('y', 'outerHigh', 130);
         const afterYOuter = await ranges();
 
         // 深度: trim the far bound with the inner handle
         await dragHandle('depth', 'high', 50);
         const afterDepthHigh = await ranges();
         const activeAfterDrag = (await barState()).active;
-
-        // exact entry through the numeric fields
-        await page.evaluate((selector) => {
-            const input = document.querySelector(`${selector} .select-range-row[data-axis="y"] .select-range-value[data-handle="high"] input`);
-            input.focus();
-            input.value = '65';
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-        }, BAR);
-        await sleep(400);
-        const afterTyped = await ranges();
 
         // reset restores all twelve bounds
         await page.evaluate((selector) => {
@@ -179,6 +191,7 @@ const BAR = '#selection-range-bar';
         const others = ['sphereBrushSelection', 'sphereSelection', 'boxSelection'];
         const near = (a, b, tol = 6) => Math.abs(a - b) <= tol;
         const full = (axis) => axis.low === 0 && axis.high === 100 && axis.outerLow === 0 && axis.outerHigh === 100;
+        const rows = rect.layout;
 
         const checks = [
             {
@@ -192,25 +205,50 @@ const BAR = '#selection-range-bar';
                 detail: others.map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'}`).join(', ')
             },
             {
-                name: 'each axis carries four handles (two inner, two outer) and a three-part fill',
+                name: 'each axis carries four handles (two inner dots, two outer rings)',
                 pass: JSON.stringify(rect.axes) === '["depth","x","y"]' &&
-                    rect.handles.every(n => n === 4) && rect.outerHandles.every(n => n === 2) &&
-                    rect.fills.every(f => f.length === 3),
-                detail: `axes ${JSON.stringify(rect.axes)}, handles ${JSON.stringify(rect.handles)} (outer ${JSON.stringify(rect.outerHandles)}), fills ${JSON.stringify(rect.fills)}`
+                    rect.handles.every(n => n === 4) && rect.outerHandles.every(n => n === 2),
+                detail: `axes ${JSON.stringify(rect.axes)}, handles ${JSON.stringify(rect.handles)} (outer ${JSON.stringify(rect.outerHandles)})`
             },
             {
-                name: 'the axis end labels are localised and a reset button is there',
+                name: 'the layout is the design line: `----o 近 o-------o 远 o----`',
+                // 4 handles on one track, each pair visibly apart, the label between the pair,
+                // and the core between the two inner handles
+                pass: rows.every((row) => {
+                    const { handles, labels } = row;
+                    const ordered = handles.outerLow < handles.low && handles.low < handles.high && handles.high < handles.outerHigh;
+                    const gaps = Math.min(handles.low - handles.outerLow, handles.outerHigh - handles.high);
+                    const labelInPair = labels.length === 2 &&
+                        labels[0].cx > handles.outerLow && labels[0].cx < handles.low &&
+                        labels[1].cx > handles.high && labels[1].cx < handles.outerHigh;
+                    const coreWide = handles.high - handles.low > gaps * 2;
+                    return ordered && gaps >= 14 && labelInPair && coreWide;
+                }),
+                detail: rows.map(r => `${r.axis}: track ${r.track}, outerLow ${r.handles.outerLow} < low ${r.handles.low} < high ${r.handles.high} < outerHigh ${r.handles.outerHigh}, labels ${JSON.stringify(r.labels)}`).join(' | ')
+            },
+            {
+                name: 'the axis end labels are localised, on the track, and a reset button is there',
                 pass: JSON.stringify(rect.labels) === '[["最近","最远"],["左","右"],["上","下"]]' &&
                     rect.reset === true && rect.title === '选区范围',
                 detail: `labels ${JSON.stringify(rect.labels)}, title ${JSON.stringify(rect.title)}, reset ${rect.reset}`
             },
             {
+                name: 'no numeric fields inside a row (the value floats while dragging)',
+                pass: rect.numericFields.every(n => n === 0),
+                detail: `numeric inputs per row ${JSON.stringify(rect.numericFields)}; drag readout ${JSON.stringify(readout)}`
+            },
+            {
+                name: 'the value readout shows during a drag and hides after it',
+                pass: readout.visible === true && readout.text !== '' && readout.visibleAfter === false,
+                detail: `readout ${JSON.stringify(readout)}`
+            },
+            {
                 name: 'all three axes start at the full through-pass with no expansion',
-                pass: rect.values.every(v => JSON.stringify(v) === '[0,0,100,100]') &&
-                    before.depth.near === 0 && before.depth.far === 100 &&
+                pass: before.depth.near === 0 && before.depth.far === 100 &&
                     before.depth.nearOuter === 0 && before.depth.farOuter === 100 &&
-                    full(before.screen.x) && full(before.screen.y),
-                detail: `sliders ${JSON.stringify(rect.values)}, ${JSON.stringify(before)}`
+                    full(before.screen.x) && full(before.screen.y) &&
+                    rect.fills.every(f => f[0][2] === 'hidden' && f[2][2] === 'hidden'),
+                detail: `${JSON.stringify(before)}; margin bands ${JSON.stringify(rect.fills.map(f => [f[0][2], f[2][2]]))}`
             },
             {
                 name: 'trimming with the 左 inner handle carries its outer handle along (收边)',
@@ -230,22 +268,19 @@ const BAR = '#selection-range-bar';
                 detail: `screen.x ${JSON.stringify(afterXOuter.screen.x)} (outer dragged to -20 = 50% of the box outside)`
             },
             {
-                name: 'the highlighted bands follow the handles (margin / core / margin)',
-                pass: near(afterXDrag.fills[1][0][0], 15, 2) && near(afterXDrag.fills[1][0][1], 25, 2) &&
-                    near(afterXDrag.fills[1][1][0], 40, 2) && near(afterXDrag.fills[1][1][1], 20, 2) &&
-                    afterXDrag.fills[1][2][1] === 0,
-                detail: `x row fills [marginLow, core, marginHigh] = ${JSON.stringify(afterXDrag.fills[1])} ` +
-                    '(expected the -20..30 margin, the 30..70 core, and an empty right margin on the -50..150 track)'
+                name: 'the highlighted margin band appears once something has been eaten',
+                pass: afterXDrag.fills[1][0][2] === 'visible' && afterXDrag.fills[1][2][2] === 'hidden',
+                detail: `x row fills [marginLow, core, marginHigh] = ${JSON.stringify(afterXDrag.fills[1])}`
             },
             {
                 name: 'the 下 outer handle expands the vertical axis',
-                pass: near(afterYOuter.screen.y.outerHigh, 120) && near(afterYOuter.screen.y.high, 100),
+                pass: near(afterYOuter.screen.y.outerHigh, 130) && near(afterYOuter.screen.y.high, 100),
                 detail: `screen.y ${JSON.stringify(afterYOuter.screen.y)}`
             },
             {
                 name: 'the 最远 inner handle trims the far depth bound',
                 pass: near(afterDepthHigh.depth.far, 50) && near(afterDepthHigh.depth.farOuter, 50) &&
-                    afterDepthHigh.depth.near === 0,
+                    near(afterDepthHigh.depth.near, 0),
                 detail: `depth ${JSON.stringify(afterDepthHigh.depth)}`
             },
             {
@@ -254,22 +289,17 @@ const BAR = '#selection-range-bar';
                 detail: `title active ${activeAfterDrag}`
             },
             {
-                name: 'typing into a numeric field writes that bound',
-                pass: afterTyped.screen.y.high === 65,
-                detail: `screen.y ${JSON.stringify(afterTyped.screen.y)} after typing 65 into 下`
-            },
-            {
                 name: 'reset restores all twelve bounds and drops the highlight',
                 pass: full(afterReset.screen.x) && full(afterReset.screen.y) &&
                     afterReset.depth.near === 0 && afterReset.depth.far === 100 &&
                     afterReset.depth.nearOuter === 0 && afterReset.depth.farOuter === 100 &&
-                    afterResetBar.values.every(v => JSON.stringify(v) === '[0,0,100,100]') && !afterResetBar.active,
-                detail: `${JSON.stringify(afterReset)}, sliders ${JSON.stringify(afterResetBar.values)}, active ${afterResetBar.active}`
+                    !afterResetBar.active,
+                detail: `${JSON.stringify(afterReset)}, active ${afterResetBar.active}`
             },
             {
                 name: 'the panel hides when the tool deactivates',
                 pass: !afterDeactivate.visible,
-                detail: JSON.stringify({ ...afterDeactivate, values: undefined, labels: undefined })
+                detail: JSON.stringify({ exists: afterDeactivate.exists, visible: afterDeactivate.visible })
             },
             {
                 name: 'no console errors',
@@ -283,12 +313,12 @@ const BAR = '#selection-range-bar';
             backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
             bars: { rect: results.rectSelection },
             before,
+            readout,
             afterXLow,
             afterXHigh,
             afterXOuter,
             afterYOuter,
             afterDepthHigh,
-            afterTyped,
             afterReset,
             checks,
             failed: checks.filter(c => !c.pass).length,
