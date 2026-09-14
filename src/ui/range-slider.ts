@@ -73,8 +73,12 @@ class RangeSlider {
 
     private updating = false;
 
-    // which handle the current drag owns
+    // which handle the current drag owns, and how far the pointer was from its centre when the
+    // drag started (so grabbing a handle off-centre - the outer rings are grabbed at their rim -
+    // does not make it jump to the pointer on the first move)
     private dragging: HandleName | null = null;
+
+    private grabOffset = 0;
 
     constructor(options: RangeSliderOptions) {
         const { axis, lowKey, highKey, min, max } = options;
@@ -181,6 +185,9 @@ class RangeSlider {
             e.preventDefault();
             e.stopPropagation();
             this.dragging = name;
+            // keep the grab offset: an outer ring is grabbed at its rim, ~8px off centre, and
+            // the handle must not snap under the pointer
+            this.grabOffset = this.valueAt(e.clientX) - this._value[name];
             track.setPointerCapture(e.pointerId);
             this.handles[name].classList.add('dragging');
         };
@@ -191,7 +198,7 @@ class RangeSlider {
 
         track.addEventListener('pointermove', (e: PointerEvent) => {
             if (this.dragging) {
-                this.setHandle(this.dragging, this.valueAt(e.clientX));
+                this.setHandle(this.dragging, this.valueAt(e.clientX) - this.grabOffset);
             }
         });
 
@@ -225,6 +232,8 @@ class RangeSlider {
                     }
                 }
                 this.dragging = nearest;
+                // a jump-to-click drag has no offset
+                this.grabOffset = 0;
                 track.setPointerCapture(e.pointerId);
                 this.handles[nearest].classList.add('dragging');
                 this.setHandle(nearest, position);

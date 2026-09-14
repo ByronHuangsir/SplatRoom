@@ -174,10 +174,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await gesture('set', innerBox);
         const setBox = await selectedIndices();
 
-        // a full box width of margin on both screen axes = the whole viewport
+        // half a box width of margin on each side of both screen axes (the documented limit)
         await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
-            x: { outerLow: -100, outerHigh: 200 },
-            y: { outerLow: -100, outerHigh: 200 }
+            x: { outerLow: -50, outerHigh: 150 },
+            y: { outerLow: -50, outerHigh: 150 }
         }));
         await sleep(700);
         const setExpanded = await selectedIndices();
@@ -314,7 +314,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             {
                 name: '扩边: the outer handles select a STRICT superset of the box',
                 pass: isSubset(setBox, setExpanded) && setExpanded.length > setBox.length,
-                detail: `box ${setBox.length} splats, expanded to the whole viewport: ${setExpanded.length} ` +
+                detail: `box ${setBox.length} splats, expanded by half a box width on every side: ${setExpanded.length} ` +
                     `(box inside expanded: ${isSubset(setBox, setExpanded)})`
             },
             {

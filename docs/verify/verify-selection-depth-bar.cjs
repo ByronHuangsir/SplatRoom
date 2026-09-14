@@ -88,9 +88,9 @@ const BAR = '#selection-range-bar';
         const rect = await activate('rectSelection');
         const before = await ranges();
 
-        // track fraction of a value on an axis (the x/y tracks span -100..200, depth 0..100)
+        // track fraction of a value on an axis (the x/y tracks span -50..150, depth 0..100)
         const fractionOf = (axis, value) => {
-            const limits = axis === 'depth' ? { min: 0, max: 100 } : { min: -100, max: 200 };
+            const limits = axis === 'depth' ? { min: 0, max: 100 } : { min: -50, max: 150 };
             return (value - limits.min) / (limits.max - limits.min);
         };
 
@@ -99,23 +99,37 @@ const BAR = '#selection-range-bar';
         //
         // The two handles of a pair are concentric at zero expansion, so a grab at the exact
         // centre of an OUTER handle would land on the inner dot that sits on top of it: the outer
-        // ones are grabbed at their rim, which is what a user has to do as well.
+        // ones are grabbed at their rim, which is what a user has to do as well. The widget keeps
+        // that grab offset for the whole drag (as PCUI's own slider does), so the target has to be
+        // shifted by the same offset.
         const dragHandle = async (axis, handle, value) => {
-            const geometry = await page.evaluate((selector, a, h) => {
+            const geometry = await page.evaluate((selector, a, h, fraction) => {
                 const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
                 const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
                 const t = track.getBoundingClientRect();
                 const r = el.getBoundingClientRect();
+                const centerX = r.left + r.width / 2;
                 const outer = el.classList.contains('select-range-handle-outer');
                 // the concentric ring leaves a 4px band; grab 2px inside the outer edge of it
                 const rim = outer ? 2 : 0;
                 const fromX = h === 'outerLow' || h === 'low' ?
                     r.left + rim + 1 : r.right - rim - 1;
-                return { fromX, y: t.top + t.height / 2, left: t.left, width: t.width };
-            }, BAR, axis, handle);
+                return {
+                    fromX,
+                    grabOffset: fromX - centerX,
+                    y: t.top + t.height / 2,
+                    left: t.left,
+                    width: t.width,
+                    fraction
+                };
+            }, BAR, axis, handle, fractionOf(axis, value));
             await page.mouse.move(geometry.fromX, geometry.y);
             await page.mouse.down();
-            await page.mouse.move(geometry.left + geometry.width * fractionOf(axis, value), geometry.y, { steps: 8 });
+            await page.mouse.move(
+                geometry.left + geometry.width * geometry.fraction + geometry.grabOffset,
+                geometry.y,
+                { steps: 8 }
+            );
             await page.mouse.up();
             await sleep(400);
         };
@@ -217,11 +231,11 @@ const BAR = '#selection-range-bar';
             },
             {
                 name: 'the highlighted bands follow the handles (margin / core / margin)',
-                pass: near(afterXDrag.fills[1][0][0], 27, 2) && near(afterXDrag.fills[1][0][1], 17, 2) &&
-                    near(afterXDrag.fills[1][1][0], 43, 2) && near(afterXDrag.fills[1][1][1], 13, 2) &&
+                pass: near(afterXDrag.fills[1][0][0], 15, 2) && near(afterXDrag.fills[1][0][1], 25, 2) &&
+                    near(afterXDrag.fills[1][1][0], 40, 2) && near(afterXDrag.fills[1][1][1], 20, 2) &&
                     afterXDrag.fills[1][2][1] === 0,
                 detail: `x row fills [marginLow, core, marginHigh] = ${JSON.stringify(afterXDrag.fills[1])} ` +
-                    '(expected the -20..30 margin, the 30..70 core, and an empty right margin)'
+                    '(expected the -20..30 margin, the 30..70 core, and an empty right margin on the -50..150 track)'
             },
             {
                 name: 'the 下 outer handle expands the vertical axis',

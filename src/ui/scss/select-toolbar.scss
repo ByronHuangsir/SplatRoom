@@ -126,7 +126,9 @@
         flex: 1 1 auto;
         display: flex;
         align-items: center;
-        min-width: 110px;
+        // 2x the original width: the whole point of the track is having room to work, and the
+        // X/Y axes share it with their expansion margins
+        min-width: 220px;
         height: 20px;
     }
 
