@@ -16,7 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
-import { SelectionRangeRegion, SelectionRangeView, selectRange, depthTailFractions, rangeDistances, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { SelectionRangeRegion, SelectionRangeView, selectRange, depthTailFractions, rangeDistances, screenTailFractions, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -953,6 +953,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // where the gaussians actually are along that axis (see depthTailFractions): the empty tails
         // at both ends get compressed so the first push of 最近 / 最远 already changes the selection
         tails: { near: number, far: number } | null;
+        // the same for 左右 / 上下: the gesture box's sparse margins get compressed too
+        screenTails: { x: { near: number, far: number } | null, y: { near: number, far: number } | null } | null;
         // selection bits as they were before the gesture, locked rows excluded (that is
         // SelectOp's notion of valid): add / remove / intersect recombine off this
         preMask: Uint8Array;
@@ -1010,8 +1012,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // the core window (inner handles) in device pixels, spelled for SelectionRangeView: the
     // drawn shape only applies inside it, the band out to the outer handles is rectangular
-    const coreScreenWindow = (bounds: { x0: number, y0: number, x1: number, y1: number }) => {
-        const window = screenWindow(bounds, getScreenRange());
+    const coreScreenWindow = (
+        bounds: { x0: number, y0: number, x1: number, y1: number },
+        tails: RangeEntry['screenTails']
+    ) => {
+        const window = screenWindow(bounds, getScreenRange(), tails);
         return {
             coreMinX: window.minX,
             coreMaxX: window.maxX,
@@ -1028,8 +1033,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         return {
             ...entry.view,
             ...rangeDistances(entry.extent.min, entry.extent.max, near, far, entry.tails),
-            ...screenWindow(gesture.bounds, getScreenSelection()),
-            ...coreScreenWindow(gesture.bounds)
+            ...screenWindow(gesture.bounds, getScreenSelection(), entry.screenTails),
+            ...coreScreenWindow(gesture.bounds, entry.screenTails)
         };
     };
 
@@ -1055,8 +1060,6 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
         const pose = poseSnapshot();
         const { near, far } = getDepthSelection();
-        const window = screenWindow(bounds, getScreenSelection());
-        const coreWindow = coreScreenWindow(bounds);
         const entries: RangeEntry[] = [];
         const combine = rangeCombine[opKind];
 
@@ -1068,13 +1071,37 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             }
 
             const extent = poseExtent(splat, pose);
-            const distances = rangeDistances(extent.min, extent.max, near, far);
+
+            // what the drawn shape alone selects (all depths, the whole box): the reference set the
+            // two tail analyses are calibrated on, independent of any range already dialled in
+            const inBox = selectRange(splat, region, {
+                ...pose,
+                worldTransform: splat.worldTransform.data,
+                minDistance: extent.min,
+                maxDistance: extent.max,
+                minX: Math.min(bounds.x0, bounds.x1),
+                maxX: Math.max(bounds.x0, bounds.x1),
+                minY: Math.min(bounds.y0, bounds.y1),
+                maxY: Math.max(bounds.y0, bounds.y1),
+                coreMinX: Math.min(bounds.x0, bounds.x1),
+                coreMaxX: Math.max(bounds.x0, bounds.x1),
+                coreMinY: Math.min(bounds.y0, bounds.y1),
+                coreMaxY: Math.max(bounds.y0, bounds.y1)
+            });
+
+            // where the gaussians this gesture sees actually sit: the depth axis's sparse tails and
+            // the box's sparse margins get compressed so the first push of any block already changes
+            // the selection. Computed once per gesture (live re-cuts while dragging stay cheap)
+            const tails = depthTailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, extent, inBox);
+            const screenTails = screenTailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, bounds, inBox);
+
+            const distances = rangeDistances(extent.min, extent.max, near, far, tails);
             const view: SelectionRangeView = {
                 ...pose,
                 worldTransform: splat.worldTransform.data,
                 ...distances,
-                ...window,
-                ...coreWindow
+                ...screenWindow(bounds, getScreenSelection(), screenTails),
+                ...coreScreenWindow(bounds, screenTails)
             };
 
             // the selection as it stands, minus locked rows: a hidden splat is locked AND
@@ -1086,13 +1113,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             }
 
-            // where the gaussians this gesture actually sees sit along the view axis: the depth
-            // axis's empty tails get compressed so the first push of 最近 / 最远 already changes the
-            // selection. Computed once per gesture (the live re-cuts while dragging stay cheap)
-            const inBox = selectRange(splat, region, { ...view, minDistance: extent.min, maxDistance: extent.max });
-            const tails = depthTailFractions(splat, view, extent, inBox);
-
-            const hit = selectRange(splat, region, { ...view, ...rangeDistances(extent.min, extent.max, near, far, tails) });
+            const hit = selectRange(splat, region, view);
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
 
@@ -1102,6 +1123,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 view,
                 extent,
                 tails,
+                screenTails,
                 preMask,
                 opKind
             });

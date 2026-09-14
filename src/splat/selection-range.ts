@@ -77,6 +77,60 @@ export interface SelectionRangeView {
 export const TAIL_PERCENT = 0.5;
 export const TAIL_SHARE = 0.02;
 
+/**
+ * 0-100 的行程 -> [0,1] 的实际比例，尾巴压紧、中间线性。
+ * `tails` 是内容区在 [0,1] 里的位置（不给就纯线性）。
+ * **不做 0..100 的夹取**：扩边会把百分比推到 -50 / 150，那一段按同样的斜率线性外推
+ * （夹掉的话外柄就再也扩不出去了）。
+ */
+const tailMap = (pct: number, tails?: { near: number, far: number } | null) => {
+    const t = pct * 0.01;
+    if (!tails) {
+        return t;
+    }
+    const low = tails.near;
+    const high = tails.far;
+    const edge = TAIL_PERCENT * 0.01;
+    if (t <= edge) {
+        return (t / edge) * low;
+    }
+    if (t >= 1 - edge) {
+        return high + ((t - (1 - edge)) / edge) * (1 - high);
+    }
+    return low + ((t - edge) / (1 - 2 * edge)) * (high - low);
+};
+
+/** 直方图里从两端往中间数，找累积占比刚超过 `TAIL_SHARE` 的桶（= 内容区边界）。 */
+const tailBins = (bins: Uint32Array, counted: number) => {
+    const target = counted * TAIL_SHARE;
+    const BINS = bins.length;
+    let cumulative = 0;
+    let nearBin = 0;
+    for (let b = 0; b < BINS; b++) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            nearBin = b;
+            break;
+        }
+    }
+    cumulative = 0;
+    let farBin = BINS - 1;
+    for (let b = BINS - 1; b >= 0; b--) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            farBin = b;
+            break;
+        }
+    }
+    const near = (nearBin + 1) / BINS;
+    const far = farBin / BINS;
+    // a degenerate distribution (or one whose tails already sit at the very ends) keeps it linear
+    if (!(near < far) || (near <= 0.005 && far >= 0.995)) {
+        return null;
+    }
+    return { near, far };
+};
+
 export const depthTailFractions = (
     splat: Splat,
     view: {
@@ -134,34 +188,85 @@ export const depthTailFractions = (
     }
 
     // 从两端往中间数，找到累积占比刚超过 TAIL_SHARE 的那个桶 = 尾巴的边界
-    const target = counted * TAIL_SHARE;
-    let cumulative = 0;
-    let nearBin = 0;
-    for (let b = 0; b < BINS; b++) {
-        cumulative += bins[b];
-        if (cumulative >= target) {
-            nearBin = b;
-            break;
-        }
-    }
-    cumulative = 0;
-    let farBin = BINS - 1;
-    for (let b = BINS - 1; b >= 0; b--) {
-        cumulative += bins[b];
-        if (cumulative >= target) {
-            farBin = b;
-            break;
-        }
+    return tailBins(bins, counted);
+};
+
+/**
+ * 左右 / 上下两条轴的空边距：手势框是**用户随手拖出来的**，框边常常落在空处（实测真实扫描：框内
+ * 37.4 万点里，框左 25% 只占 4%，右端 90-95% 却是密区）。比例尺按框算，于是"推 20px"只削掉一条
+ * 0.15% 宽的边、删掉 105 个高斯（深度轴修好后是 2%）—— 用户的原话是"上下左右好像没什么反应"。
+ *
+ * 和深度轴同一套做法：按**框内**高斯投影后的实际分布，把两端各占 `TAIL_SHARE` 的那一段压进行程的
+ * `TAIL_PERCENT` 里；框边本身就在内容上时测出来是空尾巴，映射自动退回线性。
+ */
+export const screenTailFractions = (
+    splat: Splat,
+    view: {
+        viewProjection: ArrayLike<number>;
+        worldTransform: ArrayLike<number>;
+        width: number;
+        height: number;
+    },
+    bounds: { x0: number, y0: number, x1: number, y1: number },
+    inBox?: Uint8Array | null
+): { x: { near: number, far: number } | null, y: { near: number, far: number } | null } => {
+    const data = splat.splatData;
+    const numSplats = data.numSplats;
+    const x0 = Math.min(bounds.x0, bounds.x1);
+    const x1 = Math.max(bounds.x0, bounds.x1);
+    const y0 = Math.min(bounds.y0, bounds.y1);
+    const y1 = Math.max(bounds.y0, bounds.y1);
+    if (!data || !numSplats || !(x1 - x0 > 1) || !(y1 - y0 > 1)) {
+        return { x: null, y: null };
     }
 
-    const nearFraction = (nearBin + 1) / BINS;
-    const farFraction = farBin / BINS;
-    // a degenerate distribution (or one whose tails already sit at the very ends) keeps the plain
-    // linear mapping
-    if (!(nearFraction < farFraction) || (nearFraction <= 0.005 && farFraction >= 0.995)) {
-        return null;
+    const px = data.getProp('x') as Float32Array;
+    const py = data.getProp('y') as Float32Array;
+    const pz = data.getProp('z') as Float32Array;
+    const state = data.getProp('state') as Uint8Array;
+    if (!px || !py || !pz) {
+        return { x: null, y: null };
     }
-    return { near: nearFraction, far: farFraction };
+
+    const m = view.viewProjection;
+    const world = view.worldTransform;
+    const { width, height } = view;
+    const BINS = 512;
+    const binsX = new Uint32Array(BINS);
+    const binsY = new Uint32Array(BINS);
+    let counted = 0;
+
+    for (let i = 0; i < numSplats; i++) {
+        if (inBox ? inBox[i] === 0 : (state && (state[i] & (2 | 4)) !== 0)) {
+            continue;
+        }
+        const lx = px[i], ly = py[i], lz = pz[i];
+        const wx = world[0] * lx + world[4] * ly + world[8] * lz + world[12];
+        const wy = world[1] * lx + world[5] * ly + world[9] * lz + world[13];
+        const wz = world[2] * lx + world[6] * ly + world[10] * lz + world[14];
+        const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
+        if (cw <= 0) {
+            continue;
+        }
+        const sx = Math.min(width - 1, Math.max(0, Math.floor(((m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw * 0.5 + 0.5) * width)));
+        const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - ((m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw * 0.5 + 0.5)) * height)));
+        if (sx < x0 || sx > x1 || sy < y0 || sy > y1) {
+            continue;
+        }
+        counted++;
+        const bx = Math.floor(((sx - x0) / (x1 - x0)) * BINS);
+        const by = Math.floor(((sy - y0) / (y1 - y0)) * BINS);
+        if (bx >= 0 && bx < BINS) {
+            binsX[bx]++;
+        }
+        if (by >= 0 && by < BINS) {
+            binsY[by]++;
+        }
+    }
+    if (counted < 1000) {
+        return { x: null, y: null };
+    }
+    return { x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
 };
 
 /**
@@ -177,35 +282,21 @@ export const rangeDistances = (
     tails?: { near: number, far: number } | null
 ) => {
     const span = max - min;
-    const fractionOf = (pct: number) => {
-        const t = Math.max(0, Math.min(100, pct)) * 0.01;
-        if (!tails) {
-            return t;
-        }
-        const low = tails.near;
-        const high = tails.far;
-        const edge = TAIL_PERCENT * 0.01;
-        if (t <= edge) {
-            return (t / edge) * low;
-        }
-        if (t >= 1 - edge) {
-            return high + ((t - (1 - edge)) / edge) * (1 - high);
-        }
-        return low + ((t - edge) / (1 - 2 * edge)) * (high - low);
-    };
     return {
-        minDistance: min + span * fractionOf(nearPct),
-        maxDistance: min + span * fractionOf(farPct)
+        minDistance: min + span * tailMap(nearPct, tails),
+        maxDistance: min + span * tailMap(farPct, tails)
     };
 };
 
 /**
  * 选区框（设备像素）+ 左右/上下两个百分比范围 → 实际要选的屏幕窗口。
  * 百分比相对**选区框**量：left 0 / right 100 / top 0 / bottom 100 = 整个框（默认，等于不裁）。
+ * `tails` 是框内内容区的实际位置（见 screenTailFractions）：把空边距压紧，第一次推杆就有反应。
  */
 export const screenWindow = (
     bounds: { x0: number, y0: number, x1: number, y1: number },
-    range: { left: number, right: number, top: number, bottom: number }
+    range: { left: number, right: number, top: number, bottom: number },
+    tails?: { x: { near: number, far: number } | null, y: { near: number, far: number } | null } | null
 ) => {
     const x0 = Math.min(bounds.x0, bounds.x1);
     const x1 = Math.max(bounds.x0, bounds.x1);
@@ -214,10 +305,10 @@ export const screenWindow = (
     const w = x1 - x0;
     const h = y1 - y0;
     return {
-        minX: x0 + w * (range.left * 0.01),
-        maxX: x0 + w * (range.right * 0.01),
-        minY: y0 + h * (range.top * 0.01),
-        maxY: y0 + h * (range.bottom * 0.01)
+        minX: x0 + w * tailMap(range.left, tails?.x),
+        maxX: x0 + w * tailMap(range.right, tails?.x),
+        minY: y0 + h * tailMap(range.top, tails?.y),
+        maxY: y0 + h * tailMap(range.bottom, tails?.y)
     };
 };
 

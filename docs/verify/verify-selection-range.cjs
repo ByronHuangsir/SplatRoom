@@ -131,7 +131,22 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await setRange(0, 100);
         await sleep(600);
 
-        // 3. live narrowing of 最近 with 最远 back at 100
+        // 2c. and the same for the box axes: half a unit of slider travel in from either edge must
+        // reach real gaussians (the box margins are compressed like the depth tails)
+        const screenFirst = [];
+        const setScreen = (patch) => page.evaluate((p) => window.scene.events.fire('selection.setScreenRange', p), patch);
+        for (const patch of [{ x: { low: 0.5 } }, { y: { low: 0.5 } }, { x: { high: 99.5 } }, { y: { high: 99.5 } }]) {
+            await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+            await sleep(300);
+            await setScreen(patch);
+            await sleep(600);
+            const c = (await classify()).total;
+            screenFirst.push({ patch: Object.keys(patch)[0] + (patch.x?.low !== undefined || patch.y?.low !== undefined ? ' low 0.5' : ' high 99.5'), selected: c, removed: throughCount - c });
+        }
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(400);
+
+
         const nearSweep = [];
         for (const near of [0, 20, 40, 60, 80]) {
             await setRange(near, 100);
@@ -284,6 +299,14 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 name: 'the depth ends stay reachable (0/100 is still the whole model)',
                 pass: throughCount > 0 && farSweep[0].total === throughCount && afterReset.total === throughCount,
                 detail: `through-pass ${throughCount}, far 100 -> ${farSweep[0].total}, after reset -> ${afterReset.total}`
+            },
+            {
+                name: 'the first small move of 左右 / 上下 already cuts gaussians (no dead edge of the track)',
+                // on a model with a real distribution the box margins are sparse and have to be
+                // compressed; a tiny test model (< 1000 rows in the box) legitimately keeps the
+                // linear mapping and may drop nothing at 0.5%
+                pass: screenFirst.every(s => s.removed > 0 || throughCount < 1000),
+                detail: `through-pass ${throughCount}; 0.5 in removes x ${screenFirst[0].removed} / y ${screenFirst[1].removed}; 0.5 in on the far side removes x ${screenFirst[2].removed} / y ${screenFirst[3].removed}`
             },
             {
                 name: 'dragging 最远 in cuts the far side monotonically',
