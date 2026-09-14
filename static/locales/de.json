@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "Rechts",
     "select-toolbar.rangeTop": "Oben",
     "select-toolbar.rangeBottom": "Unten",
+    "select-toolbar.rangeHandleHint": "Ziehen: innerer Griff schneidet, äußerer Griff erweitert",
     "select-toolbar.depthReset": "Zurücksetzen",
     "select-toolbar.radius": "Radius",
     "popup.ok": "OK",

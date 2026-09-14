@@ -7,7 +7,7 @@ import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, SelectRangeOp, Hid
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
 import { IndexRanges } from '../core/index-ranges';
-import { getDepthRange, getScreenRange } from '../core/selection-flags';
+import { getDepthSelection, getScreenRange, getScreenSelection } from '../core/selection-flags';
 import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../geometry/planar-fix';
 import { semanticSelect } from '../geometry/semantic-select';
 import { refineSurface, refineSurfaceLevel2, SurfaceRefineLevel2Params } from '../geometry/surface-refiner';
@@ -1005,15 +1005,28 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         intersect: (had: boolean, hit: boolean) => had && hit
     };
 
+    // the core window (inner handles) in device pixels, spelled for SelectionRangeView: the
+    // drawn shape only applies inside it, the band out to the outer handles is rectangular
+    const coreScreenWindow = (bounds: { x0: number, y0: number, x1: number, y1: number }) => {
+        const window = screenWindow(bounds, getScreenRange());
+        return {
+            coreMinX: window.minX,
+            coreMaxX: window.maxX,
+            coreMinY: window.minY,
+            coreMaxY: window.maxY
+        };
+    };
+
     // one entry's view for the current three-axis range: the pose + model transform captured
-    // with the gesture, plus the depth window and the screen window derived from it
+    // with the gesture, plus the depth window and the two screen windows (outer = what is
+    // selected, core = where the drawn shape still applies) derived from it
     const rangeView = (gesture: RangeGesture, entry: RangeEntry): SelectionRangeView => {
-        const { near, far } = getDepthRange();
-        const screen = getScreenRange();
+        const { near, far } = getDepthSelection();
         return {
             ...entry.view,
             ...rangeDistances(entry.extent.min, entry.extent.max, near, far),
-            ...screenWindow(gesture.bounds, screen)
+            ...screenWindow(gesture.bounds, getScreenSelection()),
+            ...coreScreenWindow(gesture.bounds)
         };
     };
 
@@ -1038,9 +1051,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
 
         const pose = poseSnapshot();
-        const { near, far } = getDepthRange();
-        const screen = getScreenRange();
-        const window = screenWindow(bounds, screen);
+        const { near, far } = getDepthSelection();
+        const window = screenWindow(bounds, getScreenSelection());
+        const coreWindow = coreScreenWindow(bounds);
         const entries: RangeEntry[] = [];
         const combine = rangeCombine[opKind];
 
@@ -1057,7 +1070,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 ...pose,
                 worldTransform: splat.worldTransform.data,
                 ...distances,
-                ...window
+                ...window,
+                ...coreWindow
             };
 
             // the selection as it stands, minus locked rows: a hidden splat is locked AND

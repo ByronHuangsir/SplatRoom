@@ -1,36 +1,47 @@
 import { Events } from './events';
 
-// Selection range (V3, "选区范围" —— 三轴双柄 range：最近-最远 / 左-右 / 上-下).
+// Selection range (V3, "选区范围" —— 三轴四柄 range).
 //
 // 屏幕选择工具默认**穿透整个模型**：只要高斯的投影落在 2D 选择区域里就选中，不管有多深。之后三个
-// 双柄范围把它收成一个盒子（低端标签 …… 高端标签，两个柄之间就是选中的部分）：
+// 四柄 range 把它收成 / 撑成一个盒子。每个轴两层：
 //
-//   深度（最近-最远）：占**模型自身深度范围**的百分比，沿**手势当时**的视轴量取；0/100 = 整段；
-//   左右（左-右）   ：占**选区框**宽度的百分比；0/100 = 整框；
-//   上下（上-下）   ：占**选区框**高度的百分比；0/100 = 整框。
+//   内柄（low / high）  ：选区边界 —— 就是手势那个框裁到哪；
+//   外柄（outerLow/High）：**扩边到哪** —— 外柄与内柄之间那一段就是"扩边多吃进来的部分"。
 //
-// 三个轴的默认值都是"整段"，也就是"完整穿透"。判定在 splat/selection-range.ts，UI 在
-// ui/selection-depth-bar.ts（双柄控件是 ui/range-slider.ts）。
+// 两个柄默认重合（不扩边），此时行为与只有内柄时完全一致。约束永远是
+// `outerLow ≤ low ≤ high ≤ outerHigh`（拖动时靠"拉下来 / 顶上去"维持，见 ui/range-slider.ts）。
 //
+// 百分比相对谁：
+//   深度（最近-最远）：**模型自身**沿手势视轴的深度范围，0-100（模型之外没有东西，所以不外扩）；
+//   左右（左-右）   ：**手势那个框**的宽度，0/100 = 框的两条边，负值 / 大于 100 = 扩到框外；
+//   上下（上-下）   ：同上，框的高度。
+//
+// 真正参与判定的是**外柄**（也就是"扩边之后"的范围），见 splat/selection-range.ts。
 // 这个模块独立于 UI：选区范围浮条在构建时就读取这些值，而 editor 的处理器注册得更晚。
 // 值会持久化，重启后保持。
 
-const DEPTH_KEYS = { low: 'splatroom.selDepthNear', high: 'splatroom.selDepthFar' };
-const X_KEYS = { low: 'splatroom.selRangeLeft', high: 'splatroom.selRangeRight' };
-const Y_KEYS = { low: 'splatroom.selRangeTop', high: 'splatroom.selRangeBottom' };
+type Axis = { low: number, high: number, outerLow: number, outerHigh: number };
 
-const DEFAULT_LOW = 0;
-const DEFAULT_HIGH = 100;
+type Limits = { min: number, max: number };
 
-type Axis = { low: number, high: number };
-
-let depth: Axis = { low: DEFAULT_LOW, high: DEFAULT_HIGH };
-let screenX: Axis = { low: DEFAULT_LOW, high: DEFAULT_HIGH };
-let screenY: Axis = { low: DEFAULT_LOW, high: DEFAULT_HIGH };
-
-const clampPct = (value: number, fallback: number) => {
-    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : fallback;
+const LIMITS: Record<'depth' | 'x' | 'y', Limits> = {
+    depth: { min: 0, max: 100 },
+    // 一个框宽的扩边余地，左右/上下都一样
+    x: { min: -100, max: 200 },
+    y: { min: -100, max: 200 }
 };
+
+const KEYS = {
+    depth: { low: 'splatroom.selDepthNear', high: 'splatroom.selDepthFar', outerLow: 'splatroom.selDepthOuterNear', outerHigh: 'splatroom.selDepthOuterFar' },
+    x: { low: 'splatroom.selRangeLeft', high: 'splatroom.selRangeRight', outerLow: 'splatroom.selRangeOuterLeft', outerHigh: 'splatroom.selRangeOuterRight' },
+    y: { low: 'splatroom.selRangeTop', high: 'splatroom.selRangeBottom', outerLow: 'splatroom.selRangeOuterTop', outerHigh: 'splatroom.selRangeOuterBottom' }
+};
+
+const FULL: Axis = { low: 0, high: 100, outerLow: 0, outerHigh: 100 };
+
+let depth: Axis = { ...FULL };
+let screenX: Axis = { ...FULL };
+let screenY: Axis = { ...FULL };
 
 const readStored = (key: string) => {
     try {
@@ -40,58 +51,141 @@ const readStored = (key: string) => {
     }
 };
 
-const store = (keys: { low: string, high: string }, axis: Axis) => {
+const store = (keys: { low: string, high: string, outerLow: string, outerHigh: string }, axis: Axis) => {
     try {
         localStorage.setItem(keys.low, String(axis.low));
         localStorage.setItem(keys.high, String(axis.high));
+        localStorage.setItem(keys.outerLow, String(axis.outerLow));
+        localStorage.setItem(keys.outerHigh, String(axis.outerHigh));
     } catch { /* storage unavailable */ }
 };
 
-// 两个柄互相约束：低端不能越过高端。写一整对时按大小排好；只写一个值时按"双柄 range"的手感
-// **顶开对面那个柄**（把低端拖过高端，高端跟着走，不会把手里的值丢掉）。
-const order = (low: number, high: number): Axis => {
-    const l = clampPct(low, DEFAULT_LOW);
-    const h = clampPct(high, DEFAULT_HIGH);
-    return l <= h ? { low: l, high: h } : { low: h, high: l };
+/** 把四个值夹进值域并维持 outerLow ≤ low ≤ high ≤ outerHigh。 */
+const normalize = (axis: Axis, limits: Limits): Axis => {
+    const pick = (value: number, fallback: number) => {
+        return Number.isFinite(value) ? Math.max(limits.min, Math.min(limits.max, value)) : fallback;
+    };
+    const next = {
+        outerLow: pick(axis.outerLow, FULL.outerLow),
+        low: pick(axis.low, FULL.low),
+        high: pick(axis.high, FULL.high),
+        outerHigh: pick(axis.outerHigh, FULL.outerHigh)
+    };
+    next.low = Math.max(next.low, next.outerLow);
+    next.high = Math.min(next.high, next.outerHigh);
+    next.outerLow = Math.min(next.outerLow, next.low);
+    next.outerHigh = Math.max(next.outerHigh, next.high);
+    return next;
 };
 
-const readAxis = (keys: { low: string, high: string }): Axis => {
-    return order(
-        Number.parseFloat(readStored(keys.low) ?? ''),
-        Number.parseFloat(readStored(keys.high) ?? '')
-    );
+const readAxis = (keys: { low: string, high: string, outerLow: string, outerHigh: string }, limits: Limits): Axis => {
+    const low = Number.parseFloat(readStored(keys.low) ?? '');
+    const high = Number.parseFloat(readStored(keys.high) ?? '');
+    const stored = {
+        low: Number.isFinite(low) ? low : FULL.low,
+        high: Number.isFinite(high) ? high : FULL.high,
+        // a profile stored before the outer handles existed simply has no expansion
+        outerLow: Number.isFinite(low) ? low : FULL.outerLow,
+        outerHigh: Number.isFinite(high) ? high : FULL.outerHigh
+    };
+    const outerLow = Number.parseFloat(readStored(keys.outerLow) ?? '');
+    const outerHigh = Number.parseFloat(readStored(keys.outerHigh) ?? '');
+    if (Number.isFinite(outerLow)) {
+        stored.outerLow = outerLow;
+    }
+    if (Number.isFinite(outerHigh)) {
+        stored.outerHigh = outerHigh;
+    }
+    return normalize(stored, limits);
+};
+
+type Patch = { low?: number, high?: number, outerLow?: number, outerHigh?: number };
+
+/**
+ * 应用一次写入，规则与控件里拖柄完全一致（所以从事件 API 改值的手感和拖柄一样）：
+ *
+ *   - 只给内柄（low / high）→ **外柄跟着一起走**（扩边量保持）→ 往里改就是收边；
+ *   - 给了外柄（outerLow / outerHigh）→ 往外 = 扩边量变大；越过内柄 = 扩边量收到 0 并顶开内柄；
+ *   - 最后统一夹进值域、修好 `outerLow ≤ low ≤ high ≤ outerHigh`。
+ */
+const merge = (current: Axis, patch: Patch, limits: Limits): Axis => {
+    const pick = (value: number | undefined, fallback: number) => {
+        return value !== undefined && Number.isFinite(value) ?
+            Math.max(limits.min, Math.min(limits.max, value)) : fallback;
+    };
+
+    const marginLow = current.low - current.outerLow;
+    const marginHigh = current.outerHigh - current.high;
+
+    let low = pick(patch.low, current.low);
+    let high = pick(patch.high, current.high);
+    let outerLow = patch.outerLow !== undefined ?
+        pick(patch.outerLow, current.outerLow) : low - marginLow;
+    let outerHigh = patch.outerHigh !== undefined ?
+        pick(patch.outerHigh, current.outerHigh) : high + marginHigh;
+
+    // 内柄互相推
+    if (low > high) {
+        if (patch.low !== undefined && patch.high !== undefined) {
+            // 一整对给反了：按大小排好（历史行为：setDepthRange({near:80, far:20}) → 20/80）
+            const swapped = low;
+            low = high;
+            high = swapped;
+            if (patch.outerLow === undefined) {
+                outerLow = low - marginLow;
+            }
+            if (patch.outerHigh === undefined) {
+                outerHigh = high + marginHigh;
+            }
+        } else if (patch.low !== undefined) {
+            high = low;
+            outerHigh = Math.max(outerHigh, high);
+        } else {
+            low = high;
+            outerLow = Math.min(outerLow, low);
+        }
+    }
+
+    // 外柄越过内柄 = 扩边收到 0 并顶开内柄
+    if (outerLow > low) {
+        low = outerLow;
+        if (low > high) {
+            high = low;
+            outerHigh = Math.max(outerHigh, high);
+        }
+    }
+    if (outerHigh < high) {
+        high = outerHigh;
+        if (high < low) {
+            low = high;
+            outerLow = Math.min(outerLow, low);
+        }
+    }
+
+    return normalize({ low, high, outerLow: Math.min(outerLow, low), outerHigh: Math.max(outerHigh, high) }, limits);
+};
+
+const same = (a: Axis, b: Axis) => {
+    return a.low === b.low && a.high === b.high && a.outerLow === b.outerLow && a.outerHigh === b.outerHigh;
 };
 
 const registerSelectionFlags = (events: Events) => {
-    depth = readAxis(DEPTH_KEYS);
-    screenX = readAxis(X_KEYS);
-    screenY = readAxis(Y_KEYS);
-
-    // 部分写入（只有 low 或只有 high）→ 顶开对面；整对写入 → 排序
-    const merge = (current: Axis, value: { low?: number, high?: number }): Axis => {
-        const movedLow = value?.low !== undefined;
-        const movedHigh = value?.high !== undefined;
-        let low = movedLow ? value.low : current.low;
-        let high = movedHigh ? value.high : current.high;
-        if (movedLow && !movedHigh && low > high) {
-            high = low;
-        } else if (movedHigh && !movedLow && high < low) {
-            low = high;
-        }
-        return order(low, high);
-    };
+    depth = readAxis(KEYS.depth, LIMITS.depth);
+    screenX = readAxis(KEYS.x, LIMITS.x);
+    screenY = readAxis(KEYS.y, LIMITS.y);
 
     const setAxis = (
-        keys: { low: string, high: string },
+        keys: { low: string, high: string, outerLow: string, outerHigh: string },
         current: () => Axis,
         assign: (axis: Axis) => void,
+        limits: Limits,
         fire: string,
         payload: () => unknown
     ) => {
-        return (value: { low?: number, high?: number }) => {
+        return (patch: Patch) => {
             const previous = current();
-            const next = merge(previous, value);
-            if (next.low === previous.low && next.high === previous.high) {
+            const next = merge(previous, patch, limits);
+            if (same(previous, next)) {
                 return;
             }
             assign(next);
@@ -101,30 +195,43 @@ const registerSelectionFlags = (events: Events) => {
     };
 
     const screenPayload = () => ({ x: { ...screenX }, y: { ...screenY } });
-    const setDepth = setAxis(DEPTH_KEYS, () => depth, (axis) => {
-        depth = axis;
-    }, 'selection.depthRange', () => ({ ...depth }));
-    const setScreenX = setAxis(X_KEYS, () => screenX, (axis) => {
-        screenX = axis;
-    }, 'selection.screenRange', screenPayload);
-    const setScreenY = setAxis(Y_KEYS, () => screenY, (axis) => {
-        screenY = axis;
-    }, 'selection.screenRange', screenPayload);
 
-    // the depth axis keeps its historical { near, far } shape (the screen axes below are
-    // generic { low, high } pairs)
-    events.function('selection.depthRange', () => ({ near: depth.low, far: depth.high }));
+    const setDepth = setAxis(KEYS.depth, () => depth, (axis) => {
+        depth = axis;
+    }, LIMITS.depth, 'selection.depthRange', () => ({
+        near: depth.low,
+        far: depth.high,
+        nearOuter: depth.outerLow,
+        farOuter: depth.outerHigh
+    }));
+
+    const setScreenX = setAxis(KEYS.x, () => screenX, (axis) => {
+        screenX = axis;
+    }, LIMITS.x, 'selection.screenRange', screenPayload);
+
+    const setScreenY = setAxis(KEYS.y, () => screenY, (axis) => {
+        screenY = axis;
+    }, LIMITS.y, 'selection.screenRange', screenPayload);
+
+    // 公开的读接口：深度保持历史形状 { near, far }（= 内柄），外柄另给两个键
+    events.function('selection.depthRange', () => ({
+        near: depth.low,
+        far: depth.high,
+        nearOuter: depth.outerLow,
+        farOuter: depth.outerHigh
+    }));
     events.function('selection.screenRange', () => ({ x: { ...screenX }, y: { ...screenY } }));
-    events.on('selection.setDepthRange', (value: { low?: number, high?: number, near?: number, far?: number }) => {
-        // `near`/`far` is the pre-3.8 spelling: accept it so older callers and stored
-        // preferences keep working
-        const mapped = {
+
+    // 兼容历史写法：near/far（= 内柄）与 low/high（= 内柄），外柄用 outerNear/outerFar
+    events.on('selection.setDepthRange', (value: Patch & { near?: number, far?: number, nearOuter?: number, farOuter?: number }) => {
+        setDepth({
             low: value?.low ?? value?.near,
-            high: value?.high ?? value?.far
-        };
-        setDepth(mapped);
+            high: value?.high ?? value?.far,
+            outerLow: value?.outerLow ?? value?.nearOuter,
+            outerHigh: value?.outerHigh ?? value?.farOuter
+        } as Patch);
     });
-    events.on('selection.setScreenRange', (value: { x?: { low?: number, high?: number }, y?: { low?: number, high?: number } }) => {
+    events.on('selection.setScreenRange', (value: { x?: Patch, y?: Patch }) => {
         if (value?.x) {
             setScreenX(value.x);
         }
@@ -132,14 +239,24 @@ const registerSelectionFlags = (events: Events) => {
             setScreenY(value.y);
         }
     });
-    events.on('selection.resetDepthRange', () => setDepth({ low: DEFAULT_LOW, high: DEFAULT_HIGH }));
+    events.on('selection.resetDepthRange', () => setDepth({ ...FULL }));
     events.on('selection.resetRange', () => {
-        setDepth({ low: DEFAULT_LOW, high: DEFAULT_HIGH });
-        setScreenX({ low: DEFAULT_LOW, high: DEFAULT_HIGH });
-        setScreenY({ low: DEFAULT_LOW, high: DEFAULT_HIGH });
+        setDepth({ ...FULL });
+        setScreenX({ ...FULL });
+        setScreenY({ ...FULL });
     });
 };
 
+/** 判定用的实际范围：外柄（= 扩边之后）。 */
+const getDepthSelection = () => ({ near: depth.outerLow, far: depth.outerHigh });
+const getScreenSelection = () => ({
+    left: screenX.outerLow,
+    right: screenX.outerHigh,
+    top: screenY.outerLow,
+    bottom: screenY.outerHigh
+});
+
+/** 内柄：核心范围（2D 区域的形状只在这个范围里生效）。 */
 const getDepthRange = () => ({ near: depth.low, far: depth.high });
 const getScreenRange = () => ({
     left: screenX.low,
@@ -148,4 +265,11 @@ const getScreenRange = () => ({
     bottom: screenY.high
 });
 
-export { registerSelectionFlags, getDepthRange, getScreenRange, DEFAULT_LOW, DEFAULT_HIGH };
+export {
+    registerSelectionFlags,
+    getDepthSelection,
+    getScreenSelection,
+    getDepthRange,
+    getScreenRange,
+    LIMITS
+};

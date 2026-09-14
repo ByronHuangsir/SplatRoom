@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "Direita",
     "select-toolbar.rangeTop": "Topo",
     "select-toolbar.rangeBottom": "Base",
+    "select-toolbar.rangeHandleHint": "Arraste: o marcador interno recorta, o externo amplia",
     "select-toolbar.depthReset": "Redefinir",
     "select-toolbar.radius": "Raio",
     "popup.ok": "OK",

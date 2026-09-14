@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "Derecha",
     "select-toolbar.rangeTop": "Arriba",
     "select-toolbar.rangeBottom": "Abajo",
+    "select-toolbar.rangeHandleHint": "Arrastra: el tirador interior recorta, el exterior amplía",
     "select-toolbar.depthReset": "Restablecer",
     "select-toolbar.radius": "Radio",
     "popup.ok": "Aceptar",

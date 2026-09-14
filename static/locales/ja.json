@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "右",
     "select-toolbar.rangeTop": "上",
     "select-toolbar.rangeBottom": "下",
+    "select-toolbar.rangeHandleHint": "ドラッグ：内側のつまみは範囲を切り、外側のつまみは外へ広げます",
     "select-toolbar.depthReset": "リセット",
     "select-toolbar.radius": "半径",
     "popup.ok": "OK",

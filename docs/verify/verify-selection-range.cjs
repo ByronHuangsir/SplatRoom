@@ -72,20 +72,21 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             window.scene.events.fire('selection.setDepthRange', { near: n, far: f });
         }, near, far);
 
-        const gesture = async (op = 'set') => {
+        const gesture = async (op = 'set', box = { start: { x: 0.3, y: 0.3 }, end: { x: 0.7, y: 0.7 } }) => {
             await page.evaluate((o) => {
                 window.scene.events.fire('select.none');
             }, op);
             await sleep(400);
             const t0 = Date.now();
-            await page.evaluate((o) => window.scene.events.invoke('select.rect', o, {
-                start: { x: 0.3, y: 0.3 },
-                end: { x: 0.7, y: 0.7 }
-            }), op);
+            await page.evaluate((o, b) => window.scene.events.invoke('select.rect', o, b), op, box);
             const ms = Date.now() - t0;
             await sleep(500);
             return { ...(await classify()), ms };
         };
+
+        // a box that is a strict part of the framed model, so expanding past it has something
+        // to add and contracting inside it has something to drop
+        const innerBox = { start: { x: 0.4, y: 0.4 }, end: { x: 0.6, y: 0.6 } };
 
         // range at the default before anything else happens
         const defaults = await page.evaluate(() => window.scene.events.invoke('selection.depthRange'));
@@ -164,12 +165,54 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await sleep(700);
         const screenBack = await classify();
 
-        // 8. the helper's "reset" leaves the depth flag at the default, and localStorage keeps it
+        // 8. 扩边 / 收边 (D): the outer handles must really feed the selection, so an expanded
+        // range has to be a STRICT superset of the box and a contracted one a strict subset.
+        // (The depth case is the clearest: trim to the front wall, then expand the far outer
+        // handle back out and the wall behind has to come in again.)
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(300);
+        await gesture('set', innerBox);
+        const setBox = await selectedIndices();
+
+        // a full box width of margin on both screen axes = the whole viewport
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
+            x: { outerLow: -100, outerHigh: 200 },
+            y: { outerLow: -100, outerHigh: 200 }
+        }));
+        await sleep(700);
+        const setExpanded = await selectedIndices();
+
+        // back to no expansion, then contract inside the box with the inner handles
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
+            x: { outerLow: 0, outerHigh: 100 },
+            y: { outerLow: 0, outerHigh: 100 }
+        }));
+        await sleep(600);
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
+            x: { low: 45, high: 55 },
+            y: { low: 45, high: 55 }
+        }));
+        await sleep(700);
+        const setContracted = await selectedIndices();
+
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(300);
+        await gesture();
+        await page.evaluate(() => window.scene.events.fire('selection.setDepthRange', { low: 0, high: 40 }));
+        await sleep(700);
+        const depthTrimmed = await classify();
+        await page.evaluate(() => window.scene.events.fire('selection.setDepthRange', { outerHigh: 100 }));
+        await sleep(700);
+        const depthExpanded = await classify();
+
+        // 9. the helper's "reset" leaves the flags at the default, and localStorage keeps them
         await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
         await sleep(300);
         const storage = await page.evaluate(() => ({
             near: window.localStorage.getItem('splatroom.selDepthNear'),
             far: window.localStorage.getItem('splatroom.selDepthFar'),
+            nearOuter: window.localStorage.getItem('splatroom.selDepthOuterNear'),
+            farOuter: window.localStorage.getItem('splatroom.selDepthOuterFar'),
             left: window.localStorage.getItem('splatroom.selRangeLeft'),
             right: window.localStorage.getItem('splatroom.selRangeRight'),
             top: window.localStorage.getItem('splatroom.selRangeTop'),
@@ -269,6 +312,24 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 detail: `${screenFull.total} -> ${screenY.total} -> ${screenBack.total}`
             },
             {
+                name: '扩边: the outer handles select a STRICT superset of the box',
+                pass: isSubset(setBox, setExpanded) && setExpanded.length > setBox.length,
+                detail: `box ${setBox.length} splats, expanded to the whole viewport: ${setExpanded.length} ` +
+                    `(box inside expanded: ${isSubset(setBox, setExpanded)})`
+            },
+            {
+                name: '收边: the inner handles select a STRICT subset of the box',
+                pass: isSubset(setContracted, setBox) && setContracted.length < setBox.length && setContracted.length > 0,
+                detail: `box ${setBox.length} splats, contracted to the middle 10%: ${setContracted.length}`
+            },
+            {
+                name: '扩边 on the depth axis brings the wall behind back',
+                pass: depthTrimmed.back === 0 && depthTrimmed.front > 0 &&
+                    depthExpanded.back > 0 && depthExpanded.front > 0,
+                detail: `core 0..40: ${depthTrimmed.front} front / ${depthTrimmed.back} back; ` +
+                    `then the far outer expanded to 100: ${depthExpanded.front} front / ${depthExpanded.back} back`
+            },
+            {
                 name: 'the range pass stays interactive on a small model',
                 pass: through.ms < 3000,
                 detail: `rect selection took ${through.ms} ms`
@@ -294,7 +355,16 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             screenX,
             screenY,
             screenBack,
-            setSizes: { full: setFull.length, x: setX.length, y: setY.length },
+            setSizes: {
+                full: setFull.length,
+                x: setX.length,
+                y: setY.length,
+                box: setBox.length,
+                expanded: setExpanded.length,
+                contracted: setContracted.length
+            },
+            depthTrimmed,
+            depthExpanded,
             storage,
             checks,
             failed: checks.filter(c => !c.pass).length,

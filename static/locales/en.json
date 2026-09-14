@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "Right",
     "select-toolbar.rangeTop": "Top",
     "select-toolbar.rangeBottom": "Bottom",
+    "select-toolbar.rangeHandleHint": "Drag: the inner handle trims the box, the outer one expands past it",
     "select-toolbar.depthReset": "Reset",
     "select-toolbar.radius": "Radius",
     "popup.ok": "OK",

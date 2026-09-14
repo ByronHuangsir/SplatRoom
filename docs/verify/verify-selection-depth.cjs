@@ -230,17 +230,17 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             const brushSet = await record('sphere brush / set');
 
             // 12. the depth range API round-trips and clamps
-            out.flags.defaultRange = JSON.stringify(events.invoke('selection.depthRange'));
+            out.flags.defaultRange = events.invoke('selection.depthRange');
             events.fire('selection.setDepthRange', { near: 30, far: 70 });
             await sleep(150);
-            out.flags.setRange = JSON.stringify(events.invoke('selection.depthRange'));
+            out.flags.setRange = events.invoke('selection.depthRange');
             // near past far: the pair is kept ordered
             events.fire('selection.setDepthRange', { near: 80, far: 20 });
             await sleep(150);
-            out.flags.crossedRange = JSON.stringify(events.invoke('selection.depthRange'));
+            out.flags.crossedRange = events.invoke('selection.depthRange');
             events.fire('selection.resetDepthRange');
             await sleep(150);
-            out.flags.resetRange = JSON.stringify(events.invoke('selection.depthRange'));
+            out.flags.resetRange = events.invoke('selection.depthRange');
 
             return out;
         });
@@ -287,11 +287,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             { name: 'the box volume still selects', pass: byName['box / set'] > 0, detail: `${byName['box / set']} splats` },
             { name: 'the sphere brush still selects', pass: byName['sphere brush / set'] > 0, detail: `${byName['sphere brush / set']} splats` },
             {
-                name: 'the depth range round-trips, clamps and resets',
-                pass: result.flags.defaultRange === '{"near":0,"far":100}' &&
-                    result.flags.setRange === '{"near":30,"far":70}' &&
-                    result.flags.crossedRange === '{"near":20,"far":80}' &&
-                    result.flags.resetRange === '{"near":0,"far":100}',
+                name: 'the depth range round-trips, orders a crossed pair and resets',
+                pass: result.flags.defaultRange.near === 0 && result.flags.defaultRange.far === 100 &&
+                    result.flags.setRange.near === 30 && result.flags.setRange.far === 70 &&
+                    result.flags.crossedRange.near === 20 && result.flags.crossedRange.far === 80 &&
+                    result.flags.resetRange.near === 0 && result.flags.resetRange.far === 100,
                 detail: JSON.stringify(result.flags)
             },
             { name: 'no console errors', pass: errors.length === 0, detail: errors.slice(0, 2).join(' | ') || 'clean' }

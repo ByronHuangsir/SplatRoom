@@ -1,9 +1,11 @@
-// Verify the 选区范围 panel: three dual-handle ranges (最近-最远 / 左-右 / 上-下) plus 重置,
+// Verify the 选区范围 panel: three FOUR-handle ranges (最近-最远 / 左-右 / 上-下) plus 重置,
 // shown while a screen-space selection tool is active, driving `selection.depthRange` and
 // `selection.screenRange`.
 //
-// The handles are dragged with real mouse input (page.mouse) because the control captures the
-// pointer on the track, and the numeric fields are typed into as the exact-entry path.
+// Each axis has two handle levels: the inner pair trims the box, the outer pair expands past it
+// (the span between an outer and its inner handle is the 扩边 part). The handles are dragged with
+// real mouse input (page.mouse) because the control captures the pointer on the track, and the
+// numeric fields are typed into as the exact-entry path.
 //
 // usage: node docs/verify/verify-selection-depth-bar.cjs "<url>" [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
@@ -43,16 +45,18 @@ const BAR = '#selection-range-bar';
             }
             const rows = Array.from(bar.querySelectorAll('.select-range-row'));
             const title = bar.querySelector('.select-toolbar-label');
+            const round = (v) => Math.round(parseFloat(v));
             return {
                 exists: true,
                 visible: !bar.classList.contains('pcui-hidden'),
                 size: [Math.round(bar.getBoundingClientRect().width), Math.round(bar.getBoundingClientRect().height)],
                 axes: rows.map(r => r.getAttribute('data-axis')),
                 handles: rows.map(r => r.querySelectorAll('.select-range-handle').length),
-                fills: rows.map(r => {
-                    const fill = r.querySelector('.select-range-fill');
-                    return fill ? [Math.round(parseFloat(fill.style.left)), Math.round(parseFloat(fill.style.width))] : null;
-                }),
+                outerHandles: rows.map(r => r.querySelectorAll('.select-range-handle-outer').length),
+                // [ marginLow, core, marginHigh ] as [left, width] percentages of the track
+                fills: rows.map(r => Array.from(r.querySelectorAll('.select-range-fill')).map((f) => {
+                    return [round(f.style.left), round(f.style.width)];
+                })),
                 values: rows.map(r => Array.from(r.querySelectorAll('.select-range-value input')).map(i => Number(i.value))),
                 labels: rows.map(r => Array.from(r.querySelectorAll('.select-range-label')).map(l => l.textContent)),
                 title: title ? title.textContent : null,
@@ -84,36 +88,53 @@ const BAR = '#selection-range-bar';
         const rect = await activate('rectSelection');
         const before = await ranges();
 
-        const trackBox = (axis) => page.evaluate((selector, a) => {
-            const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
-            const r = track.getBoundingClientRect();
-            return { left: r.left, right: r.right, y: r.top + r.height / 2, width: r.width };
-        }, BAR, axis);
+        // track fraction of a value on an axis (the x/y tracks span -100..200, depth 0..100)
+        const fractionOf = (axis, value) => {
+            const limits = axis === 'depth' ? { min: 0, max: 100 } : { min: -100, max: 200 };
+            return (value - limits.min) / (limits.max - limits.min);
+        };
 
-        // drag one handle to a fraction of the track (real mouse: the widget captures the pointer)
-        const dragHandle = async (axis, handle, fraction) => {
-            const box = await trackBox(axis);
-            const from = handle === 'low' ? box.left + 1 : box.right - 1;
-            await page.mouse.move(from, box.y);
+        // drag one handle to a value on its axis, starting from the handle's own position
+        // (real mouse: the widget captures the pointer on the track).
+        //
+        // The two handles of a pair are concentric at zero expansion, so a grab at the exact
+        // centre of an OUTER handle would land on the inner dot that sits on top of it: the outer
+        // ones are grabbed at their rim, which is what a user has to do as well.
+        const dragHandle = async (axis, handle, value) => {
+            const geometry = await page.evaluate((selector, a, h) => {
+                const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
+                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
+                const t = track.getBoundingClientRect();
+                const r = el.getBoundingClientRect();
+                const outer = el.classList.contains('select-range-handle-outer');
+                // the concentric ring leaves a 4px band; grab 2px inside the outer edge of it
+                const rim = outer ? 2 : 0;
+                const fromX = h === 'outerLow' || h === 'low' ?
+                    r.left + rim + 1 : r.right - rim - 1;
+                return { fromX, y: t.top + t.height / 2, left: t.left, width: t.width };
+            }, BAR, axis, handle);
+            await page.mouse.move(geometry.fromX, geometry.y);
             await page.mouse.down();
-            await page.mouse.move(box.left + box.width * fraction, box.y, { steps: 8 });
+            await page.mouse.move(geometry.left + geometry.width * fractionOf(axis, value), geometry.y, { steps: 8 });
             await page.mouse.up();
             await sleep(400);
         };
 
-        // 左-右: squeeze both handles inwards
-        await dragHandle('x', 'low', 0.35);
+        // 左-右: trim with the inner handles (收边), then expand past the box with the outer one
+        await dragHandle('x', 'low', 30);
         const afterXLow = await ranges();
-        await dragHandle('x', 'high', 0.65);
+        await dragHandle('x', 'high', 70);
         const afterXHigh = await ranges();
+        await dragHandle('x', 'outerLow', -20);
+        const afterXOuter = await ranges();
         const afterXDrag = await barState();
 
-        // 上-下: squeeze the low handle
-        await dragHandle('y', 'low', 0.25);
-        const afterYLow = await ranges();
+        // 上-下: expand the far side only
+        await dragHandle('y', 'outerHigh', 120);
+        const afterYOuter = await ranges();
 
-        // 深度: squeeze the far handle
-        await dragHandle('depth', 'high', 0.5);
+        // 深度: trim the far bound with the inner handle
+        await dragHandle('depth', 'high', 50);
         const afterDepthHigh = await ranges();
         const activeAfterDrag = (await barState()).active;
 
@@ -121,14 +142,14 @@ const BAR = '#selection-range-bar';
         await page.evaluate((selector) => {
             const input = document.querySelector(`${selector} .select-range-row[data-axis="y"] .select-range-value[data-handle="high"] input`);
             input.focus();
-            input.value = '70';
+            input.value = '65';
             input.dispatchEvent(new Event('change', { bubbles: true }));
             input.blur();
         }, BAR);
         await sleep(400);
         const afterTyped = await ranges();
 
-        // reset restores all six bounds
+        // reset restores all twelve bounds
         await page.evaluate((selector) => {
             document.querySelector(`${selector} .select-toolbar-button`).click();
         }, BAR);
@@ -143,6 +164,7 @@ const BAR = '#selection-range-bar';
         const screenTools = ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection'];
         const others = ['sphereBrushSelection', 'sphereSelection', 'boxSelection'];
         const near = (a, b, tol = 6) => Math.abs(a - b) <= tol;
+        const full = (axis) => axis.low === 0 && axis.high === 100 && axis.outerLow === 0 && axis.outerHigh === 100;
 
         const checks = [
             {
@@ -156,10 +178,11 @@ const BAR = '#selection-range-bar';
                 detail: others.map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'}`).join(', ')
             },
             {
-                name: 'the panel carries three axes, each with two handles and a fill',
+                name: 'each axis carries four handles (two inner, two outer) and a three-part fill',
                 pass: JSON.stringify(rect.axes) === '["depth","x","y"]' &&
-                    rect.handles.every(n => n === 2) && rect.fills.every(f => !!f),
-                detail: `axes ${JSON.stringify(rect.axes)}, handles ${JSON.stringify(rect.handles)}, fills ${JSON.stringify(rect.fills)}`
+                    rect.handles.every(n => n === 4) && rect.outerHandles.every(n => n === 2) &&
+                    rect.fills.every(f => f.length === 3),
+                detail: `axes ${JSON.stringify(rect.axes)}, handles ${JSON.stringify(rect.handles)} (outer ${JSON.stringify(rect.outerHandles)}), fills ${JSON.stringify(rect.fills)}`
             },
             {
                 name: 'the axis end labels are localised and a reset button is there',
@@ -168,36 +191,47 @@ const BAR = '#selection-range-bar';
                 detail: `labels ${JSON.stringify(rect.labels)}, title ${JSON.stringify(rect.title)}, reset ${rect.reset}`
             },
             {
-                name: 'all three axes start at the full through-pass (0 / 100)',
-                pass: rect.values.every(v => v[0] === 0 && v[1] === 100) &&
+                name: 'all three axes start at the full through-pass with no expansion',
+                pass: rect.values.every(v => JSON.stringify(v) === '[0,0,100,100]') &&
                     before.depth.near === 0 && before.depth.far === 100 &&
-                    before.screen.x.low === 0 && before.screen.x.high === 100 &&
-                    before.screen.y.low === 0 && before.screen.y.high === 100,
+                    before.depth.nearOuter === 0 && before.depth.farOuter === 100 &&
+                    full(before.screen.x) && full(before.screen.y),
                 detail: `sliders ${JSON.stringify(rect.values)}, ${JSON.stringify(before)}`
             },
             {
-                name: 'dragging the 左 handle writes the left bound',
-                pass: near(afterXLow.screen.x.low, 35) && afterXLow.screen.x.high === 100,
-                detail: `screen.x ${JSON.stringify(afterXLow.screen.x)} (dragged to 35% of the track)`
+                name: 'trimming with the 左 inner handle carries its outer handle along (收边)',
+                pass: near(afterXLow.screen.x.low, 30) && near(afterXLow.screen.x.outerLow, 30) &&
+                    afterXLow.screen.x.high === 100,
+                detail: `screen.x ${JSON.stringify(afterXLow.screen.x)} (inner dragged to 30, expansion stays 0)`
             },
             {
-                name: 'dragging the 右 handle writes the right bound',
-                pass: near(afterXHigh.screen.x.high, 65) && near(afterXHigh.screen.x.low, 35),
-                detail: `screen.x ${JSON.stringify(afterXHigh.screen.x)} (dragged to 65% of the track)`
+                name: 'trimming with the 右 inner handle writes the right bound',
+                pass: near(afterXHigh.screen.x.high, 70) && near(afterXHigh.screen.x.outerHigh, 70) &&
+                    near(afterXHigh.screen.x.low, 30),
+                detail: `screen.x ${JSON.stringify(afterXHigh.screen.x)}`
             },
             {
-                name: 'the highlighted span follows the handles',
-                pass: afterXDrag.fills[1][0] === 35 && near(afterXDrag.fills[1][1], 30),
-                detail: `x row fill left/width ${JSON.stringify(afterXDrag.fills[1])}`
+                name: 'the 左 outer handle expands past the box (扩边)',
+                pass: near(afterXOuter.screen.x.outerLow, -20) && near(afterXOuter.screen.x.low, 30),
+                detail: `screen.x ${JSON.stringify(afterXOuter.screen.x)} (outer dragged to -20 = 50% of the box outside)`
             },
             {
-                name: 'dragging the 上 handle writes the top bound',
-                pass: near(afterYLow.screen.y.low, 25) && afterYLow.screen.y.high === 100,
-                detail: `screen.y ${JSON.stringify(afterYLow.screen.y)}`
+                name: 'the highlighted bands follow the handles (margin / core / margin)',
+                pass: near(afterXDrag.fills[1][0][0], 27, 2) && near(afterXDrag.fills[1][0][1], 17, 2) &&
+                    near(afterXDrag.fills[1][1][0], 43, 2) && near(afterXDrag.fills[1][1][1], 13, 2) &&
+                    afterXDrag.fills[1][2][1] === 0,
+                detail: `x row fills [marginLow, core, marginHigh] = ${JSON.stringify(afterXDrag.fills[1])} ` +
+                    '(expected the -20..30 margin, the 30..70 core, and an empty right margin)'
             },
             {
-                name: 'dragging the 最远 handle writes the far depth bound',
-                pass: near(afterDepthHigh.depth.far, 50) && afterDepthHigh.depth.near === 0,
+                name: 'the 下 outer handle expands the vertical axis',
+                pass: near(afterYOuter.screen.y.outerHigh, 120) && near(afterYOuter.screen.y.high, 100),
+                detail: `screen.y ${JSON.stringify(afterYOuter.screen.y)}`
+            },
+            {
+                name: 'the 最远 inner handle trims the far depth bound',
+                pass: near(afterDepthHigh.depth.far, 50) && near(afterDepthHigh.depth.farOuter, 50) &&
+                    afterDepthHigh.depth.near === 0,
                 detail: `depth ${JSON.stringify(afterDepthHigh.depth)}`
             },
             {
@@ -207,21 +241,21 @@ const BAR = '#selection-range-bar';
             },
             {
                 name: 'typing into a numeric field writes that bound',
-                pass: afterTyped.screen.y.high === 70,
-                detail: `screen.y ${JSON.stringify(afterTyped.screen.y)} after typing 70 into 下`
+                pass: afterTyped.screen.y.high === 65,
+                detail: `screen.y ${JSON.stringify(afterTyped.screen.y)} after typing 65 into 下`
             },
             {
-                name: 'reset restores all six bounds and drops the highlight',
-                pass: afterReset.depth.near === 0 && afterReset.depth.far === 100 &&
-                    afterReset.screen.x.low === 0 && afterReset.screen.x.high === 100 &&
-                    afterReset.screen.y.low === 0 && afterReset.screen.y.high === 100 &&
-                    afterResetBar.values.every(v => v[0] === 0 && v[1] === 100) && !afterResetBar.active,
+                name: 'reset restores all twelve bounds and drops the highlight',
+                pass: full(afterReset.screen.x) && full(afterReset.screen.y) &&
+                    afterReset.depth.near === 0 && afterReset.depth.far === 100 &&
+                    afterReset.depth.nearOuter === 0 && afterReset.depth.farOuter === 100 &&
+                    afterResetBar.values.every(v => JSON.stringify(v) === '[0,0,100,100]') && !afterResetBar.active,
                 detail: `${JSON.stringify(afterReset)}, sliders ${JSON.stringify(afterResetBar.values)}, active ${afterResetBar.active}`
             },
             {
                 name: 'the panel hides when the tool deactivates',
                 pass: !afterDeactivate.visible,
-                detail: JSON.stringify(afterDeactivate)
+                detail: JSON.stringify({ ...afterDeactivate, values: undefined, labels: undefined })
             },
             {
                 name: 'no console errors',
@@ -233,11 +267,12 @@ const BAR = '#selection-range-bar';
         console.log(JSON.stringify({
             url: URL,
             backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
-            bars: results,
+            bars: { rect: results.rectSelection },
             before,
             afterXLow,
             afterXHigh,
-            afterYLow,
+            afterXOuter,
+            afterYOuter,
             afterDepthHigh,
             afterTyped,
             afterReset,

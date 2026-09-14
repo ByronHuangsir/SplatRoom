@@ -177,6 +177,7 @@
     "select-toolbar.rangeRight": "Droite",
     "select-toolbar.rangeTop": "Haut",
     "select-toolbar.rangeBottom": "Bas",
+    "select-toolbar.rangeHandleHint": "Glisser : la poignée intérieure recadre, l'extérieure élargit",
     "select-toolbar.depthReset": "Réinitialiser",
     "select-toolbar.radius": "Rayon",
     "popup.ok": "OK",

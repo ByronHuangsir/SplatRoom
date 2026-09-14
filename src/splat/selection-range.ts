@@ -45,11 +45,19 @@ export interface SelectionRangeView {
     /** 选中的深度范围：沿视轴、相对相机平面的距离 */
     minDistance: number;
     maxDistance: number;
-    /** 选中的屏幕窗口（设备像素，原点左上）：左右 / 上下两个双柄范围切出来的内框 */
+    /** 选中的屏幕窗口（设备像素，原点左上）：外柄（= 扩边之后）切出来的范围 */
     minX: number;
     maxX: number;
     minY: number;
     maxY: number;
+    /**
+     * 内柄切出来的**核心窗口**：2D 区域的形状（矩形 / 套索）只在核心窗口里生效，
+     * 核心与外柄之间那一圈"扩边带"是按矩形加的（否则套索永远扩不出去，因为 2D 区域本身挡着）。
+     */
+    coreMinX: number;
+    coreMaxX: number;
+    coreMinY: number;
+    coreMaxY: number;
 }
 
 /** 把 0-100% 映射到沿视轴的范围 [min, max]。 */
@@ -137,6 +145,10 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
     const maxX = Math.max(view.minX, view.maxX);
     const minY = Math.min(view.minY, view.maxY);
     const maxY = Math.max(view.minY, view.maxY);
+    const coreMinX = Math.min(view.coreMinX, view.coreMaxX);
+    const coreMaxX = Math.max(view.coreMinX, view.coreMaxX);
+    const coreMinY = Math.min(view.coreMinY, view.coreMaxY);
+    const coreMaxY = Math.max(view.coreMinY, view.coreMaxY);
     const contains = region.contains;
 
     for (let i = 0; i < numSplats; i++) {
@@ -174,13 +186,17 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
         const sx = Math.min(width - 1, Math.max(0, Math.floor((ndcX * 0.5 + 0.5) * width)));
         const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - (ndcY * 0.5 + 0.5)) * height)));
 
-        // the 2D region (the gesture) AND the 左右 / 上下 window trim
+        // outside the outer window (外柄) -> not selected
         if (sx < minX || sx > maxX || sy < minY || sy > maxY) {
             continue;
         }
-        if (contains(sx, sy)) {
-            mask[i] = 255;
+        // inside the outer window: the drawn shape (rect / lasso alpha / click box) decides,
+        // except in the 扩边 band between the core and the outer handles, which is rectangular
+        const inCore = sx >= coreMinX && sx <= coreMaxX && sy >= coreMinY && sy <= coreMaxY;
+        if (inCore && !contains(sx, sy)) {
+            continue;
         }
+        mask[i] = 255;
     }
 
     return mask;

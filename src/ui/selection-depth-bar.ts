@@ -3,20 +3,26 @@ import { Button, Container, Label } from '@playcanvas/pcui';
 import { i18n } from './localization';
 import { RangeSlider, RangeValue } from './range-slider';
 import { Events } from '../core/events';
+import { LIMITS } from '../core/selection-flags';
 
 /**
- * 选择工具的**选区范围**浮条：点开屏幕选择工具时浮出来的一块面板，里面是三个双柄 range
- * （低端标签 …… 高端标签，两个柄之间就是选中的部分）：
+ * 选择工具的**选区范围**浮条：点开屏幕选择工具时浮出来的一块面板，里面是三个**四柄** range。
+ * 每个轴两端各有一对柄（外柄 … 内柄），两个轴标签分列两侧：
  *
- *   深度  最近 [====●------●====] 最远    —— 沿手势当时的视轴，占模型自身深度范围的百分比
- *   左右  左   [====●------●====] 右      —— 占选区框宽度的百分比
- *   上下  上   [====●------●====] 下      —— 占选区框高度的百分比
+ *   ----o 近 o-------o 远 o----       o = 滑块
  *
- * 三个轴的默认值都是整段（0 / 100），也就是"完整穿透整个模型"；拖动任何一个柄都会**实时重切**当前
- * 选区（同一个历史条目）。「重置」把三轴一起还原。
+ *   深度  最近 [外][内] [===track===] [内][外] 最远   —— 沿手势视轴，占模型自身深度范围的百分比
+ *   左右  左   [外][内] [===track===] [内][外] 右     —— 占选区框宽度的百分比（可扩到框外）
+ *   上下  上   [外][内] [===track===] [内][外] 下     —— 占选区框高度的百分比
+ *
+ *   - **内柄** = 选区边界（把框裁到哪）；
+ *   - **外柄** = **扩边到哪**：外柄与内柄之间那段（半透明橙）就是扩边多吃进来的部分。
+ *
+ * 两柄默认重合（不扩边），此时与上一版的双柄行为完全一致。三轴都默认整段（0 / 100）= 完整穿透
+ * 整个模型；拖动任何一个柄都会**实时重切**当前选区（同一个历史条目）。「重置」把三轴一起还原。
  *
  * 对齐线上编辑器（data.good360vr.com/editor，SUPERSPLAT v2 那套）的"选区深度 + 最近/最远"，
- * 只是把单轴扩成三轴：一个轴只能切板层，三个轴才能把穿透空间收成想要的盒子。
+ * 只是把单轴扩成三轴、把两柄扩成四柄（内柄裁、外柄扩）。
  *
  * 只挂在会用到它的工具上（矩形/套索/多边形/2D 笔刷/快速填充）；球体、盒体是三维体选择，
  * 球刷有自己的"厚度"（贴着表面往里的板层），都不需要再来一套视线范围。
@@ -47,7 +53,9 @@ class SelectionDepthBar {
             axis: 'depth',
             lowKey: 'select-toolbar.depthNear',
             highKey: 'select-toolbar.depthFar',
-            value: { low: 0, high: 100 },
+            min: LIMITS.depth.min,
+            max: LIMITS.depth.max,
+            value: { low: 0, high: 100, outerLow: 0, outerHigh: 100 },
             onChange: (value: RangeValue) => {
                 if (!syncing) {
                     events.fire('selection.setDepthRange', value);
@@ -59,7 +67,9 @@ class SelectionDepthBar {
             axis: 'x',
             lowKey: 'select-toolbar.rangeLeft',
             highKey: 'select-toolbar.rangeRight',
-            value: { low: 0, high: 100 },
+            min: LIMITS.x.min,
+            max: LIMITS.x.max,
+            value: { low: 0, high: 100, outerLow: 0, outerHigh: 100 },
             onChange: (value: RangeValue) => {
                 if (!syncing) {
                     events.fire('selection.setScreenRange', { x: value });
@@ -71,7 +81,9 @@ class SelectionDepthBar {
             axis: 'y',
             lowKey: 'select-toolbar.rangeTop',
             highKey: 'select-toolbar.rangeBottom',
-            value: { low: 0, high: 100 },
+            min: LIMITS.y.min,
+            max: LIMITS.y.max,
+            value: { low: 0, high: 100, outerLow: 0, outerHigh: 100 },
             onChange: (value: RangeValue) => {
                 if (!syncing) {
                     events.fire('selection.setScreenRange', { y: value });
@@ -93,23 +105,36 @@ class SelectionDepthBar {
         parent.appendChild(bar.dom);
 
         const sync = () => {
-            const { near, far } = events.invoke('selection.depthRange') as { near: number, far: number };
+            const depthRange = events.invoke('selection.depthRange') as {
+                near: number,
+                far: number,
+                nearOuter: number,
+                farOuter: number
+            };
             const screen = events.invoke('selection.screenRange') as {
                 x: RangeValue,
                 y: RangeValue
             };
 
             syncing = true;
-            depth.value = { low: near, high: far };
+            depth.value = {
+                low: depthRange.near,
+                high: depthRange.far,
+                outerLow: depthRange.nearOuter,
+                outerHigh: depthRange.farOuter
+            };
             horizontal.value = screen.x;
             vertical.value = screen.y;
             syncing = false;
 
             // the title lights up while the selection is not the full through-pass
-            const narrowed = near > 0 || far < 100 ||
-                screen.x.low > 0 || screen.x.high < 100 ||
-                screen.y.low > 0 || screen.y.high < 100;
-            title.class[narrowed ? 'add' : 'remove']('active');
+            const narrowed = (axis: RangeValue) => {
+                return axis.low > 0 || axis.high < 100 || axis.outerLow < 0 || axis.outerHigh > 100;
+            };
+            const active = narrowed(screen.x) || narrowed(screen.y) ||
+                depthRange.near > 0 || depthRange.far < 100 ||
+                depthRange.nearOuter < 0 || depthRange.farOuter > 100;
+            title.class[active ? 'add' : 'remove']('active');
         };
 
         reset.on('click', () => {
