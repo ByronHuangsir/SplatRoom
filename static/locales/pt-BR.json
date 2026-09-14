@@ -177,7 +177,7 @@
     "select-toolbar.rangeRight": "Direita",
     "select-toolbar.rangeTop": "Topo",
     "select-toolbar.rangeBottom": "Base",
-    "select-toolbar.rangeHandleHint": "Arraste: o marcador interno recorta, o externo amplia",
+    "select-toolbar.rangeHandleHint": "Arraste: quanto mais longe, mais rápido; quanto mais perto, mais preciso. Ao soltar, o marcador volta ao lugar",
     "select-toolbar.depthReset": "Redefinir",
     "select-toolbar.radius": "Raio",
     "popup.ok": "OK",

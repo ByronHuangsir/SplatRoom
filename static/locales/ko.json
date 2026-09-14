@@ -177,7 +177,7 @@
     "select-toolbar.rangeRight": "오른쪽",
     "select-toolbar.rangeTop": "위",
     "select-toolbar.rangeBottom": "아래",
-    "select-toolbar.rangeHandleHint": "드래그: 안쪽 손잡이는 범위를 자르고, 바깥쪽 손잡이는 밖으로 확장합니다",
+    "select-toolbar.rangeHandleHint": "드래그: 멀리 밀수록 빠르고, 가까울수록 정밀합니다. 놓으면 손잡이가 제자리로 돌아옵니다",
     "select-toolbar.depthReset": "초기화",
     "select-toolbar.radius": "반경",
     "popup.ok": "확인",

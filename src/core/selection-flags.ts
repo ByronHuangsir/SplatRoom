@@ -95,10 +95,12 @@ const normalize = (axis: Axis, limits: Limits): Axis => {
         next.outerLow = round1(Math.max(limits.min, Math.min(limits.max, centre - MIN_THICKNESS / 2)));
         next.outerHigh = round1(Math.min(limits.max, next.outerLow + MIN_THICKNESS));
     }
+    // 芯至少一个步长：先顶高端，顶不动（贴到值域上限）就把低端收回来
     if (next.high - next.low < MIN_THICKNESS) {
-        const centre = (next.low + next.high) / 2;
-        next.low = round1(Math.max(next.outerLow, Math.min(next.outerHigh, centre - MIN_THICKNESS / 2)));
         next.high = round1(Math.min(next.outerHigh, next.low + MIN_THICKNESS));
+        if (next.high - next.low < MIN_THICKNESS) {
+            next.low = round1(Math.max(next.outerLow, next.high - MIN_THICKNESS));
+        }
     }
     return next;
 };

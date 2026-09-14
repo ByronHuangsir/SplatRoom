@@ -133,7 +133,8 @@
         }
     }
 
-    // selection (inner edge -> inner edge) and the two 扩边 bands (outer bar -> its block)
+    // the selected band (inner edge -> inner edge). With the two blocks parked at 20% / 80% this is a
+    // constant-width band that only moves while one of them is being pushed.
     .select-range-band {
         position: absolute;
         top: 50%;
@@ -142,17 +143,6 @@
         border-radius: 2px;
         background-color: $clr-hilight;
         pointer-events: none;
-    }
-
-    .select-range-margin {
-        height: 2px;
-        margin-top: -1px;
-        opacity: 0.5;
-        visibility: hidden;
-
-        &.visible {
-            visibility: visible;
-        }
     }
 
     // a FIXED-SIZE labelled block: the handle itself never changes shape, only its position
@@ -177,6 +167,11 @@
             border-color: $clr-hilight;
             background-color: $bcg-light;
         }
+
+        &:focus-visible {
+            outline: 1px solid $clr-hilight;
+            outline-offset: 1px;
+        }
     }
 
     .select-range-label {
@@ -188,35 +183,7 @@
         white-space: nowrap;
     }
 
-    // the outer (扩边) bar: 8px wide, never resizes
-    // two classes on one element: this has to beat the base .select-range-handle rule below,
-    // which is pointer-events: none (its grip sits under the block)
-    .select-range-handle.select-range-handle-outer {
-        position: absolute;
-        pointer-events: auto;
-        top: 50%;
-        box-sizing: border-box;
-        height: 16px;
-        margin-top: -8px;
-        border: 1px solid $bcg-primary;
-        border-radius: 3px;
-        background-color: $clr-default;
-        cursor: ew-resize;
-        touch-action: none;
-        z-index: 3;
-
-        &:hover,
-        &.dragging {
-            background-color: $clr-hilight;
-        }
-
-        &:focus-visible {
-            outline: 1px solid $clr-hilight;
-            outline-offset: 1px;
-        }
-    }
-
-    // the inner grips sit exactly under the blocks (the block is the grab surface; these are the
+    // the grips sit exactly under the blocks (the block is the grab surface; these are the
     // keyboard/automation targets and carry data-handle)
     .select-range-handle {
         position: absolute;
@@ -227,23 +194,6 @@
 
         &.dragging {
             pointer-events: none;
-        }
-    }
-    // the value floats next to the block while it is dragged (no numeric fields in a row)
-    .select-range-readout {
-        position: absolute;
-        bottom: 100%;
-        margin-bottom: 2px;
-        text-align: center;
-        color: $text-primary;
-        font-size: 11px;
-        line-height: 1.2;
-        pointer-events: none;
-        visibility: hidden;
-        z-index: 3;
-
-        &.visible {
-            visibility: visible;
         }
     }
     // text action buttons (e.g. the orient tool's align/clear); shorter than

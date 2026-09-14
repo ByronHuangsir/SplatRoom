@@ -1,6 +1,6 @@
-// Verify the 选区范围 panel against the design (`选择范围设计.png`): one thin rail per axis with a
-// rectangular labelled block at each end, the selection band between the two inner edges, and a
-// NON-LINEAR track mapping (fine near the centre, fast near the ends).
+// Verify the 选区范围 panel: one rail per axis with exactly TWO labelled blocks that always park at
+// the same two rail positions (20% / 80%), a push-drag whose sensitivity grows with how far you push
+// (near the park = fine, far = fast), an automatic return to the park on release, and no numbers at all.
 //
 // Grips are driven with real mouse input (page.mouse) because the control captures the pointer.
 //
@@ -13,12 +13,13 @@ const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const BAR = '#selection-range-bar';
-// the mapping the widget is specified to use (t = fraction along the track, values -50..150)
-const FISHEYE = 0.35;
-const valueOfFraction = (t) => {
-    const s = 2 * t - 1;
-    return -50 + 200 * (0.5 + 0.5 * s * (FISHEYE + (1 - FISHEYE) * s * s));
-};
+// the widget parks the two blocks at these fractions of the track
+const HOME_LOW = 0.2;
+const HOME_HIGH = 0.8;
+// the push curve the widget is specified to use (see range-slider.ts)
+const NUDGE_BASE = 0.02;
+const NUDGE_GROWTH = 40;
+const nudge = (dx) => Math.sign(dx) * NUDGE_BASE * (Math.abs(dx) + (dx * dx) / (2 * NUDGE_GROWTH));
 
 (async () => {
     const logs = [];
@@ -48,6 +49,11 @@ const valueOfFraction = (t) => {
             }
             const rows = Array.from(bar.querySelectorAll('.select-range-row'));
             const title = bar.querySelector('.select-toolbar-label');
+            const fraction = (track, el) => {
+                const t = track.getBoundingClientRect();
+                const b = el.getBoundingClientRect();
+                return +(((b.left + b.width / 2) - t.left) / t.width).toFixed(3);
+            };
             return {
                 exists: true,
                 visible: !bar.classList.contains('pcui-hidden'),
@@ -55,33 +61,30 @@ const valueOfFraction = (t) => {
                 axes: rows.map(r => r.getAttribute('data-axis')),
                 blocks: rows.map(r => r.querySelectorAll('.select-range-block').length),
                 grips: rows.map(r => r.querySelectorAll('.select-range-handle').length),
+                outerHandles: rows.map(r => r.querySelectorAll('.select-range-handle-outer').length),
                 numericFields: rows.map(r => r.querySelectorAll('.select-range-value, .pcui-numeric-input').length),
-                labels: rows.map(r => Array.from(r.querySelectorAll('.select-range-label')).map(l => l.textContent)),
+                readouts: rows.map(r => r.querySelectorAll('.select-range-readout').length),
+                // any digit anywhere inside a row would be "a number the user has to read"
+                digits: rows.map(r => (r.textContent.match(/[0-9]/g) || []).length + r.querySelectorAll('input').length),
                 layout: rows.map((r) => {
-                    const track = r.querySelector('.select-range-track').getBoundingClientRect();
-                    const box = (el) => {
-                        const b = el.getBoundingClientRect();
-                        return [Math.round(b.left - track.left), Math.round(b.width)];
-                    };
-                    const blocks = Array.from(r.querySelectorAll('.select-range-block')).map(b => ({
-                        side: b.getAttribute('data-block'),
-                        box: box(b),
-                        labelInside: !!b.querySelector('.select-range-label')
-                    }));
-                    const grips = {};
-                    for (const h of r.querySelectorAll('.select-range-handle')) {
-                        grips[h.getAttribute('data-handle')] = box(h);
-                    }
+                    const track = r.querySelector('.select-range-track');
+                    const t = track.getBoundingClientRect();
+                    const blocks = Array.from(r.querySelectorAll('.select-range-block')).map(b => {
+                        const box = b.getBoundingClientRect();
+                        return {
+                            side: b.getAttribute('data-block'),
+                            box: [Math.round(box.left - t.left), Math.round(box.width)],
+                            at: fraction(track, b),
+                            labelInside: !!b.querySelector('.select-range-label')
+                        };
+                    });
                     return {
                         axis: r.getAttribute('data-axis'),
-                        track: Math.round(track.width),
+                        track: Math.round(t.width),
                         blocks,
-                        grips,
-                        core: box(r.querySelector('.select-range-core')),
-                        margins: Array.from(r.querySelectorAll('.select-range-margin')).map(m => ({
-                            box: box(m),
-                            visible: getComputedStyle(m).visibility === 'visible'
-                        }))
+                        core: (() => { const c = r.querySelector('.select-range-core').getBoundingClientRect(); return [Math.round(c.left - t.left), Math.round(c.width)]; })(),
+                        bands: r.querySelectorAll('.select-range-band').length,
+                        labels: Array.from(r.querySelectorAll('.select-range-label')).map(l => l.textContent)
                     };
                 }),
                 reset: !!bar.querySelector('.select-toolbar-button'),
@@ -94,6 +97,14 @@ const valueOfFraction = (t) => {
             depth: window.scene.events.invoke('selection.depthRange'),
             screen: window.scene.events.invoke('selection.screenRange')
         }));
+
+        const selectedCount = () => page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            const st = splat.splatData.getProp('state');
+            let n = 0;
+            for (let i = 0; i < st.length; i++) if (st[i] & 1) n++;
+            return n;
+        });
 
         const activate = async (tool) => {
             await page.evaluate(() => window.scene.events.fire('tool.deactivate'));
@@ -108,7 +119,7 @@ const valueOfFraction = (t) => {
             results[tool] = await activate(tool);
         }
 
-        const rect = await activate('rectSelection');
+        await activate('rectSelection');
         const before = await ranges();
 
         // the panel has no numeric fields, so state is set through the API
@@ -121,10 +132,13 @@ const valueOfFraction = (t) => {
             }
         }, patch);
 
-        // drag a grip N pixels along its axis, starting at the grip's own centre
-        const dragGripPixels = async (axis, handle, pixels) => {
+        const blockOf = (state, side) => state.layout[1].blocks.find(b => b.side === side);
+
+        // drag one block by N pixels along the track with a real mouse
+        const dragBlock = async (axis, handle, pixels, steps = 8) => {
             const geometry = await page.evaluate((selector, a, h) => {
-                const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
+                const track = row.querySelector('.select-range-track');
                 const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
                 const t = track.getBoundingClientRect();
                 const b = el.getBoundingClientRect();
@@ -132,319 +146,262 @@ const valueOfFraction = (t) => {
             }, BAR, axis, handle);
             await page.mouse.move(geometry.fromX, geometry.y);
             await page.mouse.down();
-            await page.mouse.move(geometry.fromX + pixels, geometry.y, { steps: 8 });
+            await page.mouse.move(geometry.fromX + pixels, geometry.y, { steps });
             await page.mouse.up();
-            await sleep(200);
+            await sleep(250);
         };
 
-        // --- the adaptive scale: the closer the two blocks get, the finer the adjustment, and the
-        // pixel gap between them never collapses (that is "留够操作的空间") ---
-        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
-        await sleep(350);
-        const wideGap = (await barState()).layout[1].core[1];
-        const wideBefore = (await ranges()).screen.x.low;
-        await dragGripPixels('x', 'low', 20);
-        const wideAfter = (await ranges()).screen.x.low;
-        const wideDelta = wideAfter - wideBefore;
+        // --- structure ---
+        const rect = await activate('rectSelection');
+        const defaultState = rect;
+        const reset = (await ranges());
+        const resetBar = rect;
 
-        await setRange({ x: { low: 49, high: 51, outerLow: 49, outerHigh: 51 } });
-        await sleep(350);
-        const narrowState = await barState();
-        const narrowGap = narrowState.layout[1].core[1];
-        const narrowBlockWidth = narrowState.layout[1].blocks.find(b => b.side === 'low').box[1];
-        const narrowBefore = (await ranges()).screen.x.low;
-        await dragGripPixels('x', 'low', 20);
-        const narrowAfter = (await ranges()).screen.x.low;
-        const narrowDelta = narrowAfter - narrowBefore;
-
-        // an extremely thin slab still has a comfortable gap
-        await setRange({ x: { low: 49.9, high: 50.1, outerLow: 49.9, outerHigh: 50.1 } });
-        await sleep(350);
-        const thinState = await barState();
-        const thinGap = thinState.layout[1].core[1];
-        const thinBlockWidth = thinState.layout[1].blocks.find(b => b.side === 'low').box[1];
-
-        // the finest legal thickness (one STEP) must still get the whole track/ZOOM gap, so the
-        // invariant reads: no matter how thin the slab gets, the two blocks keep the same room
-        await setRange({ x: { low: 50, high: 50.1, outerLow: 50, outerHigh: 50.1 } });
-        await sleep(350);
-        const finestState = await barState();
-        const finestGap = finestState.layout[1].core[1];
-
-        // and the drag really is finer the thinner the slab: how much does a fixed 40px buy?
-        const stepTravel = async (low, high) => {
-            await setRange({ x: { low, high, outerLow: low, outerHigh: high } });
-            await sleep(350);
-            const before = (await ranges()).screen.x.low;
-            await dragGripPixels('x', 'low', 40);
-            const now = (await ranges()).screen.x.low;
-            return { steps: +((now - before) / 0.1).toFixed(2) };
-        };
-        const stepTravelThick = await stepTravel(30, 70);
-        const stepTravelThin = await stepTravel(49.9, 50.1);
-
-        // --- the drag itself: constant sensitivity, the handle stays under the pointer, the rail pans
-        // for reach and re-fits on release (3.12.0: 用户要"简单的移动滑块、快速而精确") ---
-        const dragTrace = async (axis, handle, steps, stepPx) => {
-            const geometry = await page.evaluate((selector, a, h) => {
-                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
-                const track = row.querySelector('.select-range-track');
-                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
-                const t = track.getBoundingClientRect();
-                const b = el.getBoundingClientRect();
-                return { fromX: b.left + b.width / 2, y: t.top + t.height / 2, trackLeft: t.left, trackWidth: t.width };
-            }, BAR, axis, handle);
-            const sample = () => page.evaluate((selector, a, h) => {
-                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
-                const track = row.querySelector('.select-range-track');
-                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
-                const t = track.getBoundingClientRect();
-                const b = el.getBoundingClientRect();
-                return {
-                    value: window.scene.events.invoke('selection.screenRange').x[h],
-                    handleFraction: +(((b.left + b.width / 2) - t.left) / t.width).toFixed(3),
-                    gap: Math.round(row.querySelector('.select-range-core').getBoundingClientRect().width)
-                };
-            }, BAR, axis, handle);
-            await page.mouse.move(geometry.fromX, geometry.y);
-            await page.mouse.down();
-            const trace = [{ px: 0, ...(await sample()) }];
-            for (let i = 1; i <= steps; i++) {
-                await page.mouse.move(geometry.fromX + i * stepPx, geometry.y, { steps: 1 });
-                await sleep(60);
-                trace.push({ px: i * stepPx, ...(await sample()) });
-            }
-            await page.mouse.up();
-            await sleep(350);
-            const released = await sample();
-            return { trace, released };
-        };
-
-        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
-        await sleep(350);
-        const steady = await dragTrace('x', 'low', 8, 22);
-        const deltas = steady.trace.slice(1).map((s, i) => +(s.value - steady.trace[i].value).toFixed(2));
-        const sensitivity = deltas.filter(d => d > 0);
-        const steadyRatio = Math.max(...sensitivity) / Math.max(0.01, Math.min(...sensitivity));
-        const maxDrift = Math.max(...steady.trace.map(s => Math.abs(s.handleFraction - (s.px / 440 + steady.trace[0].handleFraction))));
-
-        // the pan: from a hair-thin slab the frozen scale is tight, but one drag still reaches far
-        await setRange({ x: { low: 49.9, high: 50.1, outerLow: 49.9, outerHigh: 50.1 } });
-        await sleep(350);
-        const panned = await dragTrace('x', 'low', 10, 60);
-        const panValues = panned.trace.map(s => s.value);
-        const panMonotone = panValues.every((v, i) => i === 0 || v >= panValues[i - 1]);
-        const panOnRail = panned.trace.every(s => s.handleFraction >= -0.02 && s.handleFraction <= 1.02);
-        const panGain = +(panValues[panValues.length - 1] - panValues[0]).toFixed(1);
-        const panRelift = panned.released.gap;
-
-        // a full collapse is impossible: the core keeps one step of thickness and the blocks stay apart
-        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
-        await sleep(350);
-        const collapsed = await dragTrace('x', 'low', 12, 40);
-        const collapsedRange = await ranges();
-        const collapsedState = await barState();
-        const collapsedGap = collapsedState.layout[1].core[1];
-        const collapsedCore = +(collapsedRange.screen.x.high - collapsedRange.screen.x.low).toFixed(1);
-
-        // --- structure / interaction ---
+        // a real rect gesture so the rows are live, then a trim through the panel
         await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
         await sleep(300);
-        const reset = await ranges();
-        const resetBar = await barState();
+        await page.evaluate(() => window.scene.events.fire('select.none'));
+        await sleep(800);
+        await page.evaluate(() => window.scene.events.invoke('select.rect', 'set', { start: { x: 0.4, y: 0.4 }, end: { x: 0.6, y: 0.6 } }));
+        await sleep(1500);
+        const through = await selectedCount();
+        const throughState = await barState();
 
-        // 收边 with the inner grip: the block keeps its width, the selection band shrinks
-        await dragGripPixels('x', 'low', 60);
+        // --- the park: the two blocks sit at 20% / 80% and stay there in every state ---
+        const parkedState = async (patch) => {
+            await setRange(patch);
+            await sleep(400);
+            const s = await barState();
+            return { low: blockOf(s, 'low').at, high: blockOf(s, 'high').at, gap: s.layout[1].core[1], width: blockOf(s, 'low').box[1] };
+        };
+        const parkDefault = await parkedState({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        const parkWide = await parkedState({ x: { low: 30, high: 70, outerLow: 30, outerHigh: 70 } });
+        const parkThin = await parkedState({ x: { low: 49.9, high: 50.1, outerLow: 49.9, outerHigh: 50.1 } });
+        const parkTiny = await parkedState({ x: { low: 50, high: 50.1, outerLow: 50, outerHigh: 50.1 } });
+
+        // --- the push curve: the SAME 20px of travel moves much more once you are pushed far out.
+        // Both samples come from one held drag (0->20px at the park, 200->220px far out) ---
+        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        await sleep(400);
+        const tapered = [];
+        {
+            const geometry = await page.evaluate((selector) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="x"]`);
+                const track = row.querySelector('.select-range-track');
+                const el = track.querySelector('.select-range-handle[data-handle="low"]');
+                const t = track.getBoundingClientRect();
+                const b = el.getBoundingClientRect();
+                return { fromX: b.left + b.width / 2, y: t.top + t.height / 2 };
+            }, BAR);
+            await page.mouse.move(geometry.fromX, geometry.y);
+            await page.mouse.down();
+            for (const dx of [0, 20, 200, 220]) {
+                await page.mouse.move(geometry.fromX + dx, geometry.y, { steps: 1 });
+                await sleep(120);
+                tapered.push({ dx, low: (await ranges()).screen.x.low });
+            }
+            await page.mouse.up();
+            await sleep(300);
+        }
+        const nearPush = +(tapered[1].low - tapered[0].low).toFixed(1);
+        const farPush = +(tapered[3].low - tapered[2].low).toFixed(1);
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(300);
+
+        // --- the held drag: the block follows the pointer and parks inside the rail ---
+        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        await sleep(400);
+        const held = [];
+        {
+            const geometry = await page.evaluate((selector) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="x"]`);
+                const track = row.querySelector('.select-range-track');
+                const el = track.querySelector('.select-range-handle[data-handle="low"]');
+                const t = track.getBoundingClientRect();
+                const b = el.getBoundingClientRect();
+                return { fromX: b.left + b.width / 2, y: t.top + t.height / 2 };
+            }, BAR);
+            await page.mouse.move(geometry.fromX, geometry.y);
+            await page.mouse.down();
+            for (const dx of [0, 40, 200, 400, 700]) {
+                await page.mouse.move(geometry.fromX + dx, geometry.y, { steps: 1 });
+                await sleep(120);
+                const s = await barState();
+                held.push({ dx, at: blockOf(s, 'low').at, low: (await ranges()).screen.x.low });
+            }
+            await page.mouse.up();
+            await sleep(400);
+        }
+        const afterHeld = await barState();
+        const afterHeldRange = await ranges();
+        const heldTrimmed = await selectedCount();
+
+        // --- the trim/return behaviour with the model live ---
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(300);
+        await dragBlock('x', 'low', 60, 6);
         const afterTrim = await ranges();
         const afterTrimBar = await barState();
+        const trimmed = await selectedCount();
 
-        // 扩边 with the outer grip: the block itself widens
+        // --- a full push into the other block must not collapse the core ---
         await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
-        await sleep(250);
-        await dragGripPixels('x', 'outerLow', -80);
-        const afterExpand = await ranges();
-        const afterExpandBar = await barState();
+        await sleep(300);
+        await dragBlock('x', 'low', 900, 12);
+        const collapsed = await ranges();
+        const collapsedBar = await barState();
+        const collapsedThickness = +(collapsed.screen.x.high - collapsed.screen.x.low).toFixed(1);
+        const collapsedPark = { low: blockOf(collapsedBar, 'low').at, high: blockOf(collapsedBar, 'high').at };
 
-        await dragGripPixels('depth', 'high', -60);
-        const afterDepth = await ranges();
-        const activeAfterDrag = (await barState()).active;
-
-        await page.evaluate((selector) => document.querySelector(`${selector} .select-toolbar-button`).click(), BAR);
-        await sleep(400);
+        // --- reset ---
+        await page.evaluate((sel) => document.querySelector(`${sel} .select-toolbar-button`).click(), BAR);
+        await sleep(600);
         const afterReset = await ranges();
         const afterResetBar = await barState();
 
-        await page.evaluate(() => window.scene.events.fire('tool.deactivate'));
+        await page.evaluate(() => window.scene.events.fire('tool.rectSelection'));
+        await sleep(200);
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
         await sleep(300);
-        const afterDeactivate = await barState();
+        await page.evaluate(() => window.scene.events.fire('select.none'));
+        await sleep(600);
+        await page.evaluate(() => window.scene.events.invoke('select.rect', 'set', { start: { x: 0.4, y: 0.4 }, end: { x: 0.6, y: 0.6 } }));
+        await sleep(1200);
+        await page.evaluate(() => window.scene.events.fire('tool.deactivate'));
+        await sleep(400);
+        const hidden = await barState();
 
-        const screenTools = ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection'];
-        const others = ['sphereBrushSelection', 'sphereSelection', 'boxSelection'];
-        const near = (a, b, tol) => Math.abs(a - b) <= tol;
-        const rows = resetBar.layout;
         const full = (axis) => axis.low === 0 && axis.high === 100 && axis.outerLow === 0 && axis.outerHigh === 100;
-        const blockOf = (state, side) => state.layout[1].blocks.find(b => b.side === side);
+        const fullDepth = (d) => d.near === 0 && d.far === 100 && d.nearOuter === 0 && d.farOuter === 100;
+        const park = (p) => Math.abs(p.low - HOME_LOW) < 0.01 && Math.abs(p.high - HOME_HIGH) < 0.01;
 
         const checks = [
             {
                 name: 'the range panel appears for every screen-space selection tool',
-                pass: screenTools.every(t => results[t].visible),
-                detail: screenTools.map(t => `${t}: ${results[t].visible ? `visible ${results[t].size.join('x')}` : 'hidden'}`).join(', ')
+                pass: ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection']
+                    .every(t => results[t].exists && results[t].visible),
+                detail: ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection']
+                    .map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'} ${results[t].size.join('x')}`).join(', ')
             },
             {
                 name: 'the panel stays hidden for the volume / brush tools',
-                pass: others.every(t => !results[t].visible),
-                detail: others.map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'}`).join(', ')
+                pass: ['sphereBrushSelection', 'sphereSelection', 'boxSelection'].every(t => !results[t].visible),
+                detail: ['sphereBrushSelection', 'sphereSelection', 'boxSelection'].map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'}`).join(', ')
             },
             {
                 name: 'the panel is long: a 440px track per axis',
-                pass: rows.every(r => r.track === 440),
-                detail: rows.map(r => `${r.axis}: ${r.track}px`).join(', ')
+                pass: defaultState.layout.every(r => r.track === 440),
+                detail: defaultState.layout.map(r => `${r.axis}: ${r.track}px`).join(', ')
             },
             {
-                name: 'each axis is a rail with a labelled block at both ends',
-                pass: JSON.stringify(rect.axes) === '["depth","x","y"]' && rect.blocks.every(n => n === 2) &&
-                    rect.grips.every(n => n === 4) && rows.every(r => r.blocks.every(b => b.labelInside)),
-                detail: `axes ${JSON.stringify(rect.axes)}, blocks ${JSON.stringify(rect.blocks)}, grips ${JSON.stringify(rect.grips)}, label inside every block ${rows.every(r => r.blocks.every(b => b.labelInside))}`
-            },
-            {
-                name: 'the blocks are fixed-size handles centred on their bounds, band between them',
-                pass: rows.every((r) => {
-                    const low = r.blocks.find(b => b.side === 'low');
-                    const high = r.blocks.find(b => b.side === 'high');
-                    const lowCentre = low.box[0] + low.box[1] / 2;
-                    const highCentre = high.box[0] + high.box[1] / 2;
-                    return low.box[1] === high.box[1] && highCentre > lowCentre &&
-                        near(r.core[0], lowCentre, 2) && near(r.core[1], highCentre - lowCentre, 2);
-                }),
-                detail: rows.map((r) => {
-                    const low = r.blocks.find(b => b.side === 'low');
-                    const high = r.blocks.find(b => b.side === 'high');
-                    return `${r.axis}: low ${low.box.join('+')}, core ${r.core.join('+')}, high ${high.box.join('+')}`;
-                }).join(' | ')
+                name: 'each axis is ONE rail with exactly TWO labelled blocks (no outer handles)',
+                pass: defaultState.axes.length === 3 && defaultState.blocks.every(n => n === 2) &&
+                    defaultState.outerHandles.every(n => n === 0) && defaultState.layout.every(r => r.bands === 1) &&
+                    defaultState.layout.every(r => r.blocks.every(b => b.labelInside)) &&
+                    defaultState.grips.every(n => n === 2),
+                detail: `axes ${JSON.stringify(defaultState.axes)}, blocks ${JSON.stringify(defaultState.blocks)}, outerHandles ${JSON.stringify(defaultState.outerHandles)}, bands/row ${defaultState.layout.map(r => r.bands).join('/')}, label inside every block ${defaultState.layout.every(r => r.blocks.every(b => b.labelInside))}`
             },
             {
                 name: 'the axis labels are localised and a reset button is there',
-                pass: JSON.stringify(rect.labels) === '[["最近","最远"],["左","右"],["上","下"]]' &&
-                    rect.reset === true && rect.title === '选区范围',
-                detail: `labels ${JSON.stringify(rect.labels)}, title ${JSON.stringify(rect.title)}, reset ${rect.reset}`
+                pass: JSON.stringify(defaultState.layout.map(r => r.labels)) === JSON.stringify([['最近', '最远'], ['左', '右'], ['上', '下']]) &&
+                    defaultState.reset,
+                detail: `labels ${JSON.stringify(defaultState.layout.map(r => r.labels))}, title "${defaultState.title}", reset ${defaultState.reset}`
             },
             {
-                name: 'no numeric fields inside a row',
-                pass: rect.numericFields.every(n => n === 0),
-                detail: `numeric inputs per row ${JSON.stringify(rect.numericFields)}`
+                name: 'no numbers in a row: no fields, no readout, no digits',
+                pass: defaultState.numericFields.every(n => n === 0) && defaultState.readouts.every(n => n === 0) &&
+                    defaultState.digits.every(n => n === 0),
+                detail: `numeric fields ${JSON.stringify(defaultState.numericFields)}, readout elements ${JSON.stringify(defaultState.readouts)}, digits + inputs ${JSON.stringify(defaultState.digits)}`
             },
             {
-                name: 'the scale adapts: the closer the blocks, the finer the same 20px drag',
-                pass: wideDelta > 5 && narrowDelta > 0 && narrowDelta < wideDelta * 0.5 &&
-                    wideGap > 150 && narrowGap >= 120 && thinGap >= 120 && finestGap >= 120,
-                detail: `20px drag moves the bound by ${wideDelta.toFixed(1)} with a 100-wide core, ` +
-                    `${narrowDelta.toFixed(1)} with a 2-wide core (${(wideDelta / Math.max(narrowDelta, 0.01)).toFixed(1)}x finer); ` +
-                    `core gap ${wideGap}px -> ${narrowGap}px -> ${thinGap}px -> ${finestGap}px (0.1-wide core)`
+                name: 'the two blocks park at 20% / 80% of the rail in EVERY state',
+                pass: park(parkDefault) && park(parkWide) && park(parkThin) && park(parkTiny),
+                detail: `100-wide ${JSON.stringify(parkDefault)} | 40-wide ${JSON.stringify(parkWide)} | 0.2-wide ${JSON.stringify(parkThin)} | 0.1-wide ${JSON.stringify(parkTiny)}`
             },
             {
-                name: 'a drag has CONSTANT sensitivity: the same 22px always moves the same amount',
-                pass: sensitivity.length >= 7 && steadyRatio < 1.15,
-                detail: `8 drag steps of 22px -> ${deltas.join(', ')} (max/min ${steadyRatio.toFixed(3)})`
+                name: 'the band between the parked blocks is the selection and never changes width',
+                pass: new Set([parkDefault.gap, parkWide.gap, parkThin.gap, parkTiny.gap]).size === 1 && parkDefault.gap > 200,
+                detail: `band width ${[parkDefault.gap, parkWide.gap, parkThin.gap, parkTiny.gap].join('/')}px (all states)`
             },
             {
-                name: 'the dragged block never drifts away from the pointer (1:1 tracking)',
-                pass: maxDrift < 0.02,
-                detail: `worst handle-vs-pointer offset ${(maxDrift * 440).toFixed(1)}px over 176px of travel`
+                name: 'the blocks are a fixed size (they never resize)',
+                pass: new Set([parkDefault.width, parkWide.width, parkThin.width, parkTiny.width]).size === 1,
+                detail: `block width ${[parkDefault.width, parkWide.width, parkThin.width, parkTiny.width].join('/')}px`
             },
             {
-                name: 'the rail pans to give reach: one drag keeps going without re-grabbing',
-                pass: panMonotone && panOnRail && panGain >= 0.8,
-                detail: `a tight (0.2-wide) core still moved ${panGain} units over 600px of drag; values ${panValues.join(' ')}; handle stays at ${panned.trace.map(s => s.handleFraction).slice(-3).join('/')} of the rail`
+                name: 'the push accelerates: the same 20px moves much more once pushed far out',
+                pass: nearPush > 0 && farPush > nearPush * 2 &&
+                    Math.abs(nearPush - nudge(20)) < 0.2 && Math.abs(farPush - (nudge(220) - nudge(200))) < 0.4,
+                detail: `in one drag: 0->20px moves ${nearPush} (spec ${nudge(20).toFixed(2)}), 200->220px moves ${farPush} (spec ${(nudge(220) - nudge(200)).toFixed(2)}) -> ${(farPush / Math.max(nearPush, 0.01)).toFixed(1)}x faster`
             },
             {
-                name: 'releasing re-fits the rail so a thin slab gets its working room back',
-                pass: panRelift >= 120 && panned.released.gap >= 120,
-                detail: `gap during the drag ${panned.trace[0].gap}px -> after release ${panRelift}px`
+                name: 'while held the block follows the pointer, then parks at the rail end',
+                pass: held[0].at === HOME_LOW && Math.abs(held[1].at - (HOME_LOW + 40 / 440)) < 0.01 &&
+                    held[3].at === 1 && held[4].at === 1 && held[4].low > held[3].low,
+                detail: held.map(h => `${h.dx}px -> block ${h.at}, low ${h.low}`).join(' | ')
             },
             {
-                name: 'the core can never collapse: pushing one block onto the other keeps a step',
-                pass: collapsedCore >= 0.1 && collapsedGap >= 120,
-                detail: `dragging 480px into the other block ends at thickness ${collapsedCore} with a ${collapsedGap}px gap`
+                name: 'releasing returns BOTH blocks to their park, and the value stays',
+                pass: park({ low: blockOf(afterHeld, 'low').at, high: blockOf(afterHeld, 'high').at }) &&
+                    afterHeldRange.screen.x.low === held[4].low,
+                detail: `pushed to low ${held[4].low} -> released at ${JSON.stringify({ low: blockOf(afterHeld, 'low').at, high: blockOf(afterHeld, 'high').at })}, value kept ${afterHeldRange.screen.x.low}`
             },
             {
-                name: 'the thinner the slab, the fewer 0.1 steps a fixed 40px drag buys',
-                pass: stepTravelThick && stepTravelThin && stepTravelThick.steps > 20 &&
-                    stepTravelThin.steps > 0 && stepTravelThin.steps < stepTravelThick.steps / 10,
-                detail: `40px of drag = ${stepTravelThick ? stepTravelThick.steps : '?'} x 0.1 with a 40-wide core ` +
-                    `vs ${stepTravelThin ? stepTravelThin.steps : '?'} x 0.1 with a 0.2-wide core ` +
-                    `(${stepTravelThick && stepTravelThin ? (stepTravelThick.steps / stepTravelThin.steps).toFixed(0) : '?'}x finer)`
-            },
-            {
-                name: 'all three axes start at the full through-pass with no expansion',
-                pass: reset.depth.near === 0 && reset.depth.far === 100 &&
-                    reset.depth.nearOuter === 0 && reset.depth.farOuter === 100 &&
-                    full(reset.screen.x) && full(reset.screen.y),
+                name: 'all three axes start at the full through-pass',
+                pass: fullDepth(reset.depth) && full(reset.screen.x) && full(reset.screen.y),
                 detail: JSON.stringify(reset)
             },
             {
-                name: 'dragging the block trims the selection and keeps the block size',
-                pass: afterTrim.screen.x.low > 0 && afterTrim.screen.x.outerLow === afterTrim.screen.x.low &&
-                    blockOf(afterTrimBar, 'low').box[1] === blockOf(resetBar, 'low').box[1] &&
-                    blockOf(afterTrimBar, 'low').box[1] === narrowBlockWidth && thinBlockWidth === narrowBlockWidth,
-                detail: `x ${JSON.stringify(afterTrim.screen.x)}; block width ${blockOf(resetBar, 'low').box[1]} -> ${blockOf(afterTrimBar, 'low').box[1]}`
+                name: 'pushing the block trims the selection (real gesture on the model)',
+                pass: through > 0 && trimmed > 0 && trimmed < through && afterTrim.screen.x.low > 0 &&
+                    park({ low: blockOf(afterTrimBar, 'low').at, high: blockOf(afterTrimBar, 'high').at }),
+                detail: `rect 40-60% -> ${through} selected; push 60px -> ${trimmed}; x ${JSON.stringify(afterTrim.screen.x)}`
             },
             {
-                name: '扩边 shows up as a band on the rail, NOT by resizing the block',
-                pass: afterExpand.screen.x.outerLow < 0 &&
-                    afterExpandBar.layout[1].margins[0].visible && afterExpandBar.layout[1].margins[0].box[1] > 20 &&
-                    blockOf(afterExpandBar, 'low').box[1] === blockOf(resetBar, 'low').box[1],
-                detail: `x ${JSON.stringify(afterExpand.screen.x)}; low margin band ${JSON.stringify(afterExpandBar.layout[1].margins[0])}; block width ${blockOf(resetBar, 'low').box[1]} -> ${blockOf(afterExpandBar, 'low').box[1]} (unchanged)`
-            },
-            {
-                name: 'dragging the 最远 inner grip trims the far depth bound',
-                pass: afterDepth.depth.far < 100 && afterDepth.depth.far > 0 &&
-                    afterDepth.depth.farOuter === afterDepth.depth.far && afterDepth.depth.near === 0,
-                detail: `depth ${JSON.stringify(afterDepth.depth)}`
+                name: 'the core can never collapse: a 900px push keeps one step and the blocks stay apart',
+                pass: collapsedThickness >= 0.1 && park(collapsedPark),
+                detail: `900px push -> thickness ${collapsedThickness}, blocks ${JSON.stringify(collapsedPark)}, band ${collapsedBar.layout[1].core[1]}px`
             },
             {
                 name: 'the title highlights once any axis is narrowed',
-                pass: activeAfterDrag === true,
-                detail: `title active ${activeAfterDrag}`
+                pass: afterTrimBar.active,
+                detail: `title active ${afterTrimBar.active}`
             },
             {
                 name: 'reset restores all twelve bounds and drops the highlight',
-                pass: full(afterReset.screen.x) && full(afterReset.screen.y) &&
-                    afterReset.depth.near === 0 && afterReset.depth.far === 100 &&
-                    afterReset.depth.nearOuter === 0 && afterReset.depth.farOuter === 100 &&
-                    !afterResetBar.active,
+                pass: fullDepth(afterReset.depth) && full(afterReset.screen.x) && full(afterReset.screen.y) && !afterResetBar.active,
                 detail: `${JSON.stringify(afterReset)}, active ${afterResetBar.active}`
             },
             {
                 name: 'the panel hides when the tool deactivates',
-                pass: !afterDeactivate.visible,
-                detail: JSON.stringify({ exists: afterDeactivate.exists, visible: afterDeactivate.visible })
+                pass: hidden.exists && !hidden.visible,
+                detail: JSON.stringify({ exists: hidden.exists, visible: hidden.visible })
             },
             {
                 name: 'no console errors',
                 pass: logs.length === 0,
-                detail: logs.length ? JSON.stringify(logs.slice(0, 3)) : 'clean'
+                detail: logs.length ? logs.slice(0, 3).join(' | ') : 'clean'
             }
         ];
 
         console.log(JSON.stringify({
-            url: URL,
-            backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
-            panel: { size: rect.size, axes: rect.axes, tracks: rows.map(r => r.track), numericFields: rect.numericFields },
-            adaptiveScale: { wideDelta: +wideDelta.toFixed(1), narrowDelta: +narrowDelta.toFixed(1), gaps: [wideGap, narrowGap, thinGap, finestGap], blockWidths: [narrowBlockWidth, thinBlockWidth], steps40px: [stepTravelThick && stepTravelThick.steps, stepTravelThin && stepTravelThin.steps] },
-            drag: { deltas, steadyRatio: +steadyRatio.toFixed(3), maxDriftPx: +(maxDrift * 440).toFixed(1), panGain, panRefitGap: panRelift, collapsedCore, collapsedGap },
-            reset: { depth: reset.depth, x: reset.screen.x },
-            afterTrim: afterTrim.screen.x,
-            afterExpand: afterExpand.screen.x,
-            afterDepth: afterDepth.depth,
-            afterReset: { depth: afterReset.depth, x: afterReset.screen.x },
+            results: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, { visible: v.visible, size: v.size }])),
+            through,
+            trimmed,
+            nearPush,
+            farPush,
+            tapered,
+            park: { default: parkDefault, wide: parkWide, thin: parkThin, tiny: parkTiny },
+            held,
+            collapsedThickness,
             checks,
-            failed: checks.filter(c => !c.pass).length,
-            logs
-        }, null, 2));
-        if (checks.some(c => !c.pass)) process.exitCode = 1;
+            failed: checks.filter(c => !c.pass).length
+        }, null, 1));
+        if (logs.length) {
+            process.exitCode = 1;
+        }
     } catch (e) {
-        console.log(JSON.stringify({ fatal: String(e).slice(0, 400), logs }, null, 2));
+        console.log(JSON.stringify({ fatal: String(e).slice(0, 600), logs }, null, 1));
         process.exitCode = 1;
     } finally {
         await browser.close();

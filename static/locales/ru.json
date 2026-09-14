@@ -177,7 +177,7 @@
     "select-toolbar.rangeRight": "Справа",
     "select-toolbar.rangeTop": "Сверху",
     "select-toolbar.rangeBottom": "Снизу",
-    "select-toolbar.rangeHandleHint": "Перетаскивание: внутренний ползунок обрезает, внешний расширяет",
+    "select-toolbar.rangeHandleHint": "Перетаскивание: чем дальше, тем быстрее; чем ближе, тем точнее. После отпускания ползунок возвращается на место",
     "select-toolbar.depthReset": "Сброс",
     "select-toolbar.radius": "Радиус",
     "popup.ok": "ОК",

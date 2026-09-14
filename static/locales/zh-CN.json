@@ -177,7 +177,7 @@
     "select-toolbar.rangeRight": "右",
     "select-toolbar.rangeTop": "上",
     "select-toolbar.rangeBottom": "下",
-    "select-toolbar.rangeHandleHint": "拖动：内柄裁框，外柄向外扩边",
+    "select-toolbar.rangeHandleHint": "拖动：推得越远越快，越近越精确；松手自动归位",
     "select-toolbar.depthReset": "重置",
     "select-toolbar.radius": "半径",
     "popup.ok": "确定",
