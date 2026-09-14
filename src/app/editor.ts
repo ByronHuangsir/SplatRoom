@@ -7,7 +7,7 @@ import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, SelectRangeOp, Hid
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
 import { IndexRanges } from '../core/index-ranges';
-import { getDepthRange } from '../core/selection-flags';
+import { getDepthRange, getScreenRange } from '../core/selection-flags';
 import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../geometry/planar-fix';
 import { semanticSelect } from '../geometry/semantic-select';
 import { refineSurface, refineSurfaceLevel2, SurfaceRefineLevel2Params } from '../geometry/surface-refiner';
@@ -16,7 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
-import { SelectionRangeRegion, SelectionRangeView, selectRange, rangeDistances, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { SelectionRangeRegion, SelectionRangeView, selectRange, rangeDistances, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -930,17 +930,18 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     // ---- screen selection: 2D region × depth range (V3, 选区深度) ----------
     // Every screen-space gesture (rect / lasso / polygon / 2D brush / click) now runs the
     // same CPU pass: project every splat, keep the ones whose pixel falls inside the 2D
-    // region, and keep those whose distance along the gesture's view axis lies inside
-    // [最近, 最远] - a percentage of the model's own depth extent. The default 0 / 100 is
-    // "穿透整个模型完整选择"; anything narrower carves a slab out of that column.
+    // region, inside the 左右 / 上下 window, and whose distance along the gesture's view
+    // axis lies inside [最近, 最远]. Depth is a percentage of the model's own depth extent;
+    // the two screen axes are percentages of the gesture's own box. All three default to
+    // the full range, i.e. "穿透整个模型完整选择"; narrowing them carves a box out of it.
     //
     // There is no id pick, no footprint widening and no depth-pass readback any more: the
     // whole test is splat/selection-range.ts, one projection loop per gesture.
     //
-    // The gesture is remembered so the two sliders can re-cut it live: select from the
-    // front, orbit to the side, drag 最近 / 最远 and the slab shrinks along the *gesture's*
-    // view axis (a world-space slab that does not drift when the camera moves). Any other
-    // history op drops it.
+    // The gesture is remembered so the three range controls can re-cut it live: select from
+    // the front, orbit to the side, drag the handles and the box shrinks along the
+    // *gesture's* axes (it does not drift when the camera moves). Any other history op
+    // drops it.
 
     type RangeEntry = {
         splat: Splat;
@@ -957,6 +958,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     type RangeGesture = {
         region: SelectionRangeRegion;
+        // the gesture's own box in device pixels: the 左右 / 上下 percentages are relative to it
+        bounds: { x0: number, y0: number, x1: number, y1: number };
         entries: RangeEntry[];
     };
 
@@ -964,7 +967,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     const rangeOps = new Set<SelectRangeOp>();
 
     // any other edit invalidates the remembered gesture: its post mask no longer describes
-    // the selection. Undo/redo of the gesture's own op keeps it (moving a slider re-applies)
+    // the selection. Undo/redo of the gesture's own op keeps it (moving a handle re-applies)
     events.on('edit.apply', (op: EditOp) => {
         if (rangeGesture && !rangeOps.has(op as SelectRangeOp)) {
             rangeGesture = null;
@@ -1002,11 +1005,22 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         intersect: (had: boolean, hit: boolean) => had && hit
     };
 
-    // one entry's post mask for a given range: the 2D hit mask recombined with the
+    // one entry's view for the current three-axis range: the pose + model transform captured
+    // with the gesture, plus the depth window and the screen window derived from it
+    const rangeView = (gesture: RangeGesture, entry: RangeEntry): SelectionRangeView => {
+        const { near, far } = getDepthRange();
+        const screen = getScreenRange();
+        return {
+            ...entry.view,
+            ...rangeDistances(entry.extent.min, entry.extent.max, near, far),
+            ...screenWindow(gesture.bounds, screen)
+        };
+    };
+
+    // one entry's post mask for the current range: the 2D hit mask recombined with the
     // selection the gesture started from
-    const rangePost = (gesture: RangeGesture, entry: RangeEntry, near: number, far: number): IndexRanges => {
-        const distances = rangeDistances(entry.extent.min, entry.extent.max, near, far);
-        const mask = selectRange(entry.splat, gesture.region, { ...entry.view, ...distances });
+    const rangePost = (gesture: RangeGesture, entry: RangeEntry): IndexRanges => {
+        const mask = selectRange(entry.splat, gesture.region, rangeView(gesture, entry));
         const combine = rangeCombine[entry.opKind];
         const preMask = entry.preMask;
         return IndexRanges.fromPredicate(entry.splat.splatData.numSplats, i => combine(preMask[i] !== 0, mask[i] === 255));
@@ -1016,7 +1030,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     const runRangeSelection = async (
         region: SelectionRangeRegion,
         opKind: 'add' | 'remove' | 'set' | 'intersect',
-        splats: Splat[]
+        splats: Splat[],
+        bounds: { x0: number, y0: number, x1: number, y1: number }
     ) => {
         if (!splats.length) {
             return;
@@ -1024,6 +1039,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
         const pose = poseSnapshot();
         const { near, far } = getDepthRange();
+        const screen = getScreenRange();
+        const window = screenWindow(bounds, screen);
         const entries: RangeEntry[] = [];
         const combine = rangeCombine[opKind];
 
@@ -1039,7 +1056,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             const view: SelectionRangeView = {
                 ...pose,
                 worldTransform: splat.worldTransform.data,
-                ...distances
+                ...distances,
+                ...window
             };
 
             // the selection as it stands, minus locked rows: a hidden splat is locked AND
@@ -1070,16 +1088,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             await editHistory.add(entry.op);
         }
 
-        rangeGesture = entries.length ? { region, entries } : null;
+        rangeGesture = entries.length ? { region, bounds, entries } : null;
         rangeOps.clear();
         entries.forEach(entry => rangeOps.add(entry.op));
     };
 
-    // live re-cut while a depth-range slider moves. Recomputed as fast as the CPU pass
-    // allows and always with the newest value: a drag fires 'change' far faster than a
+    // live re-cut while one of the three range controls moves. Recomputed as fast as the CPU
+    // pass allows and always with the newest values: a drag fires 'change' far faster than a
     // 900k-splat pass finishes, so intermediate values are dropped rather than queued.
     let rangePumpBusy = false;
-    let rangePending: { near: number, far: number } | null = null;
+    let rangePending = false;
 
     const pumpRange = async () => {
         if (rangePumpBusy) {
@@ -1088,14 +1106,13 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         rangePumpBusy = true;
         try {
             while (rangePending) {
-                const range = rangePending;
                 const gesture = rangeGesture;
-                rangePending = null;
+                rangePending = false;
                 if (!gesture) {
                     continue;
                 }
                 for (const entry of gesture.entries) {
-                    entry.op.setPost(rangePost(gesture, entry, range.near, range.far));
+                    entry.op.setPost(rangePost(gesture, entry));
                     await scene.commandQueue.enqueue(() => entry.op.do());
                 }
             }
@@ -1104,13 +1121,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
     };
 
-    events.on('selection.depthRange', (range: { near: number, far: number }) => {
+    const requestRange = () => {
         if (!rangeGesture) {
             return;
         }
-        rangePending = range;
+        rangePending = true;
         void pumpRange();
-    });
+    };
+
+    events.on('selection.depthRange', requestRange);
+    events.on('selection.screenRange', requestRange);
 
     events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
         const { width, height } = scene.targetSize;
@@ -1122,7 +1142,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         await runRangeSelection(
             { contains: (px, py) => px >= px0 && px <= px1 && py >= py0 && py <= py1 },
             op,
-            selectedSplats()
+            selectedSplats(),
+            { x0: px0, y0: py0, x1: px1, y1: py1 }
         );
     });
 
@@ -1135,9 +1156,25 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const cw = canvas.width;
         const ch = canvas.height;
         const alpha = new Uint8Array(cw * ch);
+        // the stroke's bounding box comes out of the same pass: the 左右 / 上下 ranges are
+        // percentages of it, so a lasso gets the same "trim what I drew" feel as a rect
+        let bx0 = cw - 1;
+        let by0 = ch - 1;
+        let bx1 = 0;
+        let by1 = 0;
         for (let i = 0; i < alpha.length; i++) {
-            alpha[i] = image.data[i * 4 + 3];
+            const a = image.data[i * 4 + 3];
+            alpha[i] = a;
+            if (a > 0) {
+                const px = i % cw;
+                const py = (i - px) / cw;
+                if (px < bx0) bx0 = px;
+                if (px > bx1) bx1 = px;
+                if (py < by0) by0 = py;
+                if (py > by1) by1 = py;
+            }
         }
+        const empty = bx1 < bx0 || by1 < by0;
 
         await runRangeSelection(
             {
@@ -1151,7 +1188,14 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             },
             op,
-            selectedSplats()
+            selectedSplats(),
+            // canvas pixels -> device pixels (the same mapping the region test uses)
+            empty ? { x0: 0, y0: 0, x1: 0, y1: 0 } : {
+                x0: (bx0 / cw) * width,
+                y0: (by0 / ch) * height,
+                x1: ((bx1 + 1) / cw) * width,
+                y1: ((by1 + 1) / ch) * height
+            }
         );
     });
 
@@ -1237,7 +1281,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 contains: (px, py) => Math.abs(px - clickX) <= slack && Math.abs(py - clickY) <= slack
             },
             op,
-            selectedSplats()
+            selectedSplats(),
+            { x0: clickX - slack, y0: clickY - slack, x1: clickX + slack, y1: clickY + slack }
         );
     });
 

@@ -1,5 +1,9 @@
-// Verify the 选区深度 bar (the floating toolbar that appears while a screen-space selection
-// tool is active): 最近 / 最远 sliders plus 重置, driving `selection.depthRange`.
+// Verify the 选区范围 panel: three dual-handle ranges (最近-最远 / 左-右 / 上-下) plus 重置,
+// shown while a screen-space selection tool is active, driving `selection.depthRange` and
+// `selection.screenRange`.
+//
+// The handles are dragged with real mouse input (page.mouse) because the control captures the
+// pointer on the track, and the numeric fields are typed into as the exact-entry path.
 //
 // usage: node docs/verify/verify-selection-depth-bar.cjs "<url>" [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
@@ -8,6 +12,8 @@ const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+const BAR = '#selection-range-bar';
 
 (async () => {
     const logs = [];
@@ -18,7 +24,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     });
     try {
         const page = await browser.newPage();
-        await page.setViewport({ width: 1280, height: 800 });
+        await page.setViewport({ width: 1400, height: 900 });
         page.on('console', (m) => { if (m.type() === 'error') logs.push(m.text().slice(0, 200)); });
         page.on('pageerror', e => logs.push('pageerror: ' + String(e).slice(0, 200)));
         await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
@@ -30,21 +36,35 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         }, MODEL);
         await sleep(3500);
 
-        const barState = () => page.evaluate(() => {
-            const bar = document.getElementById('selection-depth-bar');
-            const sliders = bar ? Array.from(bar.querySelectorAll('.pcui-slider')) : [];
-            const title = bar ? bar.querySelector('.select-toolbar-label') : null;
+        const barState = () => page.evaluate((selector) => {
+            const bar = document.querySelector(selector);
+            if (!bar) {
+                return { exists: false };
+            }
+            const rows = Array.from(bar.querySelectorAll('.select-range-row'));
+            const title = bar.querySelector('.select-toolbar-label');
             return {
-                exists: !!bar,
-                visible: !!bar && !bar.classList.contains('pcui-hidden'),
-                size: bar ? [bar.getBoundingClientRect().width, bar.getBoundingClientRect().height].map(Math.round) : null,
-                sliders: sliders.length,
-                values: sliders.map(s => Number(s.querySelector('.pcui-numeric-input input').value)),
+                exists: true,
+                visible: !bar.classList.contains('pcui-hidden'),
+                size: [Math.round(bar.getBoundingClientRect().width), Math.round(bar.getBoundingClientRect().height)],
+                axes: rows.map(r => r.getAttribute('data-axis')),
+                handles: rows.map(r => r.querySelectorAll('.select-range-handle').length),
+                fills: rows.map(r => {
+                    const fill = r.querySelector('.select-range-fill');
+                    return fill ? [Math.round(parseFloat(fill.style.left)), Math.round(parseFloat(fill.style.width))] : null;
+                }),
+                values: rows.map(r => Array.from(r.querySelectorAll('.select-range-value input')).map(i => Number(i.value))),
+                labels: rows.map(r => Array.from(r.querySelectorAll('.select-range-label')).map(l => l.textContent)),
                 title: title ? title.textContent : null,
-                active: !!bar && !!title && title.classList.contains('active'),
-                reset: !!bar && !!bar.querySelector('.select-toolbar-button')
+                active: !!title && title.classList.contains('active'),
+                reset: !!bar.querySelector('.select-toolbar-button')
             };
-        });
+        }, BAR);
+
+        const ranges = () => page.evaluate(() => ({
+            depth: window.scene.events.invoke('selection.depthRange'),
+            screen: window.scene.events.invoke('selection.screenRange')
+        }));
 
         const activate = async (tool) => {
             // tool events toggle, so deactivate first to make the call deterministic
@@ -60,66 +80,61 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             results[tool] = await activate(tool);
         }
 
-        // with the rect tool active, drive the two sliders and the reset button from the bar
+        // with the rect tool active, drive the three axes from the panel
         const rect = await activate('rectSelection');
-        const before = await page.evaluate(() => window.scene.events.invoke('selection.depthRange'));
+        const before = await ranges();
 
-        // type into 最近 (the first slider's numeric field: typing a value fires change)
-        await page.evaluate(() => {
-            const bar = document.getElementById('selection-depth-bar');
-            const input = bar.querySelectorAll('.pcui-numeric-input input')[0];
-            input.focus();
-            input.value = '30';
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-        });
-        await sleep(500);
-        const afterNear = await page.evaluate(() => ({
-            range: window.scene.events.invoke('selection.depthRange'),
-            values: Array.from(document.querySelectorAll('#selection-depth-bar .pcui-numeric-input input')).map(i => Number(i.value))
-        }));
+        const trackBox = (axis) => page.evaluate((selector, a) => {
+            const track = document.querySelector(`${selector} .select-range-row[data-axis="${a}"] .select-range-track`);
+            const r = track.getBoundingClientRect();
+            return { left: r.left, right: r.right, y: r.top + r.height / 2, width: r.width };
+        }, BAR, axis);
 
-        // type into 最远
-        await page.evaluate(() => {
-            const bar = document.getElementById('selection-depth-bar');
-            const input = bar.querySelectorAll('.pcui-numeric-input input')[1];
+        // drag one handle to a fraction of the track (real mouse: the widget captures the pointer)
+        const dragHandle = async (axis, handle, fraction) => {
+            const box = await trackBox(axis);
+            const from = handle === 'low' ? box.left + 1 : box.right - 1;
+            await page.mouse.move(from, box.y);
+            await page.mouse.down();
+            await page.mouse.move(box.left + box.width * fraction, box.y, { steps: 8 });
+            await page.mouse.up();
+            await sleep(400);
+        };
+
+        // 左-右: squeeze both handles inwards
+        await dragHandle('x', 'low', 0.35);
+        const afterXLow = await ranges();
+        await dragHandle('x', 'high', 0.65);
+        const afterXHigh = await ranges();
+        const afterXDrag = await barState();
+
+        // 上-下: squeeze the low handle
+        await dragHandle('y', 'low', 0.25);
+        const afterYLow = await ranges();
+
+        // 深度: squeeze the far handle
+        await dragHandle('depth', 'high', 0.5);
+        const afterDepthHigh = await ranges();
+        const activeAfterDrag = (await barState()).active;
+
+        // exact entry through the numeric fields
+        await page.evaluate((selector) => {
+            const input = document.querySelector(`${selector} .select-range-row[data-axis="y"] .select-range-value[data-handle="high"] input`);
             input.focus();
             input.value = '70';
             input.dispatchEvent(new Event('change', { bubbles: true }));
             input.blur();
-        });
-        await sleep(500);
-        const afterFar = await page.evaluate(() => ({
-            range: window.scene.events.invoke('selection.depthRange'),
-            active: !!document.querySelector('#selection-depth-bar .select-toolbar-label.active')
-        }));
+        }, BAR);
+        await sleep(400);
+        const afterTyped = await ranges();
 
-        // drive 最近 past 最远: the pair has to stay ordered (the other handle is pushed)
-        await page.evaluate(() => {
-            const bar = document.getElementById('selection-depth-bar');
-            const input = bar.querySelectorAll('.pcui-numeric-input input')[0];
-            input.focus();
-            input.value = '100';
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-        });
+        // reset restores all six bounds
+        await page.evaluate((selector) => {
+            document.querySelector(`${selector} .select-toolbar-button`).click();
+        }, BAR);
         await sleep(500);
-        const crossed = await page.evaluate(() => ({
-            range: window.scene.events.invoke('selection.depthRange'),
-            values: Array.from(document.querySelectorAll('#selection-depth-bar .pcui-numeric-input input')).map(i => Number(i.value))
-        }));
-
-        // the reset button restores 0 / 100
-        await page.evaluate(() => {
-            const bar = document.getElementById('selection-depth-bar');
-            bar.querySelector('.select-toolbar-button').click();
-        });
-        await sleep(500);
-        const afterReset = await page.evaluate(() => ({
-            range: window.scene.events.invoke('selection.depthRange'),
-            values: Array.from(document.querySelectorAll('#selection-depth-bar .pcui-numeric-input input')).map(i => Number(i.value)),
-            active: !!document.querySelector('#selection-depth-bar .select-toolbar-label.active')
-        }));
+        const afterReset = await ranges();
+        const afterResetBar = await barState();
 
         await page.evaluate(() => window.scene.events.fire('tool.deactivate'));
         await sleep(300);
@@ -127,51 +142,84 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
         const screenTools = ['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection'];
         const others = ['sphereBrushSelection', 'sphereSelection', 'boxSelection'];
+        const near = (a, b, tol = 6) => Math.abs(a - b) <= tol;
 
         const checks = [
             {
-                name: 'the depth range bar appears for every screen-space selection tool',
+                name: 'the range panel appears for every screen-space selection tool',
                 pass: screenTools.every(t => results[t].visible),
                 detail: screenTools.map(t => `${t}: ${results[t].visible ? `visible ${results[t].size.join('x')}` : 'hidden'}`).join(', ')
             },
             {
-                name: 'the bar stays hidden for the volume / brush tools',
+                name: 'the panel stays hidden for the volume / brush tools',
                 pass: others.every(t => !results[t].visible),
                 detail: others.map(t => `${t}: ${results[t].visible ? 'visible' : 'hidden'}`).join(', ')
             },
             {
-                name: 'the bar carries a title, two sliders and a reset button',
-                pass: rect.sliders === 2 && rect.reset === true && rect.title === '选区深度',
-                detail: `sliders ${rect.sliders}, reset ${rect.reset}, title ${JSON.stringify(rect.title)}`
+                name: 'the panel carries three axes, each with two handles and a fill',
+                pass: JSON.stringify(rect.axes) === '["depth","x","y"]' &&
+                    rect.handles.every(n => n === 2) && rect.fills.every(f => !!f),
+                detail: `axes ${JSON.stringify(rect.axes)}, handles ${JSON.stringify(rect.handles)}, fills ${JSON.stringify(rect.fills)}`
             },
             {
-                name: 'the sliders start at the full through-pass (0 / 100)',
-                pass: rect.values[0] === 0 && rect.values[1] === 100,
-                detail: `${JSON.stringify(rect.values)} (range ${JSON.stringify(before)})`
+                name: 'the axis end labels are localised and a reset button is there',
+                pass: JSON.stringify(rect.labels) === '[["最近","最远"],["左","右"],["上","下"]]' &&
+                    rect.reset === true && rect.title === '选区范围',
+                detail: `labels ${JSON.stringify(rect.labels)}, title ${JSON.stringify(rect.title)}, reset ${rect.reset}`
             },
             {
-                name: 'the 最近 slider writes the near bound',
-                pass: afterNear.range.near === 30 && afterNear.range.far === 100,
-                detail: `range ${JSON.stringify(afterNear.range)}, sliders ${JSON.stringify(afterNear.values)}`
+                name: 'all three axes start at the full through-pass (0 / 100)',
+                pass: rect.values.every(v => v[0] === 0 && v[1] === 100) &&
+                    before.depth.near === 0 && before.depth.far === 100 &&
+                    before.screen.x.low === 0 && before.screen.x.high === 100 &&
+                    before.screen.y.low === 0 && before.screen.y.high === 100,
+                detail: `sliders ${JSON.stringify(rect.values)}, ${JSON.stringify(before)}`
             },
             {
-                name: 'the 最远 slider writes the far bound and the title highlights',
-                pass: afterFar.range.near === 30 && afterFar.range.far === 70 && afterFar.active,
-                detail: `range ${JSON.stringify(afterFar.range)}, title active ${afterFar.active}`
+                name: 'dragging the 左 handle writes the left bound',
+                pass: near(afterXLow.screen.x.low, 35) && afterXLow.screen.x.high === 100,
+                detail: `screen.x ${JSON.stringify(afterXLow.screen.x)} (dragged to 35% of the track)`
             },
             {
-                name: 'dragging 最近 past 最远 pushes the far handle instead of being lost',
-                pass: crossed.range.near === crossed.range.far && crossed.values[0] === crossed.values[1],
-                detail: `typed 100 into 最近 while 最远 was 70 -> range ${JSON.stringify(crossed.range)}, sliders ${JSON.stringify(crossed.values)}`
+                name: 'dragging the 右 handle writes the right bound',
+                pass: near(afterXHigh.screen.x.high, 65) && near(afterXHigh.screen.x.low, 35),
+                detail: `screen.x ${JSON.stringify(afterXHigh.screen.x)} (dragged to 65% of the track)`
             },
             {
-                name: 'the reset button restores 0 / 100 and drops the highlight',
-                pass: afterReset.range.near === 0 && afterReset.range.far === 100 &&
-                    afterReset.values[0] === 0 && afterReset.values[1] === 100 && !afterReset.active,
-                detail: `range ${JSON.stringify(afterReset.range)}, sliders ${JSON.stringify(afterReset.values)}, active ${afterReset.active}`
+                name: 'the highlighted span follows the handles',
+                pass: afterXDrag.fills[1][0] === 35 && near(afterXDrag.fills[1][1], 30),
+                detail: `x row fill left/width ${JSON.stringify(afterXDrag.fills[1])}`
             },
             {
-                name: 'the bar hides when the tool deactivates',
+                name: 'dragging the 上 handle writes the top bound',
+                pass: near(afterYLow.screen.y.low, 25) && afterYLow.screen.y.high === 100,
+                detail: `screen.y ${JSON.stringify(afterYLow.screen.y)}`
+            },
+            {
+                name: 'dragging the 最远 handle writes the far depth bound',
+                pass: near(afterDepthHigh.depth.far, 50) && afterDepthHigh.depth.near === 0,
+                detail: `depth ${JSON.stringify(afterDepthHigh.depth)}`
+            },
+            {
+                name: 'the title highlights once any axis is narrowed',
+                pass: activeAfterDrag === true,
+                detail: `title active ${activeAfterDrag}`
+            },
+            {
+                name: 'typing into a numeric field writes that bound',
+                pass: afterTyped.screen.y.high === 70,
+                detail: `screen.y ${JSON.stringify(afterTyped.screen.y)} after typing 70 into 下`
+            },
+            {
+                name: 'reset restores all six bounds and drops the highlight',
+                pass: afterReset.depth.near === 0 && afterReset.depth.far === 100 &&
+                    afterReset.screen.x.low === 0 && afterReset.screen.x.high === 100 &&
+                    afterReset.screen.y.low === 0 && afterReset.screen.y.high === 100 &&
+                    afterResetBar.values.every(v => v[0] === 0 && v[1] === 100) && !afterResetBar.active,
+                detail: `${JSON.stringify(afterReset)}, sliders ${JSON.stringify(afterResetBar.values)}, active ${afterResetBar.active}`
+            },
+            {
+                name: 'the panel hides when the tool deactivates',
                 pass: !afterDeactivate.visible,
                 detail: JSON.stringify(afterDeactivate)
             },
@@ -187,9 +235,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
             bars: results,
             before,
-            afterNear,
-            afterFar,
-            crossed,
+            afterXLow,
+            afterXHigh,
+            afterYLow,
+            afterDepthHigh,
+            afterTyped,
             afterReset,
             checks,
             failed: checks.filter(c => !c.pass).length,

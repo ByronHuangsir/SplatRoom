@@ -45,6 +45,11 @@ export interface SelectionRangeView {
     /** 选中的深度范围：沿视轴、相对相机平面的距离 */
     minDistance: number;
     maxDistance: number;
+    /** 选中的屏幕窗口（设备像素，原点左上）：左右 / 上下两个双柄范围切出来的内框 */
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
 }
 
 /** 把 0-100% 映射到沿视轴的范围 [min, max]。 */
@@ -53,6 +58,28 @@ export const rangeDistances = (min: number, max: number, nearPct: number, farPct
     return {
         minDistance: min + span * (nearPct * 0.01),
         maxDistance: min + span * (farPct * 0.01)
+    };
+};
+
+/**
+ * 选区框（设备像素）+ 左右/上下两个百分比范围 → 实际要选的屏幕窗口。
+ * 百分比相对**选区框**量：left 0 / right 100 / top 0 / bottom 100 = 整个框（默认，等于不裁）。
+ */
+export const screenWindow = (
+    bounds: { x0: number, y0: number, x1: number, y1: number },
+    range: { left: number, right: number, top: number, bottom: number }
+) => {
+    const x0 = Math.min(bounds.x0, bounds.x1);
+    const x1 = Math.max(bounds.x0, bounds.x1);
+    const y0 = Math.min(bounds.y0, bounds.y1);
+    const y1 = Math.max(bounds.y0, bounds.y1);
+    const w = x1 - x0;
+    const h = y1 - y0;
+    return {
+        minX: x0 + w * (range.left * 0.01),
+        maxX: x0 + w * (range.right * 0.01),
+        minY: y0 + h * (range.top * 0.01),
+        maxY: y0 + h * (range.bottom * 0.01)
     };
 };
 
@@ -106,6 +133,10 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
     const { width, height, cameraPosition, viewDir } = view;
     const minDistance = Math.min(view.minDistance, view.maxDistance);
     const maxDistance = Math.max(view.minDistance, view.maxDistance);
+    const minX = Math.min(view.minX, view.maxX);
+    const maxX = Math.max(view.minX, view.maxX);
+    const minY = Math.min(view.minY, view.maxY);
+    const maxY = Math.max(view.minY, view.maxY);
     const contains = region.contains;
 
     for (let i = 0; i < numSplats; i++) {
@@ -143,6 +174,10 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
         const sx = Math.min(width - 1, Math.max(0, Math.floor((ndcX * 0.5 + 0.5) * width)));
         const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - (ndcY * 0.5 + 0.5)) * height)));
 
+        // the 2D region (the gesture) AND the 左右 / 上下 window trim
+        if (sx < minX || sx > maxX || sy < minY || sy > maxY) {
+            continue;
+        }
         if (contains(sx, sy)) {
             mask[i] = 255;
         }

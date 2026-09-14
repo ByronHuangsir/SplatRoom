@@ -127,12 +127,53 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await sleep(200);
         const preNear = await gesture();
 
-        // 7. the helper's "reset" leaves the flag at the default, and localStorage keeps it
-        await page.evaluate(() => window.scene.events.fire('selection.resetDepthRange'));
+        // 7. the two screen axes (左右 / 上下) trim the same gesture live. The sets are
+        // compared by index so "the window really is a subset of the box" is checked, not
+        // just the counts.
+        const selectedIndices = () => page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            const st = splat.splatData.getProp('state');
+            const out = [];
+            for (let i = 0; i < st.length; i++) {
+                if (st[i] & 1) out.push(i);
+            }
+            return out;
+        });
+
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
+        await sleep(300);
+        const screenFull = await gesture();
+        const setFull = await selectedIndices();
+
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', { x: { low: 30, high: 70 } }));
+        await sleep(700);
+        const screenX = await classify();
+        const setX = await selectedIndices();
+
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
+            x: { low: 0, high: 100 },
+            y: { low: 30, high: 70 }
+        }));
+        await sleep(700);
+        const screenY = await classify();
+        const setY = await selectedIndices();
+
+        await page.evaluate(() => window.scene.events.fire('selection.setScreenRange', {
+            y: { low: 0, high: 100 }
+        }));
+        await sleep(700);
+        const screenBack = await classify();
+
+        // 8. the helper's "reset" leaves the depth flag at the default, and localStorage keeps it
+        await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
         await sleep(300);
         const storage = await page.evaluate(() => ({
             near: window.localStorage.getItem('splatroom.selDepthNear'),
-            far: window.localStorage.getItem('splatroom.selDepthFar')
+            far: window.localStorage.getItem('splatroom.selDepthFar'),
+            left: window.localStorage.getItem('splatroom.selRangeLeft'),
+            right: window.localStorage.getItem('splatroom.selRangeRight'),
+            top: window.localStorage.getItem('splatroom.selRangeTop'),
+            bottom: window.localStorage.getItem('splatroom.selRangeBottom')
         }));
 
         const backAt = (list, key) => list.map(s => s.back);
@@ -142,6 +183,12 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         const farFronts = frontAt(farSweep);
         const nearFronts = frontAt(nearSweep);
         const nearBacks = backAt(nearSweep);
+
+        // subset test: every index in `inner` must be in `outer`
+        const isSubset = (inner, outer) => {
+            const set = new Set(outer);
+            return inner.every(i => set.has(i));
+        };
 
         const checks = [
             {
@@ -197,6 +244,31 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 detail: JSON.stringify(storage)
             },
             {
+                name: 'the 左右 range trims the box (a strict subset of the full box)',
+                pass: setX.length > 0 && setX.length < setFull.length && isSubset(setX, setFull),
+                detail: `x 30-70%: ${setX.length} of ${setFull.length} splats, subset ${isSubset(setX, setFull)} (${screenX.total} counted)`
+            },
+            {
+                name: 'the 左右 range keeps roughly its share of the box',
+                pass: setX.length / setFull.length > 0.15 && setX.length / setFull.length < 0.6,
+                detail: `a 40% wide band kept ${(setX.length / setFull.length * 100).toFixed(1)}% of the splats`
+            },
+            {
+                name: 'the 上下 range trims the box (a strict subset of the full box)',
+                pass: setY.length > 0 && setY.length < setFull.length && isSubset(setY, setFull),
+                detail: `y 30-70%: ${setY.length} of ${setFull.length} splats, subset ${isSubset(setY, setFull)} (${screenY.total} counted)`
+            },
+            {
+                name: 'the 上下 range keeps roughly its share of the box',
+                pass: setY.length / setFull.length > 0.15 && setY.length / setFull.length < 0.6,
+                detail: `a 40% high band kept ${(setY.length / setFull.length * 100).toFixed(1)}% of the splats`
+            },
+            {
+                name: 'widening the screen range back restores the full box',
+                pass: screenBack.total === screenFull.total,
+                detail: `${screenFull.total} -> ${screenY.total} -> ${screenBack.total}`
+            },
+            {
                 name: 'the range pass stays interactive on a small model',
                 pass: through.ms < 3000,
                 detail: `rect selection took ${through.ms} ms`
@@ -218,6 +290,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             afterReset,
             preNarrowed,
             preNear,
+            screenFull,
+            screenX,
+            screenY,
+            screenBack,
+            setSizes: { full: setFull.length, x: setX.length, y: setY.length },
             storage,
             checks,
             failed: checks.filter(c => !c.pass).length,

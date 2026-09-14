@@ -56,21 +56,136 @@
         background-color: $bcg-dark;
     }
 
-    // the selection depth bar ("选区深度"): 最近 / 最远 sliders plus a reset, shown while a
-    // screen-space selection tool is active (rect / lasso / polygon / 2d brush / flood)
-    #selection-depth-bar {
-        .select-toolbar-slider {
-            width: 130px;
-            margin: 0px 8px 0px 6px;
+    // the selection range panel ("选区范围"): three dual-handle range rows + a reset, shown
+    // while a screen-space selection tool is active (rect / lasso / polygon / 2d brush / flood).
+    // Unlike the icon toolbars this one stacks vertically: three axes in one row would be
+    // wider than the viewport.
+    &.select-toolbar-stacked {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+        height: auto;
+        padding: 6px 10px 8px;
+    }
+
+    #selection-range-bar {
+        .select-toolbar-label:first-child {
+            margin: 0px 0px 2px 0px;
+            color: $text-secondary;
+            font-size: 12px;
         }
 
-        // the title lights up while the selection is narrower than the full through-pass
+        // the axis title lights up while the selection is narrower than the full through-pass
         .select-toolbar-label.active {
             color: $clr-active;
         }
 
+        .select-range-reset-row {
+            display: flex;
+            justify-content: flex-end;
+        }
+
         .select-toolbar-button {
-            margin-left: 4px;
+            height: 24px;
+            line-height: 24px;
+            margin: 0px;
+            padding: 0px 14px;
+        }
+    }
+
+    // one axis: 低端标签 [值] [====●------●====] [值] 高端标签
+    .select-range-row {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .select-range-label {
+        min-width: 22px;
+        margin: 0px;
+        color: $text-secondary;
+        text-align: center;
+    }
+
+    // the numeric fields stay narrow: they are for reading/exact entry, the drag is the point
+    .select-range-value {
+        width: 42px;
+        height: 20px;
+        margin: 0px;
+        line-height: 20px;
+
+        > input {
+            margin: 0px 0px 0px 4px;
+            padding: 0px;
+            height: 20px;
+        }
+    }
+
+    .select-range-track-wrap {
+        flex: 1 1 auto;
+        display: flex;
+        align-items: center;
+        min-width: 120px;
+        height: 20px;
+    }
+
+    .select-range-track {
+        position: relative;
+        width: 100%;
+        height: 20px;
+        cursor: pointer;
+        touch-action: none;
+
+        // the rail
+        &::before {
+            content: '';
+            position: absolute;
+            left: 0px;
+            right: 0px;
+            top: 50%;
+            height: 2px;
+            margin-top: -1px;
+            border-radius: 1px;
+            background-color: $bcg-dark;
+        }
+    }
+
+    // the span between the two handles = what is selected
+    .select-range-fill {
+        position: absolute;
+        top: 50%;
+        height: 4px;
+        margin-top: -2px;
+        border-radius: 2px;
+        background-color: $clr-hilight;
+        pointer-events: none;
+    }
+
+    .select-range-handle {
+        position: absolute;
+        top: 50%;
+        width: 12px;
+        height: 12px;
+        margin: -6px 0px 0px -6px;
+        border: 2px solid $bcg-primary;
+        border-radius: 50%;
+        background-color: $clr-default;
+        cursor: grab;
+        touch-action: none;
+
+        &:hover,
+        &.dragging {
+            background-color: $clr-active;
+        }
+
+        &.dragging {
+            cursor: grabbing;
+        }
+
+        &:focus-visible {
+            outline: 1px solid $clr-active;
+            outline-offset: 1px;
         }
     }
 
