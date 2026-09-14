@@ -81,7 +81,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             await page.evaluate((o, b) => window.scene.events.invoke('select.rect', o, b), op, box);
             const ms = Date.now() - t0;
             await sleep(500);
-            return { ...(await classify()), ms };
+            return { ...(await classify()), ms, range: await page.evaluate(() => window.scene.events.invoke('selection.depthRange')) };
         };
 
         // a box that is a strict part of the framed model, so expanding past it has something
@@ -336,14 +336,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 detail: `range ${JSON.stringify(afterReset.range)}, ${afterReset.front} front / ${afterReset.back} back`
             },
             {
-                name: 'a pre-set range applies to the next gesture (far side cut)',
-                pass: preNarrowed.front > 0 && preNarrowed.back === 0,
-                detail: `range 0/40 before the gesture: ${preNarrowed.front} front, ${preNarrowed.back} back`
-            },
-            {
-                name: 'a pre-set range applies to the next gesture (near side cut)',
-                pass: preNear.back > 0 && preNear.front === 0,
-                detail: `range 60/100 before the gesture: ${preNear.front} front, ${preNear.back} back`
+                // 3.16.0: a new gesture ALWAYS starts from the full through-pass. A leftover 最近/最远
+                // from the previous adjustment used to clip the next box silently (the user's "框住塔
+                // 却只选到一半"), so the range now belongs to the gesture you are trimming.
+                name: 'a new gesture starts from the full through-pass (a leftover range no longer clips it)',
+                pass: preNarrowed.front > 0 && preNarrowed.back > 0 &&
+                    preNarrowed.range.near === 0 && preNarrowed.range.far === 100 &&
+                    preNear.front > 0 && preNear.back > 0 &&
+                    preNear.range.near === 0 && preNear.range.far === 100,
+                detail: `after a gesture with 0/40 pending: ${preNarrowed.front} front, ${preNarrowed.back} back, range ${JSON.stringify(preNarrowed.range)}; with 60/100 pending: ${preNear.front} front, ${preNear.back} back, range ${JSON.stringify(preNear.range)}`
             },
             {
                 name: 'the range persists in localStorage',

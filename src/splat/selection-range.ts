@@ -124,120 +124,85 @@ const tailBins = (bins: Uint32Array, counted: number) => {
     }
     const near = (nearBin + 1) / BINS;
     const far = farBin / BINS;
-    // a degenerate distribution (or one whose tails already sit at the very ends) keeps it linear
-    if (!(near < far) || (near <= 0.005 && far >= 0.995)) {
+    // 只要分布不是一个点，就照常压（**不再要求尾巴必须贴到两端**：框画得紧时也要有同样的
+    // 第一下响应，否则"有时候有反应、有时候没有"，见 3.16.0）
+    if (!(near < far)) {
         return null;
     }
     return { near, far };
 };
 
-export const depthTailFractions = (
-    splat: Splat,
-    view: {
-        cameraPosition: { x: number, y: number, z: number };
-        viewDir: { x: number, y: number, z: number };
-        // the model transform: the same local->world step selectRange does (skipping it puts every
-        // gaussian outside the histogram and the tails silently fall back to linear)
-        worldTransform: ArrayLike<number>;
-    },
-    extent: { min: number, max: number },
-    inBox?: Uint8Array | null
-): { near: number, far: number } | null => {
-    const span = extent.max - extent.min;
-    const data = splat.splatData;
-    const numSplats = data.numSplats;
-    if (!data || !(span > 1e-6) || !numSplats) {
-        return null;
-    }
-
-    const x = data.getProp('x') as Float32Array;
-    const y = data.getProp('y') as Float32Array;
-    const z = data.getProp('z') as Float32Array;
-    const state = data.getProp('state') as Uint8Array;
-    if (!x || !y || !z) {
-        return null;
-    }
-
-    const world = view.worldTransform;
-    const { cameraPosition, viewDir } = view;
-
-    // one histogram pass (the same cost class as the selection pass itself)
-    const BINS = 512;
-    const bins = new Uint32Array(BINS);
-    let counted = 0;
-    for (let i = 0; i < numSplats; i++) {
-        if (inBox ? inBox[i] === 0 : (state && (state[i] & 2) !== 0)) {
-            continue;
-        }
-        const lx = x[i], ly = y[i], lz = z[i];
-        const px = world[0] * lx + world[4] * ly + world[8] * lz + world[12];
-        const py = world[1] * lx + world[5] * ly + world[9] * lz + world[13];
-        const pz = world[2] * lx + world[6] * ly + world[10] * lz + world[14];
-        const t =
-            (px - cameraPosition.x) * viewDir.x +
-            (py - cameraPosition.y) * viewDir.y +
-            (pz - cameraPosition.z) * viewDir.z;
-        const bin = Math.floor(((t - extent.min) / span) * BINS);
-        if (bin >= 0 && bin < BINS) {
-            bins[bin]++;
-            counted++;
-        }
-    }
-    if (counted < 1000) {
-        return null;
-    }
-
-    // 从两端往中间数，找到累积占比刚超过 TAIL_SHARE 的那个桶 = 尾巴的边界
-    return tailBins(bins, counted);
-};
-
 /**
- * 左右 / 上下两条轴的空边距：手势框是**用户随手拖出来的**，框边常常落在空处（实测真实扫描：框内
- * 37.4 万点里，框左 25% 只占 4%，右端 90-95% 却是密区）。比例尺按框算，于是"推 20px"只削掉一条
- * 0.15% 宽的边、删掉 105 个高斯（深度轴修好后是 2%）—— 用户的原话是"上下左右好像没什么反应"。
+ * 三条轴的两条"稀疏尾巴"，**一次采样扫描算完**（深度 + 左右 + 上下）。
  *
- * 和深度轴同一套做法：按**框内**高斯投影后的实际分布，把两端各占 `TAIL_SHARE` 的那一段压进行程的
- * `TAIL_PERCENT` 里；框边本身就在内容上时测出来是空尾巴，映射自动退回线性。
+ * 为什么需要：比例尺是按**包围盒 / 用户随手拖的框**算的，而真实模型的边缘常常是空的 ——
+ * 13M 点的 merged-scene 里，框内 12.1M 点挤在一个高度层上，两端却稀得几乎没有点；深度轴上"最远"
+ * 从 100% 收到 98% 一个高斯都删不掉。不处理的话"第一次滑动看不到选区变化"。
+ *
+ * 做法：按框内高斯的实际分布，把两端各占 `TAIL_SHARE` 的那一段压进滑块行程的 `TAIL_PERCENT` 里；
+ * 0/100 仍然对应两端 → **没有东西够不着**，"默认整段穿透"的语义不变。
+ *
+ * 采样：13M 点的模型上一次全扫要 ~500ms，而分布只要趋势 —— 按 stride 抽 ≤40 万点（实测这一步
+ * 从 1.5s 降到 ~30ms），拖动时的实时重切只用一次全扫。
  */
-export const screenTailFractions = (
+export const tailFractions = (
     splat: Splat,
     view: {
         viewProjection: ArrayLike<number>;
         worldTransform: ArrayLike<number>;
         width: number;
         height: number;
+        cameraPosition: { x: number, y: number, z: number };
+        viewDir: { x: number, y: number, z: number };
     },
+    extent: { min: number, max: number },
     bounds: { x0: number, y0: number, x1: number, y1: number },
-    inBox?: Uint8Array | null
-): { x: { near: number, far: number } | null, y: { near: number, far: number } | null } => {
+    region: SelectionRangeRegion
+): {
+    depth: { near: number, far: number } | null;
+    x: { near: number, far: number } | null;
+    y: { near: number, far: number } | null;
+} => {
+    const empty: {
+        depth: { near: number, far: number } | null;
+        x: { near: number, far: number } | null;
+        y: { near: number, far: number } | null;
+    } = { depth: null, x: null, y: null };
     const data = splat.splatData;
     const numSplats = data.numSplats;
-    const x0 = Math.min(bounds.x0, bounds.x1);
-    const x1 = Math.max(bounds.x0, bounds.x1);
-    const y0 = Math.min(bounds.y0, bounds.y1);
-    const y1 = Math.max(bounds.y0, bounds.y1);
-    if (!data || !numSplats || !(x1 - x0 > 1) || !(y1 - y0 > 1)) {
-        return { x: null, y: null };
+    const span = extent.max - extent.min;
+    if (!data || !numSplats || !(span > 1e-6)) {
+        return empty;
     }
-
     const px = data.getProp('x') as Float32Array;
     const py = data.getProp('y') as Float32Array;
     const pz = data.getProp('z') as Float32Array;
     const state = data.getProp('state') as Uint8Array;
     if (!px || !py || !pz) {
-        return { x: null, y: null };
+        return empty;
     }
 
     const m = view.viewProjection;
     const world = view.worldTransform;
-    const { width, height } = view;
+    const { width, height, cameraPosition, viewDir } = view;
+    const x0 = Math.min(bounds.x0, bounds.x1);
+    const x1 = Math.max(bounds.x0, bounds.x1);
+    const y0 = Math.min(bounds.y0, bounds.y1);
+    const y1 = Math.max(bounds.y0, bounds.y1);
+    if (!(x1 - x0 > 1) || !(y1 - y0 > 1)) {
+        return empty;
+    }
+
     const BINS = 512;
+    const binsDepth = new Uint32Array(BINS);
     const binsX = new Uint32Array(BINS);
     const binsY = new Uint32Array(BINS);
+    const contains = region.contains;
+    const stride = Math.max(1, Math.floor(numSplats / 400000));
     let counted = 0;
 
-    for (let i = 0; i < numSplats; i++) {
-        if (inBox ? inBox[i] === 0 : (state && (state[i] & (2 | 4)) !== 0)) {
+    for (let i = 0; i < numSplats; i += stride) {
+        if ((state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
         const lx = px[i], ly = py[i], lz = pz[i];
@@ -248,14 +213,23 @@ export const screenTailFractions = (
         if (cw <= 0) {
             continue;
         }
-        const sx = Math.min(width - 1, Math.max(0, Math.floor(((m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw * 0.5 + 0.5) * width)));
-        const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - ((m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw * 0.5 + 0.5)) * height)));
-        if (sx < x0 || sx > x1 || sy < y0 || sy > y1) {
+        const ndcX = (m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw;
+        const ndcY = (m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw;
+        if (ndcX < -1 || ndcX > 1 || ndcY < -1 || ndcY > 1) {
+            continue;
+        }
+        const sx = Math.min(width - 1, Math.max(0, Math.floor((ndcX * 0.5 + 0.5) * width)));
+        const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - (ndcY * 0.5 + 0.5)) * height)));
+        if (sx < x0 || sx > x1 || sy < y0 || sy > y1 || !contains(sx, sy)) {
             continue;
         }
         counted++;
+        const bd = Math.floor((((wx - cameraPosition.x) * viewDir.x + (wy - cameraPosition.y) * viewDir.y + (wz - cameraPosition.z) * viewDir.z) - extent.min) / span * BINS);
         const bx = Math.floor(((sx - x0) / (x1 - x0)) * BINS);
         const by = Math.floor(((sy - y0) / (y1 - y0)) * BINS);
+        if (bd >= 0 && bd < BINS) {
+            binsDepth[bd]++;
+        }
         if (bx >= 0 && bx < BINS) {
             binsX[bx]++;
         }
@@ -263,10 +237,10 @@ export const screenTailFractions = (
             binsY[by]++;
         }
     }
-    if (counted < 1000) {
-        return { x: null, y: null };
+    if (counted < 200) {
+        return empty;
     }
-    return { x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
+    return { depth: tailBins(binsDepth, counted), x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
 };
 
 /**
@@ -289,9 +263,35 @@ export const rangeDistances = (
 };
 
 /**
+ * 每个高斯的投影缓存：屏幕坐标 + 沿视轴的深度。
+ *
+ * 为什么需要：拖动滑块时每一次重切都要把 13M 点重新投影一遍（实测在 merged-scene 上**一次推杆
+ * 840–1016ms**，也就是"还是有一些不顺滑"），而**投影结果在一次手势里是不变的** —— 变的只有窗口和
+ * 深度范围。所以在手势那一次本来就有的全扫里顺手把 sx / sy / dist 存下来，之后每次推杆只做
+ * 比较（实测 ~50ms）。`sx < 0` 表示这个高斯被相机/视口剔掉了（写不进去也不用写）。
+ */
+export type RangeProjectionCache = {
+    sx: Int16Array;
+    sy: Int16Array;
+    dist: Float32Array;
+};
+
+/** 缓存的内存上限（约 8 字节/点）：超过就退回逐点投影，避免 30M+ 的模型吃几百 MB。 */
+export const CACHE_MAX_SPLATS = 24_000_000;
+
+export const createRangeCache = (numSplats: number): RangeProjectionCache | null => {
+    if (!(numSplats > 0) || numSplats > CACHE_MAX_SPLATS) {
+        return null;
+    }
+    const sx = new Int16Array(numSplats);
+    sx.fill(-1);
+    return { sx, sy: new Int16Array(numSplats), dist: new Float32Array(numSplats) };
+};
+
+/**
  * 选区框（设备像素）+ 左右/上下两个百分比范围 → 实际要选的屏幕窗口。
  * 百分比相对**选区框**量：left 0 / right 100 / top 0 / bottom 100 = 整个框（默认，等于不裁）。
- * `tails` 是框内内容区的实际位置（见 screenTailFractions）：把空边距压紧，第一次推杆就有反应。
+ * `tails` 是框内内容区的实际位置（见 tailFractions）：把空边距压紧，第一次推杆就有反应。
  */
 export const screenWindow = (
     bounds: { x0: number, y0: number, x1: number, y1: number },
@@ -344,7 +344,12 @@ export const viewExtentFromBound = (
 /**
  * 用 2D 区域 + 深度范围生成选择掩码（255 = 选中），按 splat 原始索引对齐，已排除删除/锁定的高斯。
  */
-export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: SelectionRangeView): Uint8Array => {
+export const selectRange = (
+    splat: Splat,
+    region: SelectionRangeRegion,
+    view: SelectionRangeView,
+    cache?: RangeProjectionCache | null
+): Uint8Array => {
     const splatData = splat.splatData;
     const numSplats = splatData.numSplats;
     const mask = new Uint8Array(numSplats);
@@ -388,9 +393,6 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
             (px - cameraPosition.x) * viewDir.x +
             (py - cameraPosition.y) * viewDir.y +
             (pz - cameraPosition.z) * viewDir.z;
-        if (distance < minDistance || distance > maxDistance) {
-            continue;
-        }
 
         // project to pixels (clip -> NDC -> pixels, y down like the pickers)
         const cw = m[3] * px + m[7] * py + m[11] * pz + m[15];
@@ -407,12 +409,81 @@ export const selectRange = (splat: Splat, region: SelectionRangeRegion, view: Se
         const sx = Math.min(width - 1, Math.max(0, Math.floor((ndcX * 0.5 + 0.5) * width)));
         const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - (ndcY * 0.5 + 0.5)) * height)));
 
+        if (cache) {
+            // 投影结果与窗口无关，存下来给后面的推杆用（见 RangeProjectionCache）
+            cache.sx[i] = sx;
+            cache.sy[i] = sy;
+            cache.dist[i] = distance;
+        }
+
+        if (distance < minDistance || distance > maxDistance) {
+            continue;
+        }
+
         // outside the outer window (外柄) -> not selected
         if (sx < minX || sx > maxX || sy < minY || sy > maxY) {
             continue;
         }
         // inside the outer window: the drawn shape (rect / lasso alpha / click box) decides,
         // except in the 扩边 band between the core and the outer handles, which is rectangular
+        const inCore = sx >= coreMinX && sx <= coreMaxX && sy >= coreMinY && sy <= coreMaxY;
+        if (inCore && !contains(sx, sy)) {
+            continue;
+        }
+        mask[i] = 255;
+    }
+
+    return mask;
+};
+
+/**
+ * 用缓存里的投影结果重算掩码：**不做投影**，只比较窗口 / 深度 / 形状，所以一次推杆从 ~900ms 掉到
+ * ~50ms（13M 点实测）。缓存由手势那一次的全扫填好（selectRange 的 `cache` 参数），窗口一变就只需
+ * 重跑这一层。
+ */
+export const selectRangeFromCache = (
+    splat: Splat,
+    region: SelectionRangeRegion,
+    view: SelectionRangeView,
+    cache: RangeProjectionCache
+): Uint8Array => {
+    const splatData = splat.splatData;
+    const numSplats = splatData.numSplats;
+    const mask = new Uint8Array(numSplats);
+    const state = splatData.getProp('state') as Uint8Array;
+    const { sx: cxs, sy: cys, dist: cd } = cache;
+    if (numSplats === 0 || cxs.length < numSplats) {
+        return selectRange(splat, region, view);
+    }
+
+    const minDistance = Math.min(view.minDistance, view.maxDistance);
+    const maxDistance = Math.max(view.minDistance, view.maxDistance);
+    const minX = Math.min(view.minX, view.maxX);
+    const maxX = Math.max(view.minX, view.maxX);
+    const minY = Math.min(view.minY, view.maxY);
+    const maxY = Math.max(view.minY, view.maxY);
+    const coreMinX = Math.min(view.coreMinX, view.coreMaxX);
+    const coreMaxX = Math.max(view.coreMinX, view.coreMaxX);
+    const coreMinY = Math.min(view.coreMinY, view.coreMaxY);
+    const coreMaxY = Math.max(view.coreMinY, view.coreMaxY);
+    const contains = region.contains;
+
+    for (let i = 0; i < numSplats; i++) {
+        const sx = cxs[i];
+        if (sx < 0) {
+            continue;
+        }
+        if (state && (state[i] & (State.deleted | State.locked)) !== 0) {
+            continue;
+        }
+        const distance = cd[i];
+        if (distance < minDistance || distance > maxDistance) {
+            continue;
+        }
+        const sy = cys[i];
+        if (sx < minX || sx > maxX || sy < minY || sy > maxY) {
+            continue;
+        }
         const inCore = sx >= coreMinX && sx <= coreMaxX && sy >= coreMinY && sy <= coreMaxY;
         if (inCore && !contains(sx, sy)) {
             continue;

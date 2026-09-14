@@ -16,7 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
-import { SelectionRangeRegion, SelectionRangeView, selectRange, depthTailFractions, rangeDistances, screenTailFractions, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -950,7 +950,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         view: SelectionRangeView;
         // the model's depth extent along that pose's view axis, used to re-derive the range
         extent: { min: number, max: number };
-        // where the gaussians actually are along that axis (see depthTailFractions): the empty tails
+        // per-gaussian screen position + depth, captured in the gesture's own pass: a slider push then
+        // only re-tests the windows instead of re-projecting 13M points (see RangeProjectionCache)
+        cache: RangeProjectionCache | null;
+        // where the gaussians actually are along that axis (see tailFractions): the empty tails
         // at both ends get compressed so the first push of 最近 / 最远 already changes the selection
         tails: { near: number, far: number } | null;
         // the same for 左右 / 上下: the gesture box's sparse margins get compressed too
@@ -1041,7 +1044,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     // one entry's post mask for the current range: the 2D hit mask recombined with the
     // selection the gesture started from
     const rangePost = (gesture: RangeGesture, entry: RangeEntry): IndexRanges => {
-        const mask = selectRange(entry.splat, gesture.region, rangeView(gesture, entry));
+        const view = rangeView(gesture, entry);
+        const mask = entry.cache ?
+            selectRangeFromCache(entry.splat, gesture.region, view, entry.cache) :
+            selectRange(entry.splat, gesture.region, view);
         const combine = rangeCombine[entry.opKind];
         const preMask = entry.preMask;
         return IndexRanges.fromPredicate(entry.splat.splatData.numSplats, i => combine(preMask[i] !== 0, mask[i] === 255));
@@ -1058,6 +1064,12 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             return;
         }
 
+        // 新手友好：**新的一次框选从整段穿透开始**。范围属于"你正在微调的那一次选择"，上一次留下的
+        // 最近/左右 不该悄悄把这一次裁掉（用户实测：框住塔却只选到塔身一半 —— 就是上一轮的滑块值
+        // 还在生效）。先清掉旧手势再复位，这样复位事件不会触发一次没用的重切。
+        rangeGesture = null;
+        events.fire('selection.resetRange');
+
         const pose = poseSnapshot();
         const { near, far } = getDepthSelection();
         const entries: RangeEntry[] = [];
@@ -1072,28 +1084,13 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
             const extent = poseExtent(splat, pose);
 
-            // what the drawn shape alone selects (all depths, the whole box): the reference set the
-            // two tail analyses are calibrated on, independent of any range already dialled in
-            const inBox = selectRange(splat, region, {
-                ...pose,
-                worldTransform: splat.worldTransform.data,
-                minDistance: extent.min,
-                maxDistance: extent.max,
-                minX: Math.min(bounds.x0, bounds.x1),
-                maxX: Math.max(bounds.x0, bounds.x1),
-                minY: Math.min(bounds.y0, bounds.y1),
-                maxY: Math.max(bounds.y0, bounds.y1),
-                coreMinX: Math.min(bounds.x0, bounds.x1),
-                coreMaxX: Math.max(bounds.x0, bounds.x1),
-                coreMinY: Math.min(bounds.y0, bounds.y1),
-                coreMaxY: Math.max(bounds.y0, bounds.y1)
-            });
-
-            // where the gaussians this gesture sees actually sit: the depth axis's sparse tails and
-            // the box's sparse margins get compressed so the first push of any block already changes
-            // the selection. Computed once per gesture (live re-cuts while dragging stay cheap)
-            const tails = depthTailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, extent, inBox);
-            const screenTails = screenTailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, bounds, inBox);
+            // where the gaussians this gesture sees actually sit — along the view axis and inside the
+            // box — in ONE subsampled pass: the sparse tails / margins get compressed so the first
+            // push of any block already changes the selection (see tailFractions). On a 13M-splat
+            // scene the full-scan version cost 1.5s per gesture; this is ~30ms
+            const analyzed = tailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, extent, bounds, region);
+            const tails = analyzed.depth;
+            const screenTails = { x: analyzed.x, y: analyzed.y };
 
             const distances = rangeDistances(extent.min, extent.max, near, far, tails);
             const view: SelectionRangeView = {
@@ -1113,7 +1110,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             }
 
-            const hit = selectRange(splat, region, view);
+            // the projection cache is filled by this same pass, so later slider pushes are cheap
+            const cache = createRangeCache(numSplats);
+            const hit = selectRange(splat, region, view, cache);
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
 
@@ -1122,6 +1121,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 op: new SelectRangeOp(splat, pre, post),
                 view,
                 extent,
+                cache,
                 tails,
                 screenTails,
                 preMask,
