@@ -60,12 +60,142 @@ export interface SelectionRangeView {
     coreMaxY: number;
 }
 
-/** 把 0-100% 映射到沿视轴的范围 [min, max]。 */
-export const rangeDistances = (min: number, max: number, nearPct: number, farPct: number) => {
+/**
+ * 深度轴的两条"空尾巴"。模型沿视轴的前后两端常常是**稀疏的**（远处的离群高斯、扫描噪声），而包围盒是
+ * 按最外沿算的，于是滑块有一段行程什么都没发生。实测真实扫描（93 万点，框内 37.4 万点）：
+ *
+ *   深度%  0–7.5    10      12.5–30   32.5–82.5   85     87.5    90–100
+ *   点数   2,045    11,996  ~1,000    ~5,000/档   85,934 149,895 21,523     ← 尾巴占 5.7%
+ *
+ * 把「最远」从 100% 收到 98% **一个高斯都删不掉**，一直要收到 ~90% 才有感觉，然后 90→85 一下删掉
+ * 四分之一 —— 用户的原话是"需要在首次滑动滑块就能看到选区范围的变化，尤其是最远的那个"。
+ *
+ * 所以按**本次手势框内**高斯的实际深度分布，把两端各占 `TAIL_SHARE` 比例的那一段压进行程的
+ * `TAIL_PERCENT` 里：0% 仍对应最近端、100% 仍对应最远端（**没有东西够不着**，"默认整段穿透"的语义
+ * 也不变），但第一次推杆就已经在删真实高斯了。
+ */
+export const TAIL_PERCENT = 0.5;
+export const TAIL_SHARE = 0.02;
+
+export const depthTailFractions = (
+    splat: Splat,
+    view: {
+        cameraPosition: { x: number, y: number, z: number };
+        viewDir: { x: number, y: number, z: number };
+        // the model transform: the same local->world step selectRange does (skipping it puts every
+        // gaussian outside the histogram and the tails silently fall back to linear)
+        worldTransform: ArrayLike<number>;
+    },
+    extent: { min: number, max: number },
+    inBox?: Uint8Array | null
+): { near: number, far: number } | null => {
+    const span = extent.max - extent.min;
+    const data = splat.splatData;
+    const numSplats = data.numSplats;
+    if (!data || !(span > 1e-6) || !numSplats) {
+        return null;
+    }
+
+    const x = data.getProp('x') as Float32Array;
+    const y = data.getProp('y') as Float32Array;
+    const z = data.getProp('z') as Float32Array;
+    const state = data.getProp('state') as Uint8Array;
+    if (!x || !y || !z) {
+        return null;
+    }
+
+    const world = view.worldTransform;
+    const { cameraPosition, viewDir } = view;
+
+    // one histogram pass (the same cost class as the selection pass itself)
+    const BINS = 512;
+    const bins = new Uint32Array(BINS);
+    let counted = 0;
+    for (let i = 0; i < numSplats; i++) {
+        if (inBox ? inBox[i] === 0 : (state && (state[i] & 2) !== 0)) {
+            continue;
+        }
+        const lx = x[i], ly = y[i], lz = z[i];
+        const px = world[0] * lx + world[4] * ly + world[8] * lz + world[12];
+        const py = world[1] * lx + world[5] * ly + world[9] * lz + world[13];
+        const pz = world[2] * lx + world[6] * ly + world[10] * lz + world[14];
+        const t =
+            (px - cameraPosition.x) * viewDir.x +
+            (py - cameraPosition.y) * viewDir.y +
+            (pz - cameraPosition.z) * viewDir.z;
+        const bin = Math.floor(((t - extent.min) / span) * BINS);
+        if (bin >= 0 && bin < BINS) {
+            bins[bin]++;
+            counted++;
+        }
+    }
+    if (counted < 1000) {
+        return null;
+    }
+
+    // 从两端往中间数，找到累积占比刚超过 TAIL_SHARE 的那个桶 = 尾巴的边界
+    const target = counted * TAIL_SHARE;
+    let cumulative = 0;
+    let nearBin = 0;
+    for (let b = 0; b < BINS; b++) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            nearBin = b;
+            break;
+        }
+    }
+    cumulative = 0;
+    let farBin = BINS - 1;
+    for (let b = BINS - 1; b >= 0; b--) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            farBin = b;
+            break;
+        }
+    }
+
+    const nearFraction = (nearBin + 1) / BINS;
+    const farFraction = farBin / BINS;
+    // a degenerate distribution (or one whose tails already sit at the very ends) keeps the plain
+    // linear mapping
+    if (!(nearFraction < farFraction) || (nearFraction <= 0.005 && farFraction >= 0.995)) {
+        return null;
+    }
+    return { near: nearFraction, far: farFraction };
+};
+
+/**
+ * 把 0-100% 映射到沿视轴的范围 [min, max]。
+ * `tails` 给的是内容区在 [0,1] 里的比例：0%→最近端、`TAIL_PERCENT`%→内容区近端、
+ * `100-TAIL_PERCENT`%→内容区远端、100%→最远端（尾巴压紧、其余线性）。不给就还是纯线性。
+ */
+export const rangeDistances = (
+    min: number,
+    max: number,
+    nearPct: number,
+    farPct: number,
+    tails?: { near: number, far: number } | null
+) => {
     const span = max - min;
+    const fractionOf = (pct: number) => {
+        const t = Math.max(0, Math.min(100, pct)) * 0.01;
+        if (!tails) {
+            return t;
+        }
+        const low = tails.near;
+        const high = tails.far;
+        const edge = TAIL_PERCENT * 0.01;
+        if (t <= edge) {
+            return (t / edge) * low;
+        }
+        if (t >= 1 - edge) {
+            return high + ((t - (1 - edge)) / edge) * (1 - high);
+        }
+        return low + ((t - edge) / (1 - 2 * edge)) * (high - low);
+    };
     return {
-        minDistance: min + span * (nearPct * 0.01),
-        maxDistance: min + span * (farPct * 0.01)
+        minDistance: min + span * fractionOf(nearPct),
+        maxDistance: min + span * fractionOf(farPct)
     };
 };
 

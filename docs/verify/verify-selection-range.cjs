@@ -105,6 +105,32 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             farSweep.push({ far, ...(await classify()) });
         }
 
+        // 2b. the FIRST small move must already change the selection (the user's "首次滑动就能看到
+        // 选区范围的变化"): the depth axis compresses its sparse tails (see depthTailFractions), so
+        // half a unit of slider travel now cuts real gaussians instead of nothing. Measured as a
+        // share of the through-pass so it holds on any model.
+        await setRange(0, 100);
+        await sleep(600);
+        const throughCount = (await classify()).total;
+        const firstMove = [];
+        for (const far of [99.5, 99, 98]) {
+            await setRange(0, far);
+            await sleep(600);
+            const c = (await classify()).total;
+            firstMove.push({ far, selected: c, removed: throughCount - c });
+        }
+        await setRange(0, 100);
+        await sleep(600);
+        const firstMoveNear = [];
+        for (const near of [0.5, 1]) {
+            await setRange(near, 100);
+            await sleep(600);
+            const c = (await classify()).total;
+            firstMoveNear.push({ near, selected: c, removed: throughCount - c });
+        }
+        await setRange(0, 100);
+        await sleep(600);
+
         // 3. live narrowing of 最近 with 最远 back at 100
         const nearSweep = [];
         for (const near of [0, 20, 40, 60, 80]) {
@@ -243,6 +269,21 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 name: 'a screen gesture selects through the whole model by default',
                 pass: through.front > 0 && through.back > 0,
                 detail: `rect over both walls selected ${through.total} splats: ${through.front} on the front wall, ${through.back} behind it`
+            },
+            {
+                name: 'the first small move of 最远 already cuts gaussians (no dead head of the track)',
+                pass: throughCount > 0 && firstMove.every(s => s.removed > 0),
+                detail: `through-pass ${throughCount}; far 99.5/99/98 removes ${firstMove.map(s => s.removed).join(' / ')} (${firstMove.map(s => ((s.removed / Math.max(throughCount, 1)) * 100).toFixed(2) + '%').join(' / ')})`
+            },
+            {
+                name: 'the first small move of 最近 already cuts gaussians too',
+                pass: throughCount > 0 && firstMoveNear.every(s => s.removed > 0),
+                detail: `near 0.5/1 removes ${firstMoveNear.map(s => s.removed).join(' / ')} (${firstMoveNear.map(s => ((s.removed / Math.max(throughCount, 1)) * 100).toFixed(2) + '%').join(' / ')})`
+            },
+            {
+                name: 'the depth ends stay reachable (0/100 is still the whole model)',
+                pass: throughCount > 0 && farSweep[0].total === throughCount && afterReset.total === throughCount,
+                detail: `through-pass ${throughCount}, far 100 -> ${farSweep[0].total}, after reset -> ${afterReset.total}`
             },
             {
                 name: 'dragging 最远 in cuts the far side monotonically',

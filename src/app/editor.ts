@@ -16,7 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
-import { SelectionRangeRegion, SelectionRangeView, selectRange, rangeDistances, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { SelectionRangeRegion, SelectionRangeView, selectRange, depthTailFractions, rangeDistances, screenWindow, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State } from '../splat/splat-state';
@@ -950,6 +950,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         view: SelectionRangeView;
         // the model's depth extent along that pose's view axis, used to re-derive the range
         extent: { min: number, max: number };
+        // where the gaussians actually are along that axis (see depthTailFractions): the empty tails
+        // at both ends get compressed so the first push of 最近 / 最远 already changes the selection
+        tails: { near: number, far: number } | null;
         // selection bits as they were before the gesture, locked rows excluded (that is
         // SelectOp's notion of valid): add / remove / intersect recombine off this
         preMask: Uint8Array;
@@ -1024,7 +1027,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const { near, far } = getDepthSelection();
         return {
             ...entry.view,
-            ...rangeDistances(entry.extent.min, entry.extent.max, near, far),
+            ...rangeDistances(entry.extent.min, entry.extent.max, near, far, entry.tails),
             ...screenWindow(gesture.bounds, getScreenSelection()),
             ...coreScreenWindow(gesture.bounds)
         };
@@ -1083,7 +1086,13 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             }
 
-            const hit = selectRange(splat, region, view);
+            // where the gaussians this gesture actually sees sit along the view axis: the depth
+            // axis's empty tails get compressed so the first push of 最近 / 最远 already changes the
+            // selection. Computed once per gesture (the live re-cuts while dragging stay cheap)
+            const inBox = selectRange(splat, region, { ...view, minDistance: extent.min, maxDistance: extent.max });
+            const tails = depthTailFractions(splat, view, extent, inBox);
+
+            const hit = selectRange(splat, region, { ...view, ...rangeDistances(extent.min, extent.max, near, far, tails) });
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
 
@@ -1092,6 +1101,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 op: new SelectRangeOp(splat, pre, post),
                 view,
                 extent,
+                tails,
                 preMask,
                 opKind
             });
