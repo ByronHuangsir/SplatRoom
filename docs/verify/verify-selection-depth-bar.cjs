@@ -183,6 +183,70 @@ const valueOfFraction = (t) => {
         const stepTravelThick = await stepTravel(30, 70);
         const stepTravelThin = await stepTravel(49.9, 50.1);
 
+        // --- the drag itself: constant sensitivity, the handle stays under the pointer, the rail pans
+        // for reach and re-fits on release (3.12.0: 用户要"简单的移动滑块、快速而精确") ---
+        const dragTrace = async (axis, handle, steps, stepPx) => {
+            const geometry = await page.evaluate((selector, a, h) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
+                const track = row.querySelector('.select-range-track');
+                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
+                const t = track.getBoundingClientRect();
+                const b = el.getBoundingClientRect();
+                return { fromX: b.left + b.width / 2, y: t.top + t.height / 2, trackLeft: t.left, trackWidth: t.width };
+            }, BAR, axis, handle);
+            const sample = () => page.evaluate((selector, a, h) => {
+                const row = document.querySelector(`${selector} .select-range-row[data-axis="${a}"]`);
+                const track = row.querySelector('.select-range-track');
+                const el = track.querySelector(`.select-range-handle[data-handle="${h}"]`);
+                const t = track.getBoundingClientRect();
+                const b = el.getBoundingClientRect();
+                return {
+                    value: window.scene.events.invoke('selection.screenRange').x[h],
+                    handleFraction: +(((b.left + b.width / 2) - t.left) / t.width).toFixed(3),
+                    gap: Math.round(row.querySelector('.select-range-core').getBoundingClientRect().width)
+                };
+            }, BAR, axis, handle);
+            await page.mouse.move(geometry.fromX, geometry.y);
+            await page.mouse.down();
+            const trace = [{ px: 0, ...(await sample()) }];
+            for (let i = 1; i <= steps; i++) {
+                await page.mouse.move(geometry.fromX + i * stepPx, geometry.y, { steps: 1 });
+                await sleep(60);
+                trace.push({ px: i * stepPx, ...(await sample()) });
+            }
+            await page.mouse.up();
+            await sleep(350);
+            const released = await sample();
+            return { trace, released };
+        };
+
+        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        await sleep(350);
+        const steady = await dragTrace('x', 'low', 8, 22);
+        const deltas = steady.trace.slice(1).map((s, i) => +(s.value - steady.trace[i].value).toFixed(2));
+        const sensitivity = deltas.filter(d => d > 0);
+        const steadyRatio = Math.max(...sensitivity) / Math.max(0.01, Math.min(...sensitivity));
+        const maxDrift = Math.max(...steady.trace.map(s => Math.abs(s.handleFraction - (s.px / 440 + steady.trace[0].handleFraction))));
+
+        // the pan: from a hair-thin slab the frozen scale is tight, but one drag still reaches far
+        await setRange({ x: { low: 49.9, high: 50.1, outerLow: 49.9, outerHigh: 50.1 } });
+        await sleep(350);
+        const panned = await dragTrace('x', 'low', 10, 60);
+        const panValues = panned.trace.map(s => s.value);
+        const panMonotone = panValues.every((v, i) => i === 0 || v >= panValues[i - 1]);
+        const panOnRail = panned.trace.every(s => s.handleFraction >= -0.02 && s.handleFraction <= 1.02);
+        const panGain = +(panValues[panValues.length - 1] - panValues[0]).toFixed(1);
+        const panRelift = panned.released.gap;
+
+        // a full collapse is impossible: the core keeps one step of thickness and the blocks stay apart
+        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        await sleep(350);
+        const collapsed = await dragTrace('x', 'low', 12, 40);
+        const collapsedRange = await ranges();
+        const collapsedState = await barState();
+        const collapsedGap = collapsedState.layout[1].core[1];
+        const collapsedCore = +(collapsedRange.screen.x.high - collapsedRange.screen.x.low).toFixed(1);
+
         // --- structure / interaction ---
         await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
         await sleep(300);
@@ -279,6 +343,31 @@ const valueOfFraction = (t) => {
                     `core gap ${wideGap}px -> ${narrowGap}px -> ${thinGap}px -> ${finestGap}px (0.1-wide core)`
             },
             {
+                name: 'a drag has CONSTANT sensitivity: the same 22px always moves the same amount',
+                pass: sensitivity.length >= 7 && steadyRatio < 1.15,
+                detail: `8 drag steps of 22px -> ${deltas.join(', ')} (max/min ${steadyRatio.toFixed(3)})`
+            },
+            {
+                name: 'the dragged block never drifts away from the pointer (1:1 tracking)',
+                pass: maxDrift < 0.02,
+                detail: `worst handle-vs-pointer offset ${(maxDrift * 440).toFixed(1)}px over 176px of travel`
+            },
+            {
+                name: 'the rail pans to give reach: one drag keeps going without re-grabbing',
+                pass: panMonotone && panOnRail && panGain >= 0.8,
+                detail: `a tight (0.2-wide) core still moved ${panGain} units over 600px of drag; values ${panValues.join(' ')}; handle stays at ${panned.trace.map(s => s.handleFraction).slice(-3).join('/')} of the rail`
+            },
+            {
+                name: 'releasing re-fits the rail so a thin slab gets its working room back',
+                pass: panRelift >= 120 && panned.released.gap >= 120,
+                detail: `gap during the drag ${panned.trace[0].gap}px -> after release ${panRelift}px`
+            },
+            {
+                name: 'the core can never collapse: pushing one block onto the other keeps a step',
+                pass: collapsedCore >= 0.1 && collapsedGap >= 120,
+                detail: `dragging 480px into the other block ends at thickness ${collapsedCore} with a ${collapsedGap}px gap`
+            },
+            {
                 name: 'the thinner the slab, the fewer 0.1 steps a fixed 40px drag buys',
                 pass: stepTravelThick && stepTravelThin && stepTravelThick.steps > 20 &&
                     stepTravelThin.steps > 0 && stepTravelThin.steps < stepTravelThick.steps / 10,
@@ -343,6 +432,7 @@ const valueOfFraction = (t) => {
             backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
             panel: { size: rect.size, axes: rect.axes, tracks: rows.map(r => r.track), numericFields: rect.numericFields },
             adaptiveScale: { wideDelta: +wideDelta.toFixed(1), narrowDelta: +narrowDelta.toFixed(1), gaps: [wideGap, narrowGap, thinGap, finestGap], blockWidths: [narrowBlockWidth, thinBlockWidth], steps40px: [stepTravelThick && stepTravelThick.steps, stepTravelThin && stepTravelThin.steps] },
+            drag: { deltas, steadyRatio: +steadyRatio.toFixed(3), maxDriftPx: +(maxDrift * 440).toFixed(1), panGain, panRefitGap: panRelift, collapsedCore, collapsedGap },
             reset: { depth: reset.depth, x: reset.screen.x },
             afterTrim: afterTrim.screen.x,
             afterExpand: afterExpand.screen.x,

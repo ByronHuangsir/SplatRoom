@@ -65,8 +65,14 @@ const store = (keys: { low: string, high: string, outerLow: string, outerHigh: s
     } catch { /* storage unavailable */ }
 };
 
-/** 把四个值夹进值域并维持 outerLow ≤ low ≤ high ≤ outerHigh。步长 0.1（见 range-slider 的非线性映射）。 */
+/** 把四个值夹进值域并维持 outerLow ≤ low ≤ high ≤ outerHigh。步长 0.1（见 range-slider 的拖动映射）。 */
 const round1 = (value: number) => Math.round(value * 10) / 10;
+
+/**
+ * 芯的最小厚度（正好一个步长）。没有它，两个值可以压成 0 厚：两个方块完全重叠、只有上面那一个
+ * 能点到，而且拖不开（实测拖 80px 只是把整块挪了 0.1）。留一个步长后，"两块之间"永远有空间。
+ */
+export const MIN_THICKNESS = 0.1;
 
 const normalize = (axis: Axis, limits: Limits): Axis => {
     const pick = (value: number, fallback: number) => {
@@ -83,6 +89,17 @@ const normalize = (axis: Axis, limits: Limits): Axis => {
     next.high = Math.min(next.high, next.outerHigh);
     next.outerLow = Math.min(next.outerLow, next.low);
     next.outerHigh = Math.max(next.outerHigh, next.high);
+    // 有效窗口本身不能比一个步长还窄，否则芯也给不出厚度
+    if (next.outerHigh - next.outerLow < MIN_THICKNESS) {
+        const centre = (next.outerLow + next.outerHigh) / 2;
+        next.outerLow = round1(Math.max(limits.min, Math.min(limits.max, centre - MIN_THICKNESS / 2)));
+        next.outerHigh = round1(Math.min(limits.max, next.outerLow + MIN_THICKNESS));
+    }
+    if (next.high - next.low < MIN_THICKNESS) {
+        const centre = (next.low + next.high) / 2;
+        next.low = round1(Math.max(next.outerLow, Math.min(next.outerHigh, centre - MIN_THICKNESS / 2)));
+        next.high = round1(Math.min(next.outerHigh, next.low + MIN_THICKNESS));
+    }
     return next;
 };
 

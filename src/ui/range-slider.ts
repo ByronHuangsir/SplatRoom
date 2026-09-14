@@ -1,6 +1,7 @@
 import { Container, Label } from '@playcanvas/pcui';
 
 import { i18n } from './localization';
+import { MIN_THICKNESS } from '../core/selection-flags';
 
 /**
  * 选区范围的一行（一个轴）：一条细轨 + 两端各一个**固定尺寸的方块滑块**（块里写轴标签），
@@ -91,14 +92,15 @@ class RangeSlider {
 
     private dragging: HandleName | null = null;
 
-    private grabOffsetValue = 0;
+    // 拖动期间**整张映射表冻结**：pointerdown 那一刻的窗口（比例尺 + 原点）锁死，值严格按指针位移
+    // 线性走（1px = span/轨道 宽度的值，全程不变）。以前窗口会跟着值实时收缩，于是拖到一半灵敏度
+    // 突然变细、滑块开始落后于指针（实测落后 12px、灵敏度从每 22px 10 个单位掉到 1.8）——
+    // 用户的原话是"非线性变化的尺度……很麻烦，而且不直观"。冻结后拖动永远跟手。
+    private dragView: { min: number, max: number } | null = null;
 
-    // while a drag is in flight the window's CENTRE is frozen at the grab-time midpoint: letting it
-    // follow the dragged value is positive feedback (dragging right pans right, which pushes the
-    // value further right - a 22px drag ran away by 21 units in testing). The SPAN still follows the
-    // live values, which is negative feedback (narrowing shrinks the span, which slows the value
-    // change) and is what keeps the two blocks ~1/ZOOM of the track apart while dragging.
-    private dragCenter: number | null = null;
+    private dragGrabX = 0;
+
+    private dragGrabValue = 0;
 
     // the visible value window (linear mapping inside it)
     private view = { min: 0, max: 100 };
@@ -187,8 +189,11 @@ class RangeSlider {
             e.preventDefault();
             e.stopPropagation();
             this.dragging = name;
-            this.dragCenter = (this._value.low + this._value.high) / 2;
-            this.grabOffsetValue = this.valueAt(e.clientX) - this._value[name];
+            // the scale you see when you grab is the scale you get for the whole drag
+            this.computeView();
+            this.dragView = { ...this.view };
+            this.dragGrabX = e.clientX;
+            this.dragGrabValue = this._value[name];
             track.setPointerCapture(e.pointerId);
             this.handles[name].classList.add('dragging');
             this.blocks.low.classList[name === 'low' ? 'add' : 'remove']('dragging');
@@ -205,19 +210,31 @@ class RangeSlider {
         this.handles.outerHigh.addEventListener('pointerdown', beginDrag('outerHigh'));
 
         track.addEventListener('pointermove', (e: PointerEvent) => {
-            if (this.dragging) {
-                const value = this.valueAt(e.clientX) - this.grabOffsetValue;
-                this.setHandle(this.dragging, value);
-                this.showReadout(this.dragging, this._value[this.dragging]);
+            if (!this.dragging || !this.dragView) {
+                return;
             }
+            const rect = this.trackRect();
+            if (rect.width <= 0) {
+                return;
+            }
+            const span = this.dragView.max - this.dragView.min;
+            // 1:1 with the pointer and a constant span -> the handle never drifts away from the finger
+            const value = this.dragGrabValue + ((e.clientX - this.dragGrabX) / rect.width) * span;
+            this.setHandle(this.dragging, value);
+            // 贴到轨道两端就平移窗口（用落定后的值算，否则 0.1 的吸附会让柄来回跳）
+            if (this.panForValue(this._value[this.dragging])) {
+                this.render();
+            }
+            this.showReadout(this.dragging, this._value[this.dragging]);
         });
 
         const endDrag = (e: PointerEvent) => {
             if (this.dragging) {
                 const name = this.dragging;
                 this.dragging = null;
-                // the window re-centres on the settled values (the drag froze it)
-                this.dragCenter = null;
+                // unfreeze: the rail re-fits the settled selection (the two blocks always come back to
+                // at least 1/ZOOM of the track apart), so a very thin slab gets its fine scale back
+                this.dragView = null;
                 this.render();
                 this.handles[name].classList.remove('dragging');
                 this.blocks.low.classList.remove('dragging');
@@ -270,7 +287,7 @@ class RangeSlider {
 
     /**
      * 自适应窗口：至少盖住四个值（含 25% 余量），且让两个方块之间至少占轨道的 1 个 ZOOM，
-     * 以两个方块的中点为中点，最后夹回值域。
+     * 以两个方块的中点为中点，最后夹回值域。**只在不拖动时算** —— 拖动期间用冻结的窗口。
      */
     private computeView() {
         const { low, high, outerLow, outerHigh } = this._value;
@@ -278,7 +295,7 @@ class RangeSlider {
         const allMin = Math.min(low, outerLow);
         const allMax = Math.max(high, outerHigh);
         const innerSpan = high - low;
-        const center = this.dragCenter ?? (low + high) / 2;
+        const center = (low + high) / 2;
 
         // padding in value units that corresponds to the block footprint on screen
         const padUnits = (this.blockWidth() * 0.75 / this.trackWidth()) * Math.max(innerSpan, MIN_SPAN);
@@ -317,22 +334,54 @@ class RangeSlider {
         return (value - this.view.min) / span;
     }
 
+    /**
+     * 拖动时如果被拖的柄贴到轨道两端，就**平移**窗口（比例尺一点不动）把它留在轨道里，
+     * 于是"一个方向一直拖"永远够得着整个值域，不用松手重抓。平移只改原点、不改 span，
+     * 而且值只由指针位移决定，所以不会形成反馈回路。
+     */
+    private panForValue(value: number) {
+        if (!this.dragView) {
+            return false;
+        }
+        const span = this.dragView.max - this.dragView.min;
+        if (span <= 0) {
+            return false;
+        }
+        const fraction = (value - this.dragView.min) / span;
+        const EDGE = 0.06;
+        let shift = 0;
+        if (fraction < EDGE) {
+            // 新原点 = value - EDGE*span  => 位移 = (fraction - EDGE)*span（负：窗口往左让）
+            shift = (fraction - EDGE) * span;
+        } else if (fraction > 1 - EDGE) {
+            shift = (fraction - (1 - EDGE)) * span;
+        }
+        if (shift === 0) {
+            return false;
+        }
+        let min = this.dragView.min + shift;
+        let max = min + span;
+        if (min < this.min) {
+            min = this.min;
+            max = min + span;
+        }
+        if (max > this.max) {
+            max = this.max;
+            min = max - span;
+        }
+        this.dragView = { min, max };
+        return true;
+    }
+
     /** 轨道位置（0..1）-> 值。 */
     private valueOf(fraction: number) {
         return this.view.min + (this.view.max - this.view.min) * fraction;
     }
 
-    private valueAt(clientX: number) {
-        const rect = this.trackRect();
-        if (rect.width <= 0) {
-            return this.min;
-        }
-        return this.valueOf((clientX - rect.left) / rect.width);
-    }
-
     /**
      * 移动一个柄，维持链式约束 `outerLow ≤ low ≤ high ≤ outerHigh`：
-     *   - 内柄（方块）：外柄跟着走（扩边量保持）→ 往里拖就是收边；
+     *   - 内柄（方块）：外柄跟着走（扩边量保持）→ 往里拖就是收边；顶到对面就**推着走**（保持一个步长的厚
+     *     度，两块永远不重叠 —— 重叠了就只有上面那一个点得到，也拖不开）；
      *   - 外柄（细柄）：往外拖扩边；越过内柄先把扩边收到 0，再顶着内柄走。
      */
     private setHandle(name: HandleName, rawValue: number) {
@@ -345,16 +394,16 @@ class RangeSlider {
 
         if (name === 'low') {
             next.low = value;
-            if (next.low > next.high) {
-                next.high = next.low;
-                next.outerHigh = next.high + marginHigh;
+            if (next.low > next.high - MIN_THICKNESS) {
+                next.high = Math.min(limitMax, next.low + MIN_THICKNESS);
+                next.outerHigh = Math.max(next.outerHigh, next.high + marginHigh);
             }
             next.outerLow = next.low - marginLow;
         } else if (name === 'high') {
             next.high = value;
-            if (next.high < next.low) {
-                next.low = next.high;
-                next.outerLow = next.low - marginLow;
+            if (next.high < next.low + MIN_THICKNESS) {
+                next.low = Math.max(limitMin, next.high - MIN_THICKNESS);
+                next.outerLow = Math.min(next.outerLow, next.low - marginLow);
             }
             next.outerHigh = next.high + marginHigh;
         } else if (name === 'outerLow') {
@@ -363,8 +412,8 @@ class RangeSlider {
             } else {
                 next.low = value;
                 next.outerLow = value;
-                if (next.low > next.high) {
-                    next.high = next.low;
+                if (next.low > next.high - MIN_THICKNESS) {
+                    next.high = Math.min(limitMax, next.low + MIN_THICKNESS);
                     next.outerHigh = Math.max(next.outerHigh, next.high);
                 }
             }
@@ -375,8 +424,8 @@ class RangeSlider {
             } else {
                 next.high = value;
                 next.outerHigh = value;
-                if (next.high < next.low) {
-                    next.low = next.high;
+                if (next.high < next.low + MIN_THICKNESS) {
+                    next.low = Math.max(limitMin, next.high - MIN_THICKNESS);
                     next.outerLow = Math.min(next.outerLow, next.low);
                 }
             }
@@ -405,6 +454,18 @@ class RangeSlider {
         next.outerLow = Math.min(next.outerLow, next.low);
         next.outerHigh = Math.max(next.outerHigh, next.high);
 
+        // 最后一道保险：芯和有效窗口都不许压到比一个步长还薄（否则两块完全重叠、拖不开）
+        if (next.outerHigh - next.outerLow < MIN_THICKNESS) {
+            const centre = (next.outerLow + next.outerHigh) / 2;
+            next.outerLow = clamp(snap(centre - MIN_THICKNESS / 2), limitMin, limitMax);
+            next.outerHigh = Math.min(limitMax, snap(next.outerLow + MIN_THICKNESS));
+        }
+        if (next.high - next.low < MIN_THICKNESS) {
+            const centre = (next.low + next.high) / 2;
+            next.low = clamp(snap(centre - MIN_THICKNESS / 2), next.outerLow, next.outerHigh);
+            next.high = Math.min(next.outerHigh, snap(next.low + MIN_THICKNESS));
+        }
+
         this._value = next;
         this.render();
         if (notify) {
@@ -413,7 +474,12 @@ class RangeSlider {
     }
 
     private render() {
-        this.computeView();
+        if (this.dragView) {
+            // frozen for the whole drag: nothing about the scale moves under the user's hand
+            this.view = { ...this.dragView };
+        } else {
+            this.computeView();
+        }
 
         const { low, high, outerLow, outerHigh } = this._value;
         const width = this.trackWidth();
