@@ -133,8 +133,8 @@
         }
     }
 
-    // the selected span (inner edge -> inner edge)
-    .select-range-fill {
+    // selection (inner edge -> inner edge) and the two 扩边 bands (outer bar -> its block)
+    .select-range-band {
         position: absolute;
         top: 50%;
         height: 4px;
@@ -144,8 +144,18 @@
         pointer-events: none;
     }
 
-    // a labelled rectangular block: the outer edge is how far 扩边 reaches, the inner edge is
-    // the selection bound, so the block's width literally shows how much has been eaten
+    .select-range-margin {
+        height: 2px;
+        margin-top: -1px;
+        opacity: 0.5;
+        visibility: hidden;
+
+        &.visible {
+            visibility: visible;
+        }
+    }
+
+    // a FIXED-SIZE labelled block: the handle itself never changes shape, only its position
     .select-range-block {
         position: absolute;
         top: 50%;
@@ -155,13 +165,12 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        overflow: hidden;
         border: 1px solid $bcg-light;
         border-radius: 4px;
         background-color: $bcg-lighter;
         cursor: ew-resize;
         touch-action: none;
-        z-index: 1;
+        z-index: 2;
 
         &:hover,
         &.dragging {
@@ -179,19 +188,26 @@
         white-space: nowrap;
     }
 
-    // the grips are invisible halves of a block: the outer half drives 扩边, the inner half the
-    // selection bound. Keeping them as separate zones is what stops two squeezed blocks from
-    // fighting over the same pixels.
-    .select-range-handle {
+    // the outer (扩边) bar: 8px wide, never resizes
+    // two classes on one element: this has to beat the base .select-range-handle rule below,
+    // which is pointer-events: none (its grip sits under the block)
+    .select-range-handle.select-range-handle-outer {
         position: absolute;
-        top: 0px;
-        bottom: 0px;
-        z-index: 2;
+        pointer-events: auto;
+        top: 50%;
+        box-sizing: border-box;
+        height: 16px;
+        margin-top: -8px;
+        border: 1px solid $bcg-primary;
+        border-radius: 3px;
+        background-color: $clr-default;
         cursor: ew-resize;
         touch-action: none;
+        z-index: 3;
 
+        &:hover,
         &.dragging {
-            cursor: grabbing;
+            background-color: $clr-hilight;
         }
 
         &:focus-visible {
@@ -200,6 +216,19 @@
         }
     }
 
+    // the inner grips sit exactly under the blocks (the block is the grab surface; these are the
+    // keyboard/automation targets and carry data-handle)
+    .select-range-handle {
+        position: absolute;
+        top: 0px;
+        bottom: 0px;
+        z-index: 1;
+        pointer-events: none;
+
+        &.dragging {
+            pointer-events: none;
+        }
+    }
     // the value floats next to the block while it is dragged (no numeric fields in a row)
     .select-range-readout {
         position: absolute;

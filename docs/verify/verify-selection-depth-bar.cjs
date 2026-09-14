@@ -77,7 +77,11 @@ const valueOfFraction = (t) => {
                         track: Math.round(track.width),
                         blocks,
                         grips,
-                        core: box(r.querySelector('.select-range-core'))
+                        core: box(r.querySelector('.select-range-core')),
+                        margins: Array.from(r.querySelectorAll('.select-range-margin')).map(m => ({
+                            box: box(m),
+                            visible: getComputedStyle(m).visibility === 'visible'
+                        }))
                     };
                 }),
                 reset: !!bar.querySelector('.select-toolbar-button'),
@@ -133,21 +137,51 @@ const valueOfFraction = (t) => {
             await sleep(200);
         };
 
-        // --- the non-linear mapping: the same 20px drag must move the value far less near the
-        // centre of the track than near its end ---
-        await setRange({ x: { low: 50, high: 100, outerLow: 50, outerHigh: 100 } });
-        await sleep(300);
-        const centreBefore = (await ranges()).screen.x.low;
+        // --- the adaptive scale: the closer the two blocks get, the finer the adjustment, and the
+        // pixel gap between them never collapses (that is "留够操作的空间") ---
+        await setRange({ x: { low: 0, high: 100, outerLow: 0, outerHigh: 100 } });
+        await sleep(350);
+        const wideGap = (await barState()).layout[1].core[1];
+        const wideBefore = (await ranges()).screen.x.low;
         await dragGripPixels('x', 'low', 20);
-        const centreAfter = (await ranges()).screen.x.low;
-        await setRange({ x: { low: -40, high: 100, outerLow: -40, outerHigh: 100 } });
-        await sleep(300);
-        const endBefore = (await ranges()).screen.x.low;
+        const wideAfter = (await ranges()).screen.x.low;
+        const wideDelta = wideAfter - wideBefore;
+
+        await setRange({ x: { low: 49, high: 51, outerLow: 49, outerHigh: 51 } });
+        await sleep(350);
+        const narrowState = await barState();
+        const narrowGap = narrowState.layout[1].core[1];
+        const narrowBlockWidth = narrowState.layout[1].blocks.find(b => b.side === 'low').box[1];
+        const narrowBefore = (await ranges()).screen.x.low;
         await dragGripPixels('x', 'low', 20);
-        const endAfter = (await ranges()).screen.x.low;
-        const centreDelta = centreAfter - centreBefore;
-        const endDelta = endAfter - endBefore;
-        const expectedCentre = valueOfFraction(0.5 + 20 / 880) - valueOfFraction(0.5);
+        const narrowAfter = (await ranges()).screen.x.low;
+        const narrowDelta = narrowAfter - narrowBefore;
+
+        // an extremely thin slab still has a comfortable gap
+        await setRange({ x: { low: 49.9, high: 50.1, outerLow: 49.9, outerHigh: 50.1 } });
+        await sleep(350);
+        const thinState = await barState();
+        const thinGap = thinState.layout[1].core[1];
+        const thinBlockWidth = thinState.layout[1].blocks.find(b => b.side === 'low').box[1];
+
+        // the finest legal thickness (one STEP) must still get the whole track/ZOOM gap, so the
+        // invariant reads: no matter how thin the slab gets, the two blocks keep the same room
+        await setRange({ x: { low: 50, high: 50.1, outerLow: 50, outerHigh: 50.1 } });
+        await sleep(350);
+        const finestState = await barState();
+        const finestGap = finestState.layout[1].core[1];
+
+        // and the drag really is finer the thinner the slab: how much does a fixed 40px buy?
+        const stepTravel = async (low, high) => {
+            await setRange({ x: { low, high, outerLow: low, outerHigh: high } });
+            await sleep(350);
+            const before = (await ranges()).screen.x.low;
+            await dragGripPixels('x', 'low', 40);
+            const now = (await ranges()).screen.x.low;
+            return { steps: +((now - before) / 0.1).toFixed(2) };
+        };
+        const stepTravelThick = await stepTravel(30, 70);
+        const stepTravelThin = await stepTravel(49.9, 50.1);
 
         // --- structure / interaction ---
         await page.evaluate(() => window.scene.events.fire('selection.resetRange'));
@@ -210,13 +244,14 @@ const valueOfFraction = (t) => {
                 detail: `axes ${JSON.stringify(rect.axes)}, blocks ${JSON.stringify(rect.blocks)}, grips ${JSON.stringify(rect.grips)}, label inside every block ${rows.every(r => r.blocks.every(b => b.labelInside))}`
             },
             {
-                name: 'the blocks sit at the ends of the rail with the selection band between them',
+                name: 'the blocks are fixed-size handles centred on their bounds, band between them',
                 pass: rows.every((r) => {
-                    const low = blockOf({ layout: [null, r] }, 'low');
+                    const low = r.blocks.find(b => b.side === 'low');
                     const high = r.blocks.find(b => b.side === 'high');
-                    const lowInner = low.box[0] + low.box[1];
-                    return low.box[0] > 0 && high.box[0] > lowInner &&
-                        near(r.core[0], lowInner, 2) && near(r.core[1], high.box[0] - lowInner, 2);
+                    const lowCentre = low.box[0] + low.box[1] / 2;
+                    const highCentre = high.box[0] + high.box[1] / 2;
+                    return low.box[1] === high.box[1] && highCentre > lowCentre &&
+                        near(r.core[0], lowCentre, 2) && near(r.core[1], highCentre - lowCentre, 2);
                 }),
                 detail: rows.map((r) => {
                     const low = r.blocks.find(b => b.side === 'low');
@@ -236,10 +271,20 @@ const valueOfFraction = (t) => {
                 detail: `numeric inputs per row ${JSON.stringify(rect.numericFields)}`
             },
             {
-                name: 'the mapping is NON-linear: the same drag moves far less near the centre',
-                pass: centreDelta > 0 && endDelta > 0 && centreDelta < endDelta * 0.5 &&
-                    near(centreDelta, expectedCentre, 2) && endDelta > 5,
-                detail: `20px drag: centre +${centreDelta.toFixed(1)} (spec ${expectedCentre.toFixed(1)}), near the end +${endDelta.toFixed(1)} (${(endDelta / Math.max(centreDelta, 0.01)).toFixed(1)}x faster)`
+                name: 'the scale adapts: the closer the blocks, the finer the same 20px drag',
+                pass: wideDelta > 5 && narrowDelta > 0 && narrowDelta < wideDelta * 0.5 &&
+                    wideGap > 150 && narrowGap >= 120 && thinGap >= 120 && finestGap >= 120,
+                detail: `20px drag moves the bound by ${wideDelta.toFixed(1)} with a 100-wide core, ` +
+                    `${narrowDelta.toFixed(1)} with a 2-wide core (${(wideDelta / Math.max(narrowDelta, 0.01)).toFixed(1)}x finer); ` +
+                    `core gap ${wideGap}px -> ${narrowGap}px -> ${thinGap}px -> ${finestGap}px (0.1-wide core)`
+            },
+            {
+                name: 'the thinner the slab, the fewer 0.1 steps a fixed 40px drag buys',
+                pass: stepTravelThick && stepTravelThin && stepTravelThick.steps > 20 &&
+                    stepTravelThin.steps > 0 && stepTravelThin.steps < stepTravelThick.steps / 10,
+                detail: `40px of drag = ${stepTravelThick ? stepTravelThick.steps : '?'} x 0.1 with a 40-wide core ` +
+                    `vs ${stepTravelThin ? stepTravelThin.steps : '?'} x 0.1 with a 0.2-wide core ` +
+                    `(${stepTravelThick && stepTravelThin ? (stepTravelThick.steps / stepTravelThin.steps).toFixed(0) : '?'}x finer)`
             },
             {
                 name: 'all three axes start at the full through-pass with no expansion',
@@ -249,16 +294,18 @@ const valueOfFraction = (t) => {
                 detail: JSON.stringify(reset)
             },
             {
-                name: 'dragging the inner grip trims the selection and keeps the block width',
+                name: 'dragging the block trims the selection and keeps the block size',
                 pass: afterTrim.screen.x.low > 0 && afterTrim.screen.x.outerLow === afterTrim.screen.x.low &&
-                    near(blockOf(afterTrimBar, 'low').box[1], blockOf(resetBar, 'low').box[1], 4),
+                    blockOf(afterTrimBar, 'low').box[1] === blockOf(resetBar, 'low').box[1] &&
+                    blockOf(afterTrimBar, 'low').box[1] === narrowBlockWidth && thinBlockWidth === narrowBlockWidth,
                 detail: `x ${JSON.stringify(afterTrim.screen.x)}; block width ${blockOf(resetBar, 'low').box[1]} -> ${blockOf(afterTrimBar, 'low').box[1]}`
             },
             {
-                name: 'dragging the outer grip widens the block (扩边 is visible)',
+                name: '扩边 shows up as a band on the rail, NOT by resizing the block',
                 pass: afterExpand.screen.x.outerLow < 0 &&
-                    blockOf(afterExpandBar, 'low').box[1] > blockOf(resetBar, 'low').box[1] + 20,
-                detail: `x ${JSON.stringify(afterExpand.screen.x)}; block width ${blockOf(resetBar, 'low').box[1]} -> ${blockOf(afterExpandBar, 'low').box[1]}`
+                    afterExpandBar.layout[1].margins[0].visible && afterExpandBar.layout[1].margins[0].box[1] > 20 &&
+                    blockOf(afterExpandBar, 'low').box[1] === blockOf(resetBar, 'low').box[1],
+                detail: `x ${JSON.stringify(afterExpand.screen.x)}; low margin band ${JSON.stringify(afterExpandBar.layout[1].margins[0])}; block width ${blockOf(resetBar, 'low').box[1]} -> ${blockOf(afterExpandBar, 'low').box[1]} (unchanged)`
             },
             {
                 name: 'dragging the 最远 inner grip trims the far depth bound',
@@ -295,7 +342,7 @@ const valueOfFraction = (t) => {
             url: URL,
             backend: await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2')),
             panel: { size: rect.size, axes: rect.axes, tracks: rows.map(r => r.track), numericFields: rect.numericFields },
-            fisheye: { centreDelta: +centreDelta.toFixed(2), endDelta: +endDelta.toFixed(2), expectedCentre: +expectedCentre.toFixed(2) },
+            adaptiveScale: { wideDelta: +wideDelta.toFixed(1), narrowDelta: +narrowDelta.toFixed(1), gaps: [wideGap, narrowGap, thinGap, finestGap], blockWidths: [narrowBlockWidth, thinBlockWidth], steps40px: [stepTravelThick && stepTravelThick.steps, stepTravelThin && stepTravelThin.steps] },
             reset: { depth: reset.depth, x: reset.screen.x },
             afterTrim: afterTrim.screen.x,
             afterExpand: afterExpand.screen.x,

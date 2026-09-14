@@ -3,32 +3,32 @@ import { Container, Label } from '@playcanvas/pcui';
 import { i18n } from './localization';
 
 /**
- * 四值 range 控件（外柄 / 内柄一对），视觉按设计稿 `选择范围设计.png` 来：
+ * 选区范围的一行（一个轴）：一条细轨 + 两端各一个**固定尺寸的方块滑块**（块里写轴标签），
+ * 中间橙色带是选中的部分。方块外侧各有一条细柄 = 扩边（外柄），它与方块之间的暗橙带 =
+ * 扩边吃进去的部分。
  *
- *   一条细轨，两端各一个**长方形块**，块里写着轴标签（最近 / 最远、左 / 右、上 / 下）；
- *   两个块的内边之间（橙色）是选中的部分。
+ *   ▐█████████▌  ← 外柄（细柄，扩边到哪）
+ *     ┌──────┐
+ *   ══╡ 最近 ╞══════════ 选区 ══════════╡ 最远 ╞══
+ *     └──────┘
  *
- * 每个块对应一对值：
- *   - **内边 = 选区边界**（内柄）：往中间拖就是收边；
- *   - **外边 = 扩边到哪**（外柄）：往外拖扩边量变大；往里拖过内边 = 扩边量先收到 0，再顶着内边一起走。
- *   块会跟着扩边量变宽，所以"扩边吃进去多少"直接看得见。
+ * **滑块本身永远不变**（方块宽度只由标签决定，细柄固定 8px），变的只有**尺度**：
+ * 轨道不是把整个值域铺满，而是显示一段**自适应窗口** `[viewMin, viewMax]`，窗口在窗口内是**线性**
+ * 映射。窗口每次都按当前四个值算出来：
  *
- * 两半各是一个隐形抓手（块的外半 = 外柄、内半 = 内柄），所以块再窄也抓得准，不会两个柄打架。
+ *   1. 至少盖住四个值（含 25% 余量），这样外柄永远够得着；
+ *   2. **两个方块（选区内边）之间至少占窗口的 1/ZOOM**（ZOOM = 3.5，即约 28%、440px 轨道里约 126px）；
+ *   3. 窗口以两个方块的中点为中点，最后夹回值域。
  *
- * **非线性映射**：轨道位置 t ∈ [0,1] 与值之间不是直线，而是
- *   `s = 2t-1; 值 = 中心值 + 半宽 * s * (β + (1-β)s²)`（β = 0.35）
- * 于是**靠近轨道中心（= 包围盒中心）时每像素只动很少的值，越靠两端越快**：
- * 中心 ≈0.08 值/px（比线性细约 6 倍，能精确收到很窄的一段），两端 ≈0.56 值/px（比线性粗，
- * 扩边这种"大范围"动作不用拖半天）。这正是用户要的："高斯集中在包围盒中心，往回收的时候
- * 要收到两个滑块非常接近"，所以中心必须给足分辨率。
- *
- * 步长 0.1，所以非线性最细的那段也不会一跳一跳。
+ * 于是：**两个滑块越靠近，窗口越小、它们之间的刻度越细**（"变化越慢"），而它们之间的像素距离
+ * 永远不会小到没法操作 —— 厚度收到很窄时也不用小心翼翼地调。拖动时窗口跟着值实时重算，被拖的
+ * 那个柄始终贴在指针下（值由指针位置经当前窗口换算），另一个柄随着窗口缩放自动让开空间。
  */
 export interface RangeValue {
-    /** 内柄：选区边界 */
+    /** 内柄（方块）：选区边界 */
     low: number;
     high: number;
-    /** 外柄：扩边到哪（默认等于 low / high = 不扩边） */
+    /** 外柄（细柄）：扩边到哪（默认等于 low / high = 不扩边） */
     outerLow: number;
     outerHigh: number;
 }
@@ -39,30 +39,28 @@ export interface RangeSliderOptions {
     /** 低端 / 高端标签的本地化键 */
     lowKey: string;
     highKey: string;
-    /** 轨道值域（外柄能到的最外位置；内柄同域，便于整体外移） */
+    /** 轨道值域上下限（外柄能到的最外位置） */
     min: number;
     max: number;
     /** 初始值 */
     value: RangeValue;
-    /** 拖动或输入时回调（已经夹好范围、按 step 吸附、链式约束修好） */
+    /** 拖动时回调（已夹好范围、按 step 吸附、链式约束修好） */
     onChange: (value: RangeValue) => void;
 }
 
 type HandleName = 'outerLow' | 'low' | 'high' | 'outerHigh';
 
 const HANDLES: HandleName[] = ['outerLow', 'low', 'high', 'outerHigh'];
-const SIDES: Record<HandleName, 'low' | 'high'> = {
-    outerLow: 'low',
-    low: 'low',
-    high: 'high',
-    outerHigh: 'high'
-};
 
 const STEP = 0.1;
-// fraction -> value 曲线的形状参数：中心处的斜率（相对线性），越小中心越精细
-const FISHEYE = 0.35;
-// 反解表的采样数
-const TABLE_SIZE = 1024;
+// 两个方块之间的像素距离至少占轨道的 1/ZOOM
+const ZOOM = 3.5;
+// 窗口的最小值跨度：正好 = ZOOM × 步长，也就是"最薄的合法厚度（0.1）也仍然拿到完整的
+// 轨道 1/ZOOM 间隙"。同时它兜住四个值完全重合时的除零。
+const MIN_SPAN = ZOOM * STEP;
+// 方块 / 细柄的固定尺寸（见 scss）
+const BLOCK_PADDING = 14;
+const OUTER_HANDLE_WIDTH = 8;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const snap = (value: number) => Math.round(value / STEP) * STEP;
@@ -73,7 +71,7 @@ class RangeSlider {
 
     private track: HTMLDivElement;
 
-    private core: HTMLDivElement;
+    private bands: { marginLow: HTMLDivElement, core: HTMLDivElement, marginHigh: HTMLDivElement };
 
     private blocks: { low: HTMLDivElement, high: HTMLDivElement };
 
@@ -93,10 +91,17 @@ class RangeSlider {
 
     private dragging: HandleName | null = null;
 
-    private grabOffset = 0;
+    private grabOffsetValue = 0;
 
-    // 反解表：归一化值 -> 轨道位置 t
-    private table: Float64Array;
+    // while a drag is in flight the window's CENTRE is frozen at the grab-time midpoint: letting it
+    // follow the dragged value is positive feedback (dragging right pans right, which pushes the
+    // value further right - a 22px drag ran away by 21 units in testing). The SPAN still follows the
+    // live values, which is negative feedback (narrowing shrinks the span, which slows the value
+    // change) and is what keeps the two blocks ~1/ZOOM of the track apart while dragging.
+    private dragCenter: number | null = null;
+
+    // the visible value window (linear mapping inside it)
+    private view = { min: 0, max: 100 };
 
     constructor(options: RangeSliderOptions) {
         const { axis, lowKey, highKey, min, max } = options;
@@ -107,8 +112,12 @@ class RangeSlider {
         const track = document.createElement('div');
         track.classList.add('select-range-track');
 
+        const marginLow = document.createElement('div');
+        marginLow.classList.add('select-range-band', 'select-range-margin');
         const core = document.createElement('div');
-        core.classList.add('select-range-fill', 'select-range-core');
+        core.classList.add('select-range-band', 'select-range-core');
+        const marginHigh = document.createElement('div');
+        marginHigh.classList.add('select-range-band', 'select-range-margin');
 
         const readout = document.createElement('div');
         readout.classList.add('select-range-readout');
@@ -137,20 +146,25 @@ class RangeSlider {
         for (const name of HANDLES) {
             const handle = document.createElement('div');
             handle.classList.add('select-range-handle');
+            if (name === 'outerLow' || name === 'outerHigh') {
+                handle.classList.add('select-range-handle-outer');
+            }
             handle.setAttribute('data-handle', name);
             handle.tabIndex = 0;
             handle.title = i18n.t('select-toolbar.rangeHandleHint');
             this.handles[name] = handle;
         }
 
-        // paint order: rail, selection band, the two blocks (with their labels), the invisible
-        // grips on top, then the transient readout
+        // paint order: rail, bands, outer bars, the two labelled blocks, then the readout
+        track.appendChild(marginLow);
         track.appendChild(core);
+        track.appendChild(marginHigh);
+        track.appendChild(this.handles.outerLow);
+        track.appendChild(this.handles.outerHigh);
         track.appendChild(this.blocks.low);
         track.appendChild(this.blocks.high);
-        for (const name of HANDLES) {
-            track.appendChild(this.handles[name]);
-        }
+        track.appendChild(this.handles.low);
+        track.appendChild(this.handles.high);
         track.appendChild(readout);
 
         const wrap = document.createElement('div');
@@ -160,13 +174,12 @@ class RangeSlider {
 
         this.row = row.dom;
         this.track = track;
-        this.core = core;
+        this.bands = { marginLow, core, marginHigh };
         this.readout = readout;
         this.min = min;
         this.max = max;
         this._value = { ...options.value };
         this.onChange = options.onChange;
-        this.table = this.buildTable();
 
         this.commit(this._value, false);
 
@@ -174,20 +187,26 @@ class RangeSlider {
             e.preventDefault();
             e.stopPropagation();
             this.dragging = name;
-            this.grabOffset = this.valueForPointer(e.clientX, name) - this._value[name];
+            this.dragCenter = (this._value.low + this._value.high) / 2;
+            this.grabOffsetValue = this.valueAt(e.clientX) - this._value[name];
             track.setPointerCapture(e.pointerId);
             this.handles[name].classList.add('dragging');
-            this.blocks[SIDES[name]].classList.add('dragging');
+            this.blocks.low.classList[name === 'low' ? 'add' : 'remove']('dragging');
+            this.blocks.high.classList[name === 'high' ? 'add' : 'remove']('dragging');
             this.showReadout(name, this._value[name]);
         };
 
-        for (const name of HANDLES) {
-            this.handles[name].addEventListener('pointerdown', beginDrag(name));
-        }
+        // the whole labelled block is the grab surface for its bound
+        this.blocks.low.addEventListener('pointerdown', beginDrag('low'));
+        this.blocks.high.addEventListener('pointerdown', beginDrag('high'));
+        this.handles.low.addEventListener('pointerdown', beginDrag('low'));
+        this.handles.high.addEventListener('pointerdown', beginDrag('high'));
+        this.handles.outerLow.addEventListener('pointerdown', beginDrag('outerLow'));
+        this.handles.outerHigh.addEventListener('pointerdown', beginDrag('outerHigh'));
 
         track.addEventListener('pointermove', (e: PointerEvent) => {
             if (this.dragging) {
-                const value = this.valueForPointer(e.clientX, this.dragging) - this.grabOffset;
+                const value = this.valueAt(e.clientX) - this.grabOffsetValue;
                 this.setHandle(this.dragging, value);
                 this.showReadout(this.dragging, this._value[this.dragging]);
             }
@@ -197,6 +216,9 @@ class RangeSlider {
             if (this.dragging) {
                 const name = this.dragging;
                 this.dragging = null;
+                // the window re-centres on the settled values (the drag froze it)
+                this.dragCenter = null;
+                this.render();
                 this.handles[name].classList.remove('dragging');
                 this.blocks.low.classList.remove('dragging');
                 this.blocks.high.classList.remove('dragging');
@@ -209,34 +231,6 @@ class RangeSlider {
 
         track.addEventListener('pointerup', endDrag);
         track.addEventListener('pointercancel', endDrag);
-
-        // a click on the bare rail moves the nearest bound there
-        track.addEventListener('pointerdown', (e: PointerEvent) => {
-            if (this.dragging) {
-                return;
-            }
-            if (e.target === track || e.target === core) {
-                e.preventDefault();
-                e.stopPropagation();
-                const at = this.valueAt(e.clientX);
-                let nearest: HandleName = HANDLES[0];
-                let best = Infinity;
-                for (const name of HANDLES) {
-                    const distance = Math.abs(this._value[name] - at);
-                    if (distance < best) {
-                        best = distance;
-                        nearest = name;
-                    }
-                }
-                this.dragging = nearest;
-                this.grabOffset = 0;
-                track.setPointerCapture(e.pointerId);
-                this.handles[nearest].classList.add('dragging');
-                this.blocks[SIDES[nearest]].classList.add('dragging');
-                this.setHandle(nearest, at);
-                this.showReadout(nearest, this._value[nearest]);
-            }
-        });
 
         for (const name of HANDLES) {
             this.handles[name].addEventListener('keydown', (e: KeyboardEvent) => {
@@ -260,53 +254,72 @@ class RangeSlider {
         return { ...this._value };
     }
 
-    /** t -> 归一化值（0..1），带鱼眼：中心细、两端粗。 */
-    private shape(t: number) {
-        const s = 2 * clamp(t, 0, 1) - 1;
-        return 0.5 + 0.5 * s * (FISHEYE + (1 - FISHEYE) * s * s);
+    private trackRect() {
+        return this.track.getBoundingClientRect();
     }
 
-    // 反解用的采样表（shape 单调，线性插值足够精确）
-    private buildTable() {
-        const table = new Float64Array(TABLE_SIZE + 1);
-        for (let i = 0; i <= TABLE_SIZE; i++) {
-            const target = i / TABLE_SIZE;
-            let lo = 0;
-            let hi = 1;
-            for (let k = 0; k < 40; k++) {
-                const mid = (lo + hi) / 2;
-                if (this.shape(mid) < target) {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            table[i] = (lo + hi) / 2;
+    private trackWidth() {
+        const rect = this.trackRect();
+        return rect.width > 0 ? rect.width : 440;
+    }
+
+    private blockWidth() {
+        const width = Math.max(this.labels.low.dom.offsetWidth, this.labels.high.dom.offsetWidth);
+        return width + BLOCK_PADDING;
+    }
+
+    /**
+     * 自适应窗口：至少盖住四个值（含 25% 余量），且让两个方块之间至少占轨道的 1 个 ZOOM，
+     * 以两个方块的中点为中点，最后夹回值域。
+     */
+    private computeView() {
+        const { low, high, outerLow, outerHigh } = this._value;
+        const domainSpan = this.max - this.min;
+        const allMin = Math.min(low, outerLow);
+        const allMax = Math.max(high, outerHigh);
+        const innerSpan = high - low;
+        const center = this.dragCenter ?? (low + high) / 2;
+
+        // padding in value units that corresponds to the block footprint on screen
+        const padUnits = (this.blockWidth() * 0.75 / this.trackWidth()) * Math.max(innerSpan, MIN_SPAN);
+        const padding = Math.max(padUnits, (allMax - allMin) * 0.12);
+
+        const span = Math.min(
+            domainSpan,
+            Math.max((allMax - allMin) + padding * 2, innerSpan * ZOOM, MIN_SPAN)
+        );
+
+        let viewMin = center - span / 2;
+        let viewMax = center + span / 2;
+
+        // keep the whole domain covered when the window is the full domain, otherwise shift it inside
+        if (span >= domainSpan) {
+            this.view = { min: this.min, max: this.max };
+            return;
         }
-        return table;
+        if (viewMin < this.min) {
+            viewMin = this.min;
+            viewMax = viewMin + span;
+        }
+        if (viewMax > this.max) {
+            viewMax = this.max;
+            viewMin = viewMax - span;
+        }
+        this.view = { min: viewMin, max: viewMax };
     }
 
-    /** 值 -> 轨道位置（0..1）。 */
+    /** 值 -> 轨道位置（0..1）：窗口内线性。 */
     private fractionOf(value: number) {
-        const span = this.max - this.min;
-        if (span === 0) {
-            return 0;
+        const span = this.view.max - this.view.min;
+        if (span <= 0) {
+            return 0.5;
         }
-        const normalized = clamp((value - this.min) / span, 0, 1);
-        const index = normalized * TABLE_SIZE;
-        const lo = Math.floor(index);
-        const hi = Math.min(TABLE_SIZE, lo + 1);
-        const f = index - lo;
-        return this.table[lo] * (1 - f) + this.table[hi] * f;
+        return (value - this.view.min) / span;
     }
 
     /** 轨道位置（0..1）-> 值。 */
     private valueOf(fraction: number) {
-        return this.min + (this.max - this.min) * this.shape(fraction);
-    }
-
-    private trackRect() {
-        return this.track.getBoundingClientRect();
+        return this.view.min + (this.view.max - this.view.min) * fraction;
     }
 
     private valueAt(clientX: number) {
@@ -318,35 +331,9 @@ class RangeSlider {
     }
 
     /**
-     * 指针位置 → 该柄的值。外柄那个块的绘制外边在"贴着内边"时会被撑到最小块宽，所以指针要先补回
-     * 这段；真实外柄一旦超出块宽就按真实位置换算 —— 两者在边界上连续。
-     */
-    private valueForPointer(clientX: number, name: HandleName) {
-        const rect = this.trackRect();
-        if (name !== 'outerLow' && name !== 'outerHigh' || rect.width <= 0) {
-            return this.valueAt(clientX);
-        }
-        const side = SIDES[name];
-        const inner = side === 'low' ? this._value.low : this._value.high;
-        const innerPx = rect.left + this.fractionOf(inner) * rect.width;
-        const blockPx = this.minBlockWidth();
-        const outerPx = rect.left + this.fractionOf(this._value[name]) * rect.width;
-        const drawnPx = side === 'low' ?
-            Math.min(outerPx, innerPx - blockPx) : Math.max(outerPx, innerPx + blockPx);
-        // the pointer sits on the drawn edge; shift it by (drawn - true) to get the value
-        return this.valueAt(clientX - (drawnPx - outerPx));
-    }
-
-    /** 块的视觉最小宽度：装得下标签（再窄标签就藏起来，但内边位置永远是真的）。 */
-    private minBlockWidth() {
-        const width = Math.max(this.labels.low.dom.offsetWidth, this.labels.high.dom.offsetWidth);
-        return Math.max(30, width + 16);
-    }
-
-    /**
      * 移动一个柄，维持链式约束 `outerLow ≤ low ≤ high ≤ outerHigh`：
-     *   - 内柄：外柄跟着走（扩边量保持）→ 往里拖就是收边；
-     *   - 外柄：往外拖扩边；越过内柄先把扩边收到 0，再顶着内柄走。
+     *   - 内柄（方块）：外柄跟着走（扩边量保持）→ 往里拖就是收边；
+     *   - 外柄（细柄）：往外拖扩边；越过内柄先把扩边收到 0，再顶着内柄走。
      */
     private setHandle(name: HandleName, rawValue: number) {
         const limitMin = Math.min(this.min, this.max);
@@ -426,10 +413,11 @@ class RangeSlider {
     }
 
     private render() {
+        this.computeView();
+
         const { low, high, outerLow, outerHigh } = this._value;
-        const rect = this.trackRect();
-        const width = rect.width || 1;
-        const blockPx = this.minBlockWidth();
+        const width = this.trackWidth();
+        const blockWidth = this.blockWidth();
 
         const px = (value: number) => this.fractionOf(value) * width;
         const lowPx = px(low);
@@ -437,31 +425,36 @@ class RangeSlider {
         const outerLowPx = px(outerLow);
         const outerHighPx = px(outerHigh);
 
-        // the blocks: [drawn outer edge, inner edge]; the inner edge is always the real bound
-        const lowBlockOuter = Math.min(outerLowPx, lowPx - blockPx);
-        const highBlockOuter = Math.max(outerHighPx, highPx + blockPx);
-        const lowWidth = Math.max(0, lowPx - lowBlockOuter);
-        const highWidth = Math.max(0, highBlockOuter - highPx);
+        // fixed-size blocks, centred on their bound: the block itself never changes size
+        this.blocks.low.style.left = `${lowPx - blockWidth / 2}px`;
+        this.blocks.low.style.width = `${blockWidth}px`;
+        this.blocks.high.style.left = `${highPx - blockWidth / 2}px`;
+        this.blocks.high.style.width = `${blockWidth}px`;
 
-        this.blocks.low.style.left = `${lowBlockOuter}px`;
-        this.blocks.low.style.width = `${lowWidth}px`;
-        this.blocks.high.style.left = `${highPx}px`;
-        this.blocks.high.style.width = `${highWidth}px`;
+        // the orange band between the two blocks = what is selected
+        this.bands.core.style.left = `${lowPx}px`;
+        this.bands.core.style.width = `${Math.max(0, highPx - lowPx)}px`;
 
-        // the orange band between the two inner edges = what is selected
-        this.core.style.left = `${lowPx}px`;
-        this.core.style.width = `${Math.max(0, highPx - lowPx)}px`;
+        // the eaten part, between an outer bar and its block on the rail
+        this.bands.marginLow.style.left = `${outerLowPx}px`;
+        this.bands.marginLow.style.width = `${Math.max(0, lowPx - outerLowPx)}px`;
+        this.bands.marginHigh.style.left = `${highPx}px`;
+        this.bands.marginHigh.style.width = `${Math.max(0, outerHighPx - highPx)}px`;
+        this.bands.marginLow.classList[outerLow < low ? 'add' : 'remove']('visible');
+        this.bands.marginHigh.classList[outerHigh > high ? 'add' : 'remove']('visible');
 
-        // grips: each block's outer half drives the outer value (扩边), the inner half the bound
-        const half = (span: number) => Math.max(8, span / 2);
-        this.handles.low.style.left = `${lowBlockOuter + lowWidth / 2}px`;
-        this.handles.low.style.width = `${half(lowWidth)}px`;
-        this.handles.outerLow.style.left = `${lowBlockOuter}px`;
-        this.handles.outerLow.style.width = `${half(lowWidth)}px`;
-        this.handles.high.style.left = `${highPx}px`;
-        this.handles.high.style.width = `${half(highWidth)}px`;
-        this.handles.outerHigh.style.left = `${highPx + highWidth / 2}px`;
-        this.handles.outerHigh.style.width = `${half(highWidth)}px`;
+        // the outer bars: fixed width, only their position moves
+        this.handles.outerLow.style.left = `${outerLowPx - OUTER_HANDLE_WIDTH / 2}px`;
+        this.handles.outerLow.style.width = `${OUTER_HANDLE_WIDTH}px`;
+        this.handles.outerHigh.style.left = `${outerHighPx - OUTER_HANDLE_WIDTH / 2}px`;
+        this.handles.outerHigh.style.width = `${OUTER_HANDLE_WIDTH}px`;
+
+        // the inner grips cover their block (the block is the grab surface, these keep the
+        // keyboard/automation targets aligned with the bound)
+        this.handles.low.style.left = `${lowPx - blockWidth / 2}px`;
+        this.handles.low.style.width = `${blockWidth}px`;
+        this.handles.high.style.left = `${highPx - blockWidth / 2}px`;
+        this.handles.high.style.width = `${blockWidth}px`;
 
         // values live in the tooltips (no numeric fields in a row, per the design)
         const hint = i18n.t('select-toolbar.rangeHandleHint');
@@ -469,14 +462,9 @@ class RangeSlider {
         this.handles.low.title = `${hint} — 边界 ${low.toFixed(1)}`;
         this.handles.high.title = `${hint} — 边界 ${high.toFixed(1)}`;
         this.handles.outerHigh.title = `${hint} — 扩边 ${outerHigh.toFixed(1)}`;
-
-        // hide a label before the squeezed block clips it
-        const labelWidth = this.labels.low.dom.offsetWidth;
-        this.labels.low.dom.style.visibility = lowWidth >= labelWidth ? 'visible' : 'hidden';
-        this.labels.high.dom.style.visibility = highWidth >= labelWidth ? 'visible' : 'hidden';
     }
 
-    /** 拖动时把数值贴在块旁边浮出来（平时不显示任何数字）。 */
+    /** 拖动时把数值贴在滑块旁边浮出来（平时不显示任何数字）。 */
     private showReadout(name: HandleName, value: number) {
         const handle = this.handles[name];
         this.readout.textContent = value.toFixed(1);
