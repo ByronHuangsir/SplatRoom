@@ -1183,16 +1183,39 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                         onSurface++;
                     }
                 }
-                // 用户判断：这个数字可能本来就是对的 —— 深度 pass 记的是"每像素最前的那个高斯"，
-                // 一个高斯能盖成百上千像素，所以可见层本来就是"少量、大块"的高斯（93 万点扫描的框内
-                // 104,707 个里只留约 100 个）。之前那个"看起来太少就放弃"的保险是基于我的错误假设，
-                // 已经去掉；带宽只留一点点容差（RINGS_SURFACE_PCT = 0.05）。
-                for (let i = 0; i < numSplats; i++) {
-                    if (hit[i] === 255 && surface[i] === 0) {
-                        hit[i] = 0;
-                    }
+                // **V2 环模式的原始做法**（SplatRoomV2-5/src/editor.ts:812）：
+                //   scene.camera.pickPrep(splat, op); const pick = await scene.camera.pickRect(...);
+                //   new SelectOp(splat, op, new Set(pick))
+                // 即"画面上真的看得见的那几个高斯"：拾取 pass 每像素记最前的那个高斯 id，去重就是表面。
+                // 实测（93 万点扫描）：10% 的框返回 9,240 个 id 但只有 3 个不同、整屏只有 151 个不同 ——
+                // 因为近处高斯极大，一个盖几千像素，所以结果本来就少。
+                scene.camera.pickPrep(splat, 'set');
+                const pickedIds = await scene.camera.pickRect(
+                    bounds.x0 / pose.width,
+                    bounds.y0 / pose.height,
+                    (bounds.x1 - bounds.x0) / pose.width,
+                    (bounds.y1 - bounds.y0) / pose.height
+                );
+                const picked = new Set<number>();
+                for (let i = 0; i < pickedIds.length; i++) {
+                    picked.add(pickedIds[i]);
                 }
-                console.log(`[v3] rings surface: kept ${onSurface} of ${analytic} analytic`);
+                if (picked.size > 0) {
+                    for (let i = 0; i < numSplats; i++) {
+                        if (hit[i] === 255 && !picked.has(i)) {
+                            hit[i] = 0;
+                        }
+                    }
+                    console.log(`[v3] rings pick: ${picked.size} visible ids of ${analytic} analytic`);
+                } else {
+                    // 拾取拿不到东西时的退路：深度 pass 的表层带
+                    for (let i = 0; i < numSplats; i++) {
+                        if (hit[i] === 255 && surface[i] === 0) {
+                            hit[i] = 0;
+                        }
+                    }
+                    console.log(`[v3] rings depth band: kept ${onSurface} of ${analytic} analytic`);
+                }
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
