@@ -16,6 +16,7 @@ import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
+import { selectDepthBand } from '../splat/selection-band';
 import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
@@ -32,6 +33,9 @@ const removeExtension = (filename: string) => {
  * 再薄会把同一层表面切掉一半，再厚就等于穿透了。
  */
 const SURFACE_SHELL = 0.01;
+
+/** 环模式"表面层"的厚度：模型对角线（2×halfExtents）的百分比，越小越只留最前那一层。 */
+const RINGS_SURFACE_PCT = 0.3;
 
 // ---- crop box events (SplatRoom) ------------------------------------------
 let _cropBox: CropBox | null = null;
@@ -1130,32 +1134,69 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             const cache = createRangeCache(numSplats);
             const hit = selectRange(splat, region, view, cache);
 
-            // 环模式：**只选画面上真的看得到的那一层**（对齐 V2 的行为 —— V2 的 editor 在
-            // `mode === 'rings'` 时走 `camera.pickPrep` + `pickRect` 拿到可见 id 再 SelectOp）。
-            // 这里把 id 拾取的结果和解析掩码（窗口 / 深度 / 形状）取交，所以滑块仍然有效。
+            // 环模式：**只选"表面能碰到的部分"** —— 对齐 V2 / SuperSplat 的 selection depth 语义：
+            // 渲染一次深度 pass（每像素最前表面），只保留落在那层表面前后极薄一带里的高斯。
+            // 用的就是 V3 3.8.0 删掉的 selection-band（已从 git 恢复），不是那个没调通的 id 拾取。
             if (events.invoke('camera.mode') === 'rings') {
-                scene.camera.pickPrep(splat, opKind);
-                const ids = await scene.camera.pickRect(
-                    bounds.x0 / pose.width,
-                    bounds.y0 / pose.height,
-                    (bounds.x1 - bounds.x0) / pose.width,
-                    (bounds.y1 - bounds.y0) / pose.height
-                );
-                const visible = new Set<number>();
-                for (let i = 0; i < ids.length; i++) {
-                    visible.add(ids[i]);
+                const bound = scene.bound;
+                const diag = bound ? bound.halfExtents.length() * 2 : 1;
+                const thickness = Math.max(1e-6, diag * RINGS_SURFACE_PCT * 0.01);
+                scene.camera.depthPrep(splat);
+                const step = (bounds.x1 - bounds.x0 + 1) * (bounds.y1 - bounds.y0 + 1) > 400000 ? 4 : 2;
+                const columns = Math.floor((bounds.x1 - bounds.x0) / step) + 1;
+                const rows = Math.floor((bounds.y1 - bounds.y0) / step) + 1;
+                const points: { x: number, y: number }[] = new Array(columns * rows);
+                let w = 0;
+                for (let row = 0; row < rows; row++) {
+                    for (let column = 0; column < columns; column++) {
+                        points[w++] = {
+                            x: (bounds.x0 + column * step + 0.5) / pose.width,
+                            y: (bounds.y0 + row * step + 0.5) / pose.height
+                        };
+                    }
                 }
-                // 保险：id 拾取在这个流程里还没调通（实测只回来 3 个 id，而解析掩码有 10 万个 —— 见
-                // docs/probes/mode-selection.cjs），直接取交会把选区削成个位数。所以只在拾取结果
-                // "看起来可信"时取交，否则保持解析结果（= 和中心模式一样），不让功能变坏。
-                if (visible.size > 100) {
+                const depths = await scene.camera.readDepths(points);
+                const frontDepth = (px: number, py: number): number | null => {
+                    const column = Math.min(columns - 1, Math.max(0, Math.round((px - bounds.x0) / step)));
+                    const row = Math.min(rows - 1, Math.max(0, Math.round((py - bounds.y0) / step)));
+                    const value = depths[row * columns + column];
+                    return typeof value === 'number' ? value : null;
+                };
+                const surface = selectDepthBand(splat, {
+                    region,
+                    frontDepth,
+                    viewProjection: pose.viewProjection,
+                    worldTransform: splat.worldTransform.data,
+                    cameraPosition: pose.cameraPosition,
+                    viewDir: pose.viewDir,
+                    near: scene.camera.near,
+                    far: scene.camera.far,
+                    thickness,
+                    width: pose.width,
+                    height: pose.height
+                });
+                let analytic = 0;
+                let onSurface = 0;
+                for (let i = 0; i < numSplats; i++) {
+                    if (hit[i] === 255) {
+                        analytic++;
+                        if (surface[i] !== 0) {
+                            onSurface++;
+                        }
+                    }
+                }
+                // Safety: the depth readback is not usable in every environment (measured 100 of
+                // 104,707 on a 931k scan — the pass came back almost empty), so the surface filter
+                // is only applied when the result looks plausible; otherwise the analytic selection
+                // stands (= same as centers mode) and one line is logged.
+                if (analytic > 0 && onSurface >= analytic * 0.03) {
                     for (let i = 0; i < numSplats; i++) {
-                        if (hit[i] === 255 && !visible.has(i)) {
+                        if (hit[i] === 255 && surface[i] === 0) {
                             hit[i] = 0;
                         }
                     }
                 } else {
-                    console.warn(`[v3] rings-mode id pick returned ${visible.size} ids — 跳过表面过滤（框内 ${numSplats} 行）`);
+                    console.warn(`[v3] rings surface band kept ${onSurface} of ${analytic} — depth readback unusable, skipped`);
                 }
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
