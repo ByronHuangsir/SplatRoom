@@ -35,7 +35,7 @@ const removeExtension = (filename: string) => {
 const SURFACE_SHELL = 0.01;
 
 /** 环模式"表面层"的厚度：模型对角线（2×halfExtents）的百分比，越小越只留最前那一层。 */
-const RINGS_SURFACE_PCT = 0.3;
+const RINGS_SURFACE_PCT = 0.05;
 
 // ---- crop box events (SplatRoom) ------------------------------------------
 let _cropBox: CropBox | null = null;
@@ -1178,26 +1178,21 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 let analytic = 0;
                 let onSurface = 0;
                 for (let i = 0; i < numSplats; i++) {
-                    if (hit[i] === 255) {
+                    if (hit[i] === 255 && surface[i] !== 0) {
                         analytic++;
-                        if (surface[i] !== 0) {
-                            onSurface++;
-                        }
+                        onSurface++;
                     }
                 }
-                // Safety: the depth readback is not usable in every environment (measured 100 of
-                // 104,707 on a 931k scan — the pass came back almost empty), so the surface filter
-                // is only applied when the result looks plausible; otherwise the analytic selection
-                // stands (= same as centers mode) and one line is logged.
-                if (analytic > 0 && onSurface >= analytic * 0.03) {
-                    for (let i = 0; i < numSplats; i++) {
-                        if (hit[i] === 255 && surface[i] === 0) {
-                            hit[i] = 0;
-                        }
+                // 用户判断：这个数字可能本来就是对的 —— 深度 pass 记的是"每像素最前的那个高斯"，
+                // 一个高斯能盖成百上千像素，所以可见层本来就是"少量、大块"的高斯（93 万点扫描的框内
+                // 104,707 个里只留约 100 个）。之前那个"看起来太少就放弃"的保险是基于我的错误假设，
+                // 已经去掉；带宽只留一点点容差（RINGS_SURFACE_PCT = 0.05）。
+                for (let i = 0; i < numSplats; i++) {
+                    if (hit[i] === 255 && surface[i] === 0) {
+                        hit[i] = 0;
                     }
-                } else {
-                    console.warn(`[v3] rings surface band kept ${onSurface} of ${analytic} — depth readback unusable, skipped`);
                 }
+                console.log(`[v3] rings surface: kept ${onSurface} of ${analytic} analytic`);
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
