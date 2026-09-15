@@ -45,6 +45,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         await scene.events.invoke('select.rect', 'set', { start: { x: 0.4, y: 0.4 }, end: { x: 0.6, y: 0.6 } });
         await sleep(1500);
         const st = splat.splatData.getProp('state');
+        // 深度方向的铺开量：穿透选中会跨整个模型，只看表面就只剩一层
+        const zz = splat.splatData.getProp('z');
+        let zmin = Infinity, zmax = -Infinity;
+        for (let i = 0; i < st.length; i++) if (st[i] & 1) { if (zz[i] < zmin) zmin = zz[i]; if (zz[i] > zmax) zmax = zz[i]; }
+        const spread = zmax > zmin ? +(zmax - zmin).toFixed(3) : 0;
         let n = 0;
         for (let i = 0; i < st.length; i++) if (st[i] & 1) n++;
         // the indices, so the two modes can be compared as SETS and not just counts
@@ -53,6 +58,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         return {
             mode: scene.events.invoke('camera.mode'),
             selected: n,
+            spread,
             sample: idx.slice(0, 20),
             depth: scene.events.invoke('selection.depthRange'),
             range: scene.events.invoke('selection.screenRange').x,

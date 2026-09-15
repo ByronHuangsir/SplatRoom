@@ -26,6 +26,13 @@ const removeExtension = (filename: string) => {
     return filename.substring(0, filename.length - path.getExtension(filename).length);
 };
 
+/**
+ * 环模式（camera.mode === 'rings'）下"只选表面"的薄壳厚度，按模型自身深度范围取比例。
+ * 1% 是拿 93 万点房间扫描（深度范围 ~3m → 3cm 壳）与 13M 合并场景试出来的：
+ * 再薄会把同一层表面切掉一半，再厚就等于穿透了。
+ */
+const SURFACE_SHELL = 0.01;
+
 // ---- crop box events (SplatRoom) ------------------------------------------
 let _cropBox: CropBox | null = null;
 
@@ -1037,8 +1044,18 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             ...entry.view,
             ...rangeDistances(entry.extent.min, entry.extent.max, near, far, entry.tails),
             ...screenWindow(gesture.bounds, getScreenSelection(), entry.screenTails),
-            ...coreScreenWindow(gesture.bounds, entry.screenTails)
+            ...coreScreenWindow(gesture.bounds, entry.screenTails),
+            ...surfaceWindow(entry)
         };
+    };
+
+    // 环模式（camera.mode === 'rings'）下用户要求"不要穿透，只选看得见的表面"：
+    // 给一个薄壳厚度 = 该模型深度范围的 1%（13M 场景实测够用；模型尺度变了按比例跟着变）。
+    const surfaceWindow = (entry: RangeEntry) => {
+        if (events.invoke('camera.mode') !== 'rings') {
+            return {};
+        }
+        return { surfaceEpsilon: (entry.extent.max - entry.extent.min) * SURFACE_SHELL };
     };
 
     // one entry's post mask for the current range: the 2D hit mask recombined with the
@@ -1098,7 +1115,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 worldTransform: splat.worldTransform.data,
                 ...distances,
                 ...screenWindow(bounds, getScreenSelection(), screenTails),
-                ...coreScreenWindow(bounds, screenTails)
+                ...coreScreenWindow(bounds, screenTails),
+                ...surfaceWindow({ extent } as RangeEntry)
             };
 
             // the selection as it stands, minus locked rows: a hidden splat is locked AND

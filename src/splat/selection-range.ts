@@ -58,6 +58,11 @@ export interface SelectionRangeView {
     coreMaxX: number;
     coreMinY: number;
     coreMaxY: number;
+    /**
+     * 只选**看得见的表面**时给的薄壳厚度（世界单位）；不给 = 老行为（整段穿透）。
+     * 环模式（camera.mode === 'rings'）下用户要求"不要穿透，只选表面"，见 keepSurface。
+     */
+    surfaceEpsilon?: number;
 }
 
 /**
@@ -433,6 +438,11 @@ export const selectRange = (
         mask[i] = 255;
     }
 
+    // 环模式：只留看得见的表面（需要投影缓存，见 keepSurface）
+    if (view.surfaceEpsilon !== undefined && cache) {
+        keepSurface(mask, cache, numSplats, width, height, view.surfaceEpsilon);
+    }
+
     return mask;
 };
 
@@ -491,7 +501,49 @@ export const selectRangeFromCache = (
         mask[i] = 255;
     }
 
+    if (view.surfaceEpsilon !== undefined) {
+        keepSurface(mask, cache, numSplats, view.width, view.height, view.surfaceEpsilon);
+    }
+
     return mask;
+};
+
+/**
+ * 只保留**看得见的表面**：按屏幕像素取最近深度，把比它厚过 `epsilon` 的高斯剔除。
+ *
+ * 用户要求：*"选择工具在环模式下不要穿透，只选择表面的内容"* —— 环模式下选中的高斯画成小圆环，
+ * 整段穿透等于"背后一大堆也亮着"，反而看不出自己框住了哪一层表面。
+ *
+ * CPU 侧的最近深度缓冲（每像素一个 float）：一次建图 + 一次过滤，都是 O(n)，
+ * 不需要恢复当年删掉的 GPU id 拾取通道。
+ */
+const keepSurface = (
+    mask: Uint8Array,
+    cache: RangeProjectionCache,
+    numSplats: number,
+    width: number,
+    height: number,
+    epsilon: number
+) => {
+    const nearest = new Float32Array(width * height).fill(Infinity);
+    const { sx: cxs, sy: cys, dist: cd } = cache;
+    for (let i = 0; i < numSplats; i++) {
+        if (mask[i] === 0) {
+            continue;
+        }
+        const p = cys[i] * width + cxs[i];
+        if (cd[i] < nearest[p]) {
+            nearest[p] = cd[i];
+        }
+    }
+    for (let i = 0; i < numSplats; i++) {
+        if (mask[i] === 0) {
+            continue;
+        }
+        if (cd[i] > nearest[cys[i] * width + cxs[i]] + epsilon) {
+            mask[i] = 0;
+        }
+    }
 };
 
 /**

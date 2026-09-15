@@ -88,6 +88,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         // to add and contracting inside it has something to drop
         const innerBox = { start: { x: 0.4, y: 0.4 }, end: { x: 0.6, y: 0.6 } };
 
+        // 环模式的"只选表面"没有在这里加断言：这个夹具是**稀疏点云的两面墙**，逐像素不会互相遮挡，
+        // 所以表面过滤对它几乎无效（实测 back 234 → 234），拿它当判据会误报。
+        // 有效果的验证见 docs/probes/mode-selection.cjs（93 万点密集扫描：中心 104,707 → 环 76,627）。
+
         // range at the default before anything else happens
         const defaults = await page.evaluate(() => window.scene.events.invoke('selection.depthRange'));
 
