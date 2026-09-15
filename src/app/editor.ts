@@ -1137,85 +1137,29 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             // 环模式：**只选"表面能碰到的部分"** —— 对齐 V2 / SuperSplat 的 selection depth 语义：
             // 渲染一次深度 pass（每像素最前表面），只保留落在那层表面前后极薄一带里的高斯。
             // 用的就是 V3 3.8.0 删掉的 selection-band（已从 git 恢复），不是那个没调通的 id 拾取。
+            // EXACTLY V2 2.5.34's rings-mode logic (SplatRoomV2-5/src/editor.ts:812):
+            //   scene.camera.pickPrep(splat, op);
+            //   const pick = await scene.camera.pickRect(x, y, w, h);
+            //   events.fire('edit.add', new SelectOp(splat, op, new Set(pick)));
+            // The id pass records the front-most splat per pixel; the de-duplicated ids ARE the
+            // selection. No intersection with the analytic mask and no fallback - those were mine and
+            // were exactly what made it "sometimes nothing, sometimes only a few".
             if (events.invoke('camera.mode') === 'rings') {
-                const bound = scene.bound;
-                const diag = bound ? bound.halfExtents.length() * 2 : 1;
-                const thickness = Math.max(1e-6, diag * RINGS_SURFACE_PCT * 0.01);
-                scene.camera.depthPrep(splat);
-                const step = (bounds.x1 - bounds.x0 + 1) * (bounds.y1 - bounds.y0 + 1) > 400000 ? 4 : 2;
-                const columns = Math.floor((bounds.x1 - bounds.x0) / step) + 1;
-                const rows = Math.floor((bounds.y1 - bounds.y0) / step) + 1;
-                const points: { x: number, y: number }[] = new Array(columns * rows);
-                let w = 0;
-                for (let row = 0; row < rows; row++) {
-                    for (let column = 0; column < columns; column++) {
-                        points[w++] = {
-                            x: (bounds.x0 + column * step + 0.5) / pose.width,
-                            y: (bounds.y0 + row * step + 0.5) / pose.height
-                        };
-                    }
-                }
-                const depths = await scene.camera.readDepths(points);
-                const frontDepth = (px: number, py: number): number | null => {
-                    const column = Math.min(columns - 1, Math.max(0, Math.round((px - bounds.x0) / step)));
-                    const row = Math.min(rows - 1, Math.max(0, Math.round((py - bounds.y0) / step)));
-                    const value = depths[row * columns + column];
-                    return typeof value === 'number' ? value : null;
-                };
-                const surface = selectDepthBand(splat, {
-                    region,
-                    frontDepth,
-                    viewProjection: pose.viewProjection,
-                    worldTransform: splat.worldTransform.data,
-                    cameraPosition: pose.cameraPosition,
-                    viewDir: pose.viewDir,
-                    near: scene.camera.near,
-                    far: scene.camera.far,
-                    thickness,
-                    width: pose.width,
-                    height: pose.height
-                });
-                let analytic = 0;
-                let onSurface = 0;
-                for (let i = 0; i < numSplats; i++) {
-                    if (hit[i] === 255 && surface[i] !== 0) {
-                        analytic++;
-                        onSurface++;
-                    }
-                }
-                // **V2 环模式的原始做法**（SplatRoomV2-5/src/editor.ts:812）：
-                //   scene.camera.pickPrep(splat, op); const pick = await scene.camera.pickRect(...);
-                //   new SelectOp(splat, op, new Set(pick))
-                // 即"画面上真的看得见的那几个高斯"：拾取 pass 每像素记最前的那个高斯 id，去重就是表面。
-                // 实测（93 万点扫描）：10% 的框返回 9,240 个 id 但只有 3 个不同、整屏只有 151 个不同 ——
-                // 因为近处高斯极大，一个盖几千像素，所以结果本来就少。
-                scene.camera.pickPrep(splat, 'set');
-                const pickedIds = await scene.camera.pickRect(
+                scene.camera.pickPrep(splat, opKind);
+                const pick = await scene.camera.pickRect(
                     bounds.x0 / pose.width,
                     bounds.y0 / pose.height,
                     (bounds.x1 - bounds.x0) / pose.width,
                     (bounds.y1 - bounds.y0) / pose.height
                 );
                 const picked = new Set<number>();
-                for (let i = 0; i < pickedIds.length; i++) {
-                    picked.add(pickedIds[i]);
+                for (let i = 0; i < pick.length; i++) {
+                    picked.add(pick[i]);
                 }
-                if (picked.size > 0) {
-                    for (let i = 0; i < numSplats; i++) {
-                        if (hit[i] === 255 && !picked.has(i)) {
-                            hit[i] = 0;
-                        }
-                    }
-                    console.log(`[v3] rings pick: ${picked.size} visible ids of ${analytic} analytic`);
-                } else {
-                    // 拾取拿不到东西时的退路：深度 pass 的表层带
-                    for (let i = 0; i < numSplats; i++) {
-                        if (hit[i] === 255 && surface[i] === 0) {
-                            hit[i] = 0;
-                        }
-                    }
-                    console.log(`[v3] rings depth band: kept ${onSurface} of ${analytic} analytic`);
+                for (let i = 0; i < numSplats; i++) {
+                    hit[i] = picked.has(i) ? 255 : 0;
                 }
+                console.log(`[v3] rings pick (V2 logic): ${picked.size} visible ids`);
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
