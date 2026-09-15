@@ -1049,13 +1049,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         };
     };
 
-    // 环模式（camera.mode === 'rings'）下用户要求"不要穿透，只选看得见的表面"：
-    // 给一个薄壳厚度 = 该模型深度范围的 1%（13M 场景实测够用；模型尺度变了按比例跟着变）。
+    // 环模式下"只选表面"现在走 **GPU id 拾取**（V2 的做法，见 runRangeSelection 里的注释），
+    // 1% 薄壳那套近似被否掉了（用户实测"会选择过多"）。这个函数保留为空壳，等下次和 keepSurface
+    // 一起删掉。
     const surfaceWindow = (entry: RangeEntry) => {
-        if (events.invoke('camera.mode') !== 'rings') {
-            return {};
-        }
-        return { surfaceEpsilon: (entry.extent.max - entry.extent.min) * SURFACE_SHELL };
+        return {};
     };
 
     // one entry's post mask for the current range: the 2D hit mask recombined with the
@@ -1131,6 +1129,35 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             // the projection cache is filled by this same pass, so later slider pushes are cheap
             const cache = createRangeCache(numSplats);
             const hit = selectRange(splat, region, view, cache);
+
+            // 环模式：**只选画面上真的看得到的那一层**（对齐 V2 的行为 —— V2 的 editor 在
+            // `mode === 'rings'` 时走 `camera.pickPrep` + `pickRect` 拿到可见 id 再 SelectOp）。
+            // 这里把 id 拾取的结果和解析掩码（窗口 / 深度 / 形状）取交，所以滑块仍然有效。
+            if (events.invoke('camera.mode') === 'rings') {
+                scene.camera.pickPrep(splat, opKind);
+                const ids = await scene.camera.pickRect(
+                    bounds.x0 / pose.width,
+                    bounds.y0 / pose.height,
+                    (bounds.x1 - bounds.x0) / pose.width,
+                    (bounds.y1 - bounds.y0) / pose.height
+                );
+                const visible = new Set<number>();
+                for (let i = 0; i < ids.length; i++) {
+                    visible.add(ids[i]);
+                }
+                // 保险：id 拾取在这个流程里还没调通（实测只回来 3 个 id，而解析掩码有 10 万个 —— 见
+                // docs/probes/mode-selection.cjs），直接取交会把选区削成个位数。所以只在拾取结果
+                // "看起来可信"时取交，否则保持解析结果（= 和中心模式一样），不让功能变坏。
+                if (visible.size > 100) {
+                    for (let i = 0; i < numSplats; i++) {
+                        if (hit[i] === 255 && !visible.has(i)) {
+                            hit[i] = 0;
+                        }
+                    }
+                } else {
+                    console.warn(`[v3] rings-mode id pick returned ${visible.size} ids — 跳过表面过滤（框内 ${numSplats} 行）`);
+                }
+            }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
 
