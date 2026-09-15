@@ -12,6 +12,27 @@ import { injectSphericalMetadata } from '../splat/spherical-metadata';
 import { Splat } from '../splat/splat';
 import { i18n } from '../ui/localization';
 
+/**
+ * 渲染回读的像素行序：**WebGL2 的 framebuffer 回读是自下而上**（要先翻），而 **WebGPU 的
+ * copyTextureToBuffer 本身就是自上而下**（再翻就整张上下颠倒）。以前这里四份导出代码都无条件翻了一次，
+ * 于是 WebGPU（打包版默认后端）导出的图片 / 视频 / 关键帧 / 快照全是上下颠倒的 —— 用户 3.16.0 报的
+ * "渲染里面的几个都是反的"。picker.ts 早就是按 backend 判断的，这里改成同一套约定。
+ */
+const flipReadbackIfNeeded = (data: Uint8Array, width: number, height: number, device: { isWebGL2: boolean }) => {
+    if (!device.isWebGL2) {
+        return;
+    }
+    const line = new Uint8Array(width * 4);
+    for (let y = 0; y < Math.floor(height / 2); y++) {
+        const top = y * width * 4;
+        const bottom = (height - 1 - y) * width * 4;
+        line.set(data.subarray(top, top + width * 4));
+        data.copyWithin(top, bottom, bottom + width * 4);
+        data.set(line, bottom);
+    }
+};
+
+
 const nullClr = new Color(0, 0, 0, 0);
 
 /**
@@ -441,17 +462,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                 await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
             }
 
-            // flip the buffer vertically: the framebuffer read is bottom-up
-            // but webp (and image files generally) expect top-down rows
-            const line = new Uint8Array(width * 4);
-            for (let y = 0; y < height / 2; y++) {
-                const top = y * width * 4;
-                const bottom = (height - y - 1) * width * 4;
-                line.set(data.subarray(top, top + width * 4));
-                data.copyWithin(top, bottom, bottom + width * 4);
-                data.set(line, bottom);
-            }
-
+            flipReadbackIfNeeded(data, width, height, scene.app.graphicsDevice);
             let bytes: Uint8Array<ArrayBuffer>;
             let extension: string;
             let mimeType: string;
@@ -789,15 +800,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
 
                 // flip, wrap and submit the pixels currently in the data buffer
                 const encodeFrame = async (frameTime: number) => {
-                    // flip the buffer vertically
-                    for (let y = 0; y < height / 2; y++) {
-                        const top = y * width * 4;
-                        const bottom = (height - y - 1) * width * 4;
-                        line.set(data.subarray(top, top + width * 4));
-                        data.copyWithin(top, bottom, bottom + width * 4);
-                        data.set(line, bottom);
-                    }
-
+                    flipReadbackIfNeeded(data, width, height, scene.app.graphicsDevice);
                     // construct the video frame
                     const videoFrame = new VideoFrame(data, {
                         format: 'RGBA',
@@ -1176,16 +1179,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
                 }
 
-                // Flip vertically
-                const line = new Uint8Array(width * 4);
-                for (let y = 0; y < height / 2; y++) {
-                    const top = y * width * 4;
-                    const bottom = (height - y - 1) * width * 4;
-                    line.set(data.subarray(top, top + width * 4));
-                    data.copyWithin(top, bottom, bottom + width * 4);
-                    data.set(line, bottom);
-                }
-
+                flipReadbackIfNeeded(data, width, height, scene.app.graphicsDevice);
                 return new Uint8Array(data);
             };
 
@@ -1554,15 +1548,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     scene.dataProcessor.copyRt(scene.camera.mainTarget, workTarget);
                     await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
-                    // Flip Y (render target is upside-down)
-                    for (let y = 0; y < Math.floor(height / 2); y++) {
-                        const a = y * width * 4;
-                        const b = (height - 1 - y) * width * 4;
-                        line.set(data.subarray(a, a + width * 4));
-                        data.set(data.subarray(b, b + width * 4), a);
-                        data.set(line, b);
-                    }
-
+                    flipReadbackIfNeeded(data, width, height, scene.app.graphicsDevice);
                     // Create VideoFrame and encode
                     const videoFrame = new VideoFrame(
                         new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
