@@ -99,6 +99,15 @@ class FloodSelection {
                 }
             }
 
+            // 扩散没走到的像素仍然是"未访问"哨兵 102，而 select.byMask 判的是 `alpha > 0`
+            // —— 不扫掉它们，快速填充算出来的包围盒就是整个视口，会把满屏未锁定的高斯全选进来
+            // （审计 selection.md 第 2 条）。历史实现用的是红通道 === 255，所以那时没这个问题。
+            for (let i = ALPHA; i < d.length; i += PIXEL) {
+                if (d[i] === 102) {
+                    d[i] = 0;
+                }
+            }
+
             context.putImageData(imageData, 0, 0);
         };
 
