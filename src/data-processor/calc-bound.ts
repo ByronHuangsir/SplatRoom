@@ -47,6 +47,21 @@ class CalcBound {
     private visibleMinData: Float32Array = null;
     private visibleMaxData: Float32Array = null;
 
+    // set by the last run when a pass matched no row at all (see the ±1e6 note in run())
+    private selectedEmpty = false;
+    private visibleEmpty = false;
+    private warnedVisibleEmpty = false;
+
+    /** True when the last selection-bound pass matched no splat (nothing selected). */
+    get selectionEmpty() {
+        return this.selectedEmpty;
+    }
+
+    /** True when the last pass found no visible splat at all (every splat deleted). */
+    get localEmpty() {
+        return this.visibleEmpty;
+    }
+
     constructor(device: GraphicsDevice) {
         this.device = device;
     }
@@ -237,7 +252,20 @@ class CalcBound {
             if (isFinite(f)) v2.z = Math.max(v2.z, f);
         }
 
-        selectionBound.setMinMax(v1, v2);
+        // The shader seeds its accumulators with the ±1e6 sentinel (it needs a value that
+        // survives the GLSL->WGSL transpile, so true infinity is out) and only *skips*
+        // deleted rows. "No row matched" therefore comes back as min = 1e6 / max = -1e6
+        // rather than as infinity, and writing that through produced a box with centre 0
+        // and halfExtents -1e6. That inflated boundRadius to ~1.7e6, which pushed the
+        // camera's near plane to far/16384 ≈ 105 and clipped every model in the viewport
+        // until the user undid the delete (docs/audit/01-量级复查-bug.md §13; reachable
+        // with Ctrl+A + Delete, or a crop box that removes every splat).
+        // A matched row always yields min <= max on every axis, so an inverted axis means
+        // "nothing here": keep the previous bound instead of publishing a degenerate one.
+        this.selectedEmpty = !(v1.x <= v2.x && v1.y <= v2.y && v1.z <= v2.z);
+        if (!this.selectedEmpty) {
+            selectionBound.setMinMax(v1, v2);
+        }
 
         // resolve visible bounds
         v3.set(Infinity, Infinity, Infinity);
@@ -259,7 +287,18 @@ class CalcBound {
             if (isFinite(f)) v4.z = Math.max(v4.z, f);
         }
 
-        localBound.setMinMax(v3, v4);
+        this.visibleEmpty = !(v3.x <= v4.x && v3.y <= v4.y && v3.z <= v4.z);
+        if (this.visibleEmpty) {
+            // Every splat is deleted (or the model is empty). Say so once instead of
+            // silently publishing the sentinel box.
+            if (!this.warnedVisibleEmpty) {
+                this.warnedVisibleEmpty = true;
+                console.warn('[CalcBound] no visible splats: keeping the previous local bound');
+            }
+        } else {
+            this.warnedVisibleEmpty = false;
+            localBound.setMinMax(v3, v4);
+        }
     }
 }
 

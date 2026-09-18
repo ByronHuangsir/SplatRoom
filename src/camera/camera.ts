@@ -919,6 +919,24 @@ class Camera extends Element {
             this.far = boundRadius * 2;
             this.near = this.far / (1024 * 16);
         }
+
+        // Self-falsifying guard (docs/audit/01-量级复查-bug.md §13). A degenerate scene bound
+        // — deleting every splat used to publish halfExtents = -1e6, making boundRadius
+        // ~1.7e6 — pushed `near` to far/16384 ≈ 105 while the camera sat a couple of units
+        // from the centre, so every model in the scene was clipped away, every frame, with
+        // no way back but undo. CalcBound and Splat no longer publish such a bound; this
+        // makes the camera refuse to build a nonsensical depth range from one anyway.
+        // `dist` is still the honest distance to the bound centre, so it bounds how far
+        // the near plane may reach: a near plane past the thing you are looking at cannot
+        // be right. Normal cases are untouched (near = dist - boundRadius is already well
+        // under dist/2 whenever the camera is outside a sane bound).
+        if (!Number.isFinite(this.far) || this.far <= 0) {
+            this.far = Math.max(1e-3, Number.isFinite(dist) ? Math.abs(dist) * 2 : 1);
+        }
+        const nearCap = dist > 0 ? Math.max(1e-6, dist * 0.5) : this.far / (1024 * 16);
+        if (!Number.isFinite(this.near) || this.near <= 0 || this.near > nearCap) {
+            this.near = Math.max(1e-6, Math.min(nearCap, this.far / (1024 * 16)));
+        }
     }
 
     onPreRender() {

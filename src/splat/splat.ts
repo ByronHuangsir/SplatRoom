@@ -1082,18 +1082,18 @@ class Splat extends Element {
     async updateLocalBounds(): Promise<void> {
         await this.scene.dataProcessor.calcBound(this, this.selectionBoundStorage, this.localBoundStorage);
 
-        // V3/WebGPU: the bound pass reads its result back from the GPU, and that
-        // readback currently returns nothing on the WebGPU backend (every splat bound
-        // comes back as all zeros, silently). A degenerate local bound then collapses
-        // the scene bound, so the camera cannot frame the model and its near/far clips
-        // end up equal — the projection matrix becomes NaN and the viewport stays
-        // black for every model, regardless of size. Until the readback works there,
-        // fall back to the AABB the engine computed on the CPU when the resource was
+        // The bound pass can come back unusable. On WebGPU its readback currently returns
+        // nothing (every splat bound comes back as all zeros, silently), and on either
+        // backend a pass that matched no row at all used to write the shader's ±1e6
+        // sentinel straight through — centre 0, halfExtents -1e6. A degenerate local bound
+        // collapses the scene bound, so the camera cannot frame the model and its near/far
+        // clips end up equal: the projection matrix goes NaN and the viewport stays black
+        // for every model, regardless of size, until the offending edit is undone.
+        // Fall back to the AABB the engine computed on the CPU when the resource was
         // created (it holds the same local-space extent).
-        if (this.scene.graphicsDevice.isWebGPU && !Splat.isUsableBound(this.localBoundStorage)) {
-            if (Splat.isUsableBound(this.cpuBoundStorage)) {
-                this.localBoundStorage.copy(this.cpuBoundStorage);
-            }
+        // CalcBound no longer publishes that sentinel box, so this is the backstop.
+        if (!Splat.isUsableBound(this.localBoundStorage) && Splat.isUsableBound(this.cpuBoundStorage)) {
+            this.localBoundStorage.copy(this.cpuBoundStorage);
         }
 
         this.updateWorldBound();
@@ -1127,7 +1127,10 @@ class Splat extends Element {
         }
     }
 
-    // a bound is usable when it has a finite centre and a non-zero extent
+    // a bound is usable when it has a finite centre, finite non-negative extents and a
+    // non-zero size. The sign test matters: "no rows matched" used to arrive as
+    // halfExtents = -1e6 (see updateLocalBounds), and a negative extent is never a
+    // legitimate local bound.
     private static isUsableBound(bound: BoundingBox | null | undefined): boolean {
         if (!bound) {
             return false;
@@ -1137,7 +1140,13 @@ class Splat extends Element {
             return false;
         }
         const h = bound.halfExtents;
-        return Number.isFinite(h.x) && Number.isFinite(h.y) && Number.isFinite(h.z) && (Math.abs(h.x) + Math.abs(h.y) + Math.abs(h.z)) > 1e-8;
+        if (!Number.isFinite(h.x) || !Number.isFinite(h.y) || !Number.isFinite(h.z)) {
+            return false;
+        }
+        if (h.x < 0 || h.y < 0 || h.z < 0) {
+            return false;
+        }
+        return (h.x + h.y + h.z) > 1e-8;
     }
 
     // update world bound from local bound (synchronous)

@@ -21,6 +21,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const page = await browser.newPage();
     await page.setViewport({ width: 1400, height: 900 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 200)));
+    page.on('console', (m) => {
+        const t = m.text();
+        if (t.startsWith('[o1]')) console.log(t);
+    });
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await page.waitForFunction('!!window.scene', { timeout: 90000 });
     await sleep(1500);
@@ -77,8 +81,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         };
 
         const tGesture = performance.now();
+        console.log('[o1] gesture start');
         await scene.events.invoke('select.rect', 'set', { start: { x: 0.35, y: 0.35 }, end: { x: 0.65, y: 0.65 } });
         const gestureMs = Math.round(performance.now() - tGesture);
+        console.log('[o1] gesture done ' + gestureMs + 'ms');
         // 手势自身的 pass 与后续补算都算清（停手补算是 setTimeout 120ms 后）
         await sleep(1500);
         const gestureBounds = { calls: stat.calls, ms: Math.round(stat.ms) };
@@ -93,7 +99,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             const landed = new Promise(res => { onLanded = res; });
             firedAt = performance.now();
             scene.events.fire('selection.setScreenRange', { x: { low: 0.4 + k * 0.2 } });
-            await landed;
+            // 万一某一杆永远不落地也不要挂死：30s 后继续，并把这一杆记成"超时"
+            await Promise.race([landed, sleep(30000)]);
+            const dt = performance.now() - firedAt;
+            console.log(`[o1] push ${k + 1}/12 ${dt > 29000 ? 'TIMED OUT' : 'landed'} in ${dt.toFixed(1)}ms`);
             await sleep(60);
         }
         const pushWallMs = performance.now() - t0;

@@ -136,12 +136,8 @@ class SelectOp extends StateOp {
     private captureRanges() {
         const splatData = this.splat.splatData;
         const state = splatData.getProp('state') as Uint8Array;
-        const isHit = this.sel instanceof Uint32Array ? sortedPredicate(this.sel) : (i: number) => this.sel[i] === 255;
-
-        // single rule applied uniformly: only non-locked splats are considered.
-        // deleted splats are also valid (so they can be selected when showDeleted
-        // is on, enabling the restore/undelete workflow).
-        const valid = (i: number) => (state[i] & State.locked) === 0;
+        const sel = this.sel;
+        const isHit = sel instanceof Uint32Array ? sortedPredicate(sel) : (i: number) => sel[i] === 255;
 
         // op → bit operation and op → predicate, kept as parallel lookups keyed
         // by the same union so adding an op forces both to be updated together.
@@ -152,11 +148,20 @@ class SelectOp extends StateOp {
             intersect: BitOp.CLEAR
         };
 
+        // single rule applied uniformly: only non-locked splats are considered.
+        // deleted splats are also valid (so they can be selected when showDeleted
+        // is on, enabling the restore/undelete workflow).
+        //
+        // O3 (docs/audit/00-总结.md): `valid(i)` used to be a second closure call on top of
+        // `isHit(i)` for every index — 39–52M calls per push on a 13M model. It is a single
+        // masked compare, so it is inlined; for add/remove the locked and selected bit tests
+        // collapse into one `state[i] & (locked | selected)` read. Operand order is unchanged
+        // (short-circuiting `isHit` is safe now that sortedPredicate advances its cursor).
         const preds = {
-            add: (i: number) => valid(i) && isHit(i) && (state[i] & State.selected) === 0,
-            remove: (i: number) => valid(i) && isHit(i) && (state[i] & State.selected) !== 0,
-            set: (i: number) => valid(i) && (((state[i] & State.selected) !== 0) !== isHit(i)),
-            intersect: (i: number) => valid(i) && (state[i] & State.selected) !== 0 && !isHit(i)
+            add: (i: number) => (state[i] & (State.locked | State.selected)) === 0 && isHit(i),
+            remove: (i: number) => (state[i] & (State.locked | State.selected)) === State.selected && isHit(i),
+            set: (i: number) => (state[i] & State.locked) === 0 && (((state[i] & State.selected) !== 0) !== isHit(i)),
+            intersect: (i: number) => (state[i] & State.locked) === 0 && (state[i] & State.selected) !== 0 && !isHit(i)
         };
 
         this.mask = State.selected;

@@ -49,10 +49,15 @@ class SplatState {
         const { data } = this;
         let lo = Infinity;
         let hi = -1;
-        ranges.forEach((i) => {
-            data[i] |= mask;
-            if (i < lo) lo = i;
-            if (i >= hi) hi = i + 1;
+        // O3: walk the compact runs and spin the per-index loop inline. The old
+        // `ranges.forEach(i => ...)` paid a closure call per index — 39–52M calls per
+        // push on a 13M model — for work that is a byte-wise OR.
+        ranges.forEachRun((start, end) => {
+            if (start < lo) lo = start;
+            if (end > hi) hi = end;
+            for (let i = start; i < end; i++) {
+                data[i] |= mask;
+            }
         });
         if (hi > 0) this.markDirty(lo, hi);
     }
@@ -61,10 +66,12 @@ class SplatState {
         const { data } = this;
         let lo = Infinity;
         let hi = -1;
-        ranges.forEach((i) => {
-            data[i] &= ~mask;
-            if (i < lo) lo = i;
-            if (i >= hi) hi = i + 1;
+        ranges.forEachRun((start, end) => {
+            if (start < lo) lo = start;
+            if (end > hi) hi = end;
+            for (let i = start; i < end; i++) {
+                data[i] &= ~mask;
+            }
         });
         if (hi > 0) this.markDirty(lo, hi);
     }
@@ -73,10 +80,12 @@ class SplatState {
         const { data } = this;
         let lo = Infinity;
         let hi = -1;
-        ranges.forEach((i) => {
-            data[i] ^= mask;
-            if (i < lo) lo = i;
-            if (i >= hi) hi = i + 1;
+        ranges.forEachRun((start, end) => {
+            if (start < lo) lo = start;
+            if (end > hi) hi = end;
+            for (let i = start; i < end; i++) {
+                data[i] ^= mask;
+            }
         });
         if (hi > 0) this.markDirty(lo, hi);
     }

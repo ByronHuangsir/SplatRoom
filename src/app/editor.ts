@@ -1028,6 +1028,23 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         intersect: (had: boolean, hit: boolean) => had && hit
     };
 
+    // O3 (docs/audit/00-总结.md): the same recombination table as a *predicate*. The old form
+    // called `rangeCombine` from inside the fromPredicate closure — two closure calls per
+    // index, 13M of them per push on a 13M model. Selecting the predicate once per op leaves
+    // the streaming loop with nothing but array reads.
+    const rangeCombinePredicate = (
+        opKind: 'add' | 'remove' | 'set' | 'intersect',
+        had: Uint8Array,
+        hit: Uint8Array
+    ) => {
+        switch (opKind) {
+            case 'add': return (i: number) => had[i] !== 0 || hit[i] === 255;
+            case 'remove': return (i: number) => had[i] !== 0 && hit[i] !== 255;
+            case 'intersect': return (i: number) => had[i] !== 0 && hit[i] === 255;
+            default: return (i: number) => hit[i] === 255;
+        }
+    };
+
     // the core window (inner handles) in device pixels, spelled for SelectionRangeView: the
     // drawn shape only applies inside it, the band out to the outer handles is rectangular
     const coreScreenWindow = (
@@ -1072,9 +1089,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const mask = entry.ringPick ?? (entry.cache ?
             selectRangeFromCache(entry.splat, gesture.region, rangeView(gesture, entry), entry.cache) :
             selectRange(entry.splat, gesture.region, rangeView(gesture, entry)));
-        const combine = rangeCombine[entry.opKind];
-        const preMask = entry.preMask;
-        return IndexRanges.fromPredicate(entry.splat.splatData.numSplats, i => combine(preMask[i] !== 0, mask[i] === 255));
+        return IndexRanges.fromPredicate(
+            entry.splat.splatData.numSplats,
+            rangeCombinePredicate(entry.opKind, entry.preMask, mask)
+        );
     };
 
     // run a screen gesture: capture the pose, build one op per splat, hand them to history
@@ -1097,7 +1115,6 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const pose = poseSnapshot();
         const { near, far } = getDepthSelection();
         const entries: RangeEntry[] = [];
-        const combine = rangeCombine[opKind];
 
         for (const splat of splats) {
             const state = splat.splatData.getProp('state') as Uint8Array;
@@ -1171,7 +1188,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 ringPickMask = hit.slice();
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
-            const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
+            const post = IndexRanges.fromPredicate(numSplats, rangeCombinePredicate(opKind, preMask, hit));
 
             entries.push({
                 splat,
@@ -1189,11 +1206,12 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
         // applied through history so every gesture stays one undo step.
         // O1: 这批 op 的 do() 会各自 updateState(State.selected)（原本每次都跑一遍包围盒 pass），
-        // 这里先声明"拖动中"，让它们并进同一次停手补算。
+        // 这里先声明"拖动中"，让它们并进同一次停手补算 —— 手势不走 pump，所以要自己点火。
         deferBounds(entries.map(entry => entry.splat));
         for (const entry of entries) {
             await editHistory.add(entry.op);
         }
+        armBoundSettle();
 
         rangeGesture = entries.length ? { region, bounds, entries } : null;
         rangeOps.clear();
@@ -1208,11 +1226,18 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // ---- O1: 拖动期间合并包围盒重算（见 docs/audit/00-总结.md O1 / 01-量级复查-perf.md O1）
     // 一次拖动会推几十上百次，而每次 `Splat.updateState(State.selected)` 原本都要跑一遍
-    // 「GPU 包围盒 pass + waitForGpuDrain（整一帧）+ 4 次同步回读 + JS 归约」，
-    // 93 万点实测 22–32ms、13M 上 25–60ms，在 2000 点的夹具上更是占一次推杆的 99.9%。
+    // 「GPU 包围盒 pass + waitForGpuDrain（整一帧）+ 4 次同步回读 + JS 归约」：
+    // 2000 点实测 10–18ms（占一次推杆的 95%）、93 万点 ~20ms、13M 上 58–75ms（拖动中因为要等
+    // 一整帧，实测摊到 ~200ms/杆，12 杆共 2.4 秒）。
     // 这次 pass 对"只是选中位变了"毫无必要：localBound 由非删除行归约（bound-shader 只跳 bit 4），
-    // selectionBound 的唯一读点是变换手柄的枢轴。所以拖动期间只置脏，
-    // **停手 120ms 后补算一次**（`refreshDeferredBounds` 无事可做时是空转）。
+    // selectionBound 的唯一读点是变换手柄的枢轴。所以拖动期间只置脏，**停手后补算一次**。
+    //
+    // 定时器只在 **pump 真正排空** 的那一刻重置 —— 这一条是必须的：13M 上一杆本身要 370ms，
+    // 比 120ms 的窗口还长，若按"每次推杆都重置"（第一版就是这么写的），定时器会在拖动过程中
+    // 到点、每杆白跑一次 pass（实测 12 杆 12 次 pass，等于没省）。按排空点重置之后：
+    //   • 小模型（一杆 1ms、指针每 ~16ms 推一次）⇒ pump 每轮都排空，但每次都会被下一杆重置，
+    //     拖动期间永不点火；
+    //   • 大模型（一杆 370ms、期间积压几十个中间值）⇒ pump 一直不排空，拖动期间一次都不跑。
     const BOUND_SETTLE_MS = 120;
     const deferredBoundSplats = new Set<Splat>();
     let boundSettleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1243,12 +1268,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         });
     };
 
-    // 推迟这一批模型的包围盒重算，并把"停手补算"的定时器重置到 BOUND_SETTLE_MS 之后
+    // 推迟这一批模型的包围盒重算（只打标记，不点火）
     const deferBounds = (splats: Splat[]) => {
         for (const splat of splats) {
             splat.boundsDeferred = true;
             deferredBoundSplats.add(splat);
         }
+    };
+
+    // "再没人推了"之后再补算一次
+    const armBoundSettle = () => {
         if (boundSettleTimer !== null) {
             clearTimeout(boundSettleTimer);
         }
@@ -1277,6 +1306,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             }
         } finally {
             rangePumpBusy = false;
+            // pump 排空 = 最后一次推杆已经落地，此刻才点火（见上面的注释）
+            armBoundSettle();
         }
     };
 
