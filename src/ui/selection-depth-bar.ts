@@ -144,17 +144,27 @@ class SelectionDepthBar {
         events.on('selection.depthRange', () => sync());
         events.on('selection.screenRange', () => sync());
 
-        // the bar follows the active tool
-        events.on('tool.activated', (name: string) => {
-            const visible = TOOLS_WITH_RANGE.includes(name);
-            bar.hidden = !visible;
-            if (visible) {
+        // the bar follows the active tool, and is hidden entirely in 环模式（rings）:
+        // 环模式的选中集合由 GPU id 拾取决定（V2 的语义），滑块无从作用，留着就是"死 UI"
+        // （用户 2026-09-15 拍板：环模式下不需要调范围 —— 见 docs/audit/01-量级复查-bug.md 第 8 条）。
+        let activeTool: string | null = null;
+        const barVisible = () => activeTool !== null && TOOLS_WITH_RANGE.includes(activeTool) && events.invoke('camera.mode') !== 'rings';
+        const updateBar = () => {
+            bar.hidden = !barVisible();
+            if (barVisible()) {
                 sync();
             }
+        };
+        events.on('tool.activated', (name: string) => {
+            activeTool = name;
+            updateBar();
         });
         events.on('tool.deactivated', () => {
-            bar.hidden = true;
+            activeTool = null;
+            updateBar();
         });
+        // 切换 中心/环 模式时立刻显隐（camera.mode 由 editor 的 setCameraMode 广播）
+        events.on('camera.mode', () => updateBar());
 
         sync();
     }
