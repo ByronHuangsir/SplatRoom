@@ -348,16 +348,27 @@ export const viewExtentFromBound = (
 
 /**
  * 用 2D 区域 + 深度范围生成选择掩码（255 = 选中），按 splat 原始索引对齐，已排除删除/锁定的高斯。
+ *
+ * `out` / `mark` 是 O2 的两个可选出口（见 docs/audit/00-总结.md O2）：
+ * `out` 让调用方复用自己的掩码缓冲（不然 13M 上每一杆都新分配 13MB），函数内部会先清零；
+ * `mark` 是"这次手势被本算子接管的行"的只增位图 —— 命中掩码的行顺手置 1，
+ * 于是写状态位那一趟不必再单独扫一遍掩码来合并（见 SplatState.applySelectionMask）。
  */
 export const selectRange = (
     splat: Splat,
     region: SelectionRangeRegion,
     view: SelectionRangeView,
-    cache?: RangeProjectionCache | null
+    cache?: RangeProjectionCache | null,
+    out?: Uint8Array | null,
+    mark?: Uint8Array | null
 ): Uint8Array => {
     const splatData = splat.splatData;
     const numSplats = splatData.numSplats;
-    const mask = new Uint8Array(numSplats);
+    const reused = !!out && out.length >= numSplats;
+    const mask = reused ? out : new Uint8Array(numSplats);
+    if (reused) {
+        mask.fill(0);
+    }
 
     const x = splatData.getProp('x') as Float32Array;
     const y = splatData.getProp('y') as Float32Array;
@@ -436,6 +447,9 @@ export const selectRange = (
             continue;
         }
         mask[i] = 255;
+        if (mark) {
+            mark[i] = 1;
+        }
     }
 
     // 环模式：只留看得见的表面（需要投影缓存，见 keepSurface）
@@ -455,15 +469,21 @@ export const selectRangeFromCache = (
     splat: Splat,
     region: SelectionRangeRegion,
     view: SelectionRangeView,
-    cache: RangeProjectionCache
+    cache: RangeProjectionCache,
+    out?: Uint8Array | null,
+    mark?: Uint8Array | null
 ): Uint8Array => {
     const splatData = splat.splatData;
     const numSplats = splatData.numSplats;
-    const mask = new Uint8Array(numSplats);
     const state = splatData.getProp('state') as Uint8Array;
     const { sx: cxs, sy: cys, dist: cd } = cache;
     if (numSplats === 0 || cxs.length < numSplats) {
-        return selectRange(splat, region, view);
+        return selectRange(splat, region, view, null, out, mark);
+    }
+    const reused = !!out && out.length >= numSplats;
+    const mask = reused ? out : new Uint8Array(numSplats);
+    if (reused) {
+        mask.fill(0);
     }
 
     const minDistance = Math.min(view.minDistance, view.maxDistance);
@@ -499,6 +519,9 @@ export const selectRangeFromCache = (
             continue;
         }
         mask[i] = 255;
+        if (mark) {
+            mark[i] = 1;
+        }
     }
 
     if (view.surfaceEpsilon !== undefined) {

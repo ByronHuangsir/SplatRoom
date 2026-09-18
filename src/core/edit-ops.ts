@@ -6,7 +6,7 @@ import { Pivot } from '../scene/pivot';
 import { Scene } from '../scene/scene';
 import { SphereShape } from '../scene/sphere-shape';
 import { Splat } from '../splat/splat';
-import { State } from '../splat/splat-state';
+import { SelectionOp, State } from '../splat/splat-state';
 import { AnimTrack } from '../timeline/anim-track';
 import { Transform } from '../transform/transform';
 
@@ -200,61 +200,71 @@ class UnhideAllOp extends StateOp {
 //
 // 用一个 SelectOp('set', mask) 也能选出同样的结果，但它记的是"受影响的行"（当前选中状态与掩码
 // 不一致的那些），换一个范围再应用一次之后，undo 会退回到上一个中间状态而不是手势之前的状态。
-// 这里改成保存两个快照（pre = 手势之前的选中行，post = 现在的范围选出的行），do 就是
-// "清掉 pre（以及上一次 do 写下的行）、写上 post"，undo 就是反过来 —— 幂等，所以同一个 op 可以
-// 带着新的 post 重复 do()，历史里只留一条（拖动滑块不会刷出一堆撤销步）。
 //
-// 第二次 do() 必须把**上一次的范围**也清掉：只清 pre 的话，收窄范围时上一版选中的行会留
-// 在选区里（367 个点收窄到 40% 仍然是 367 个 —— 这个 bug 记一笔）。
+// O2（docs/audit/00-总结.md）：原来是「掩码 → fromPredicate 建 IndexRanges → clearBits(pre) +
+// clearBits(applied) + setBits(post)」，13M 上等于四趟全扫（推杆 500–700ms）。现在算子直接持
+// **掩码**，交给 SplatState.applySelectionMask 一趟写完（同一趟里增量维护 numSelected）。
+// 逐位语义与旧实现等价：
+//   managed = 手势开始时的选中集(preMask) ∪ 用过的每一个掩码（只增不减）
+//   被接管的行上：selected = combine(preMask, mask)
+// locked（隐藏）的行不在 managed 里 —— 它们带着 selected 位，旧实现的 clearBits(pre) 也只碰
+// "selected 且没锁"的行，所以必须原样保留。
 class SelectRangeOp implements EditOp {
     name = 'selectRange';
 
     splat: Splat;
 
+    private preMask: Uint8Array;
+
+    // the gesture-start selection in range form: undo needs to set it back
     private pre: IndexRanges;
 
-    private post: IndexRanges;
+    // rows this op owns (monotonic; see SplatState.applySelectionMask)
+    private managed: Uint8Array;
 
-    // what the last successful do() wrote, so a re-apply clears it too
-    private applied: IndexRanges | null = null;
+    private mask: Uint8Array;
 
-    constructor(splat: Splat, pre: IndexRanges, post: IndexRanges) {
+    private op: SelectionOp;
+
+    constructor(
+        splat: Splat,
+        preMask: Uint8Array,
+        pre: IndexRanges,
+        mask: Uint8Array,
+        managed: Uint8Array,
+        op: SelectionOp
+    ) {
         this.splat = splat;
+        this.preMask = preMask;
         this.pre = pre;
-        this.post = post;
+        this.mask = mask;
+        this.managed = managed;
+        this.op = op;
     }
 
     /** 换一个范围（滑块动了）：调用方随后重新 do() 即可。 */
-    setPost(post: IndexRanges) {
-        this.post = post;
+    setMask(mask: Uint8Array) {
+        this.mask = mask;
     }
 
     async do() {
-        const { state } = this.splat;
-        state.clearBits(this.pre, State.selected);
-        if (this.applied) {
-            state.clearBits(this.applied, State.selected);
-        }
-        state.setBits(this.post, State.selected);
-        this.applied = this.post;
+        this.splat.state.applySelectionMask(this.preMask, this.mask, this.managed, this.op);
         await this.splat.updateState(State.selected);
     }
 
     async undo() {
         const { state } = this.splat;
-        if (this.applied) {
-            state.clearBits(this.applied, State.selected);
-        }
+        state.revertSelectionMask(this.preMask, this.mask, this.managed, this.op);
         state.setBits(this.pre, State.selected);
-        this.applied = null;
         await this.splat.updateState(State.selected);
     }
 
     destroy() {
         this.splat = null;
+        this.preMask = null;
         this.pre = null;
-        this.post = null;
-        this.applied = null;
+        this.managed = null;
+        this.mask = null;
     }
 }
 

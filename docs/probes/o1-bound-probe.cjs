@@ -12,12 +12,27 @@
 //   T1 档先 `copy D:\DeepSeek\SplatRoomV2\_tmp\scan.ply dist\scan.ply`，跑完**记得删掉**（否则会进 asar）。
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+// 无头 Edge 会节流（甚至停掉）rAF，而 app 的导入路径要 await 一帧（replaceData 的 waitForRender），
+// 于是 13M 的导入会永远停在原地、页面 CPU 也几乎为 0。这几个开关是无头/CI 跑法必须加的。
+const NO_THROTTLE = [
+    '--no-sandbox',
+    '--enable-unsafe-webgpu',
+    '--ignore-gpu-blocklist',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-features=CalculateNativeWinOcclusion'
+];
+
 const MODEL = process.argv[2] || 'test-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
+    const t0 = Date.now();
+    const mark = (msg) => console.log(`[probe ${((Date.now() - t0) / 1000).toFixed(0)}s] ${msg}`);
+    mark('launching browser');
+    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: NO_THROTTLE, protocolTimeout: 1800000 });
     const page = await browser.newPage();
     await page.setViewport({ width: 1400, height: 900 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 200)));
@@ -28,12 +43,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await page.waitForFunction('!!window.scene', { timeout: 90000 });
     await sleep(1500);
+    mark('importing ' + MODEL);
     await page.evaluate(async (m) => {
         const buf = await (await fetch('./' + m)).arrayBuffer();
         await window.scene.events.invoke('import', [{ filename: m, contents: new File([buf], m) }]);
     }, MODEL);
-    await page.waitForFunction("window.scene.getElementsByType('splat').length > 0", { timeout: 900000 });
+    await page.waitForFunction("window.scene.getElementsByType('splat').length > 0", { timeout: 900000, polling: 500 });
+    mark('imported');
     await sleep(8000);
+    mark('measuring');
 
     const out = await page.evaluate(async () => {
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));

@@ -20,7 +20,7 @@ import { selectDepthBand } from '../splat/selection-band';
 import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
-import { State } from '../splat/splat-state';
+import { State, SelectionOp } from '../splat/splat-state';
 import { i18n } from '../ui/localization';
 
 const removeExtension = (filename: string) => {
@@ -976,6 +976,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // selection bits as they were before the gesture, locked rows excluded (that is
         // SelectOp's notion of valid): add / remove / intersect recombine off this
         preMask: Uint8Array;
+        // 当前掩码的缓冲（255 = 命中）：**复用**同一块，推杆时只 fill(0) + 重写，
+        // 13M 上每杆省一次 13MB 分配（O2）
+        hit: Uint8Array;
+        // 本算子接管的行（只增不减），见 SplatState.applySelectionMask
+        managed: Uint8Array;
         opKind: 'add' | 'remove' | 'set' | 'intersect';
     };
 
@@ -1021,28 +1026,12 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             { min: 0, max: 1 };
     };
 
-    const rangeCombine = {
-        set: (had: boolean, hit: boolean) => hit,
-        add: (had: boolean, hit: boolean) => had || hit,
-        remove: (had: boolean, hit: boolean) => had && !hit,
-        intersect: (had: boolean, hit: boolean) => had && hit
-    };
-
-    // O3 (docs/audit/00-总结.md): the same recombination table as a *predicate*. The old form
-    // called `rangeCombine` from inside the fromPredicate closure — two closure calls per
-    // index, 13M of them per push on a 13M model. Selecting the predicate once per op leaves
-    // the streaming loop with nothing but array reads.
-    const rangeCombinePredicate = (
-        opKind: 'add' | 'remove' | 'set' | 'intersect',
-        had: Uint8Array,
-        hit: Uint8Array
-    ) => {
-        switch (opKind) {
-            case 'add': return (i: number) => had[i] !== 0 || hit[i] === 255;
-            case 'remove': return (i: number) => had[i] !== 0 && hit[i] !== 255;
-            case 'intersect': return (i: number) => had[i] !== 0 && hit[i] === 255;
-            default: return (i: number) => hit[i] === 255;
-        }
+    // O2: opKind 的枚举形式，给 SplatState 那趟写位循环用（免得内层循环里比字符串）
+    const selectionOps: Record<'add' | 'remove' | 'set' | 'intersect', SelectionOp> = {
+        set: SelectionOp.set,
+        add: SelectionOp.add,
+        remove: SelectionOp.remove,
+        intersect: SelectionOp.intersect
     };
 
     // the core window (inner handles) in device pixels, spelled for SelectionRangeView: the
@@ -1081,18 +1070,23 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         return {};
     };
 
-    // one entry's post mask for the current range: the 2D hit mask recombined with the
-    // selection the gesture started from
-    const rangePost = (gesture: RangeGesture, entry: RangeEntry): IndexRanges => {
+    // one entry's hit mask for the current range (O2: 直接产掩码，不再产 IndexRanges)。
+    // `entry.hit` 是复用缓冲，`entry.managed` 是"被本算子接管的行"（只增不减）——
+    // selectRange* 在写掩码的同一趟里顺手置位，所以这里不需要额外再扫一遍。
+    const rangeMask = (gesture: RangeGesture, entry: RangeEntry): Uint8Array => {
         // 环模式：沿用这次手势的拾取掩码。以前这里会重算解析穿透掩码，于是任何一次推杆都把
         // "只选表面"悄悄翻回整段穿透（审计 selection.md 第 1 条）。
-        const mask = entry.ringPick ?? (entry.cache ?
-            selectRangeFromCache(entry.splat, gesture.region, rangeView(gesture, entry), entry.cache) :
-            selectRange(entry.splat, gesture.region, rangeView(gesture, entry)));
-        return IndexRanges.fromPredicate(
-            entry.splat.splatData.numSplats,
-            rangeCombinePredicate(entry.opKind, entry.preMask, mask)
-        );
+        if (entry.ringPick) {
+            const pick = entry.ringPick;
+            const managed = entry.managed;
+            for (let i = 0; i < pick.length; i++) {
+                if (pick[i] !== 0) managed[i] = 1;
+            }
+            return pick;
+        }
+        return entry.cache ?
+            selectRangeFromCache(entry.splat, gesture.region, rangeView(gesture, entry), entry.cache, entry.hit, entry.managed) :
+            selectRange(entry.splat, gesture.region, rangeView(gesture, entry), null, entry.hit, entry.managed);
     };
 
     // run a screen gesture: capture the pose, build one op per splat, hand them to history
@@ -1152,9 +1146,12 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
             }
 
-            // the projection cache is filled by this same pass, so later slider pushes are cheap
+            // the projection cache is filled by this same pass, so later slider pushes are cheap.
+            // O2: hit / managed 都是**每 entry 一块、复用**的缓冲 —— 推杆时 hit 只 fill(0) 再重写。
             const cache = createRangeCache(numSplats);
-            const hit = selectRange(splat, region, view, cache);
+            const hit = new Uint8Array(numSplats);
+            const managed = new Uint8Array(numSplats);
+            selectRange(splat, region, view, cache, hit, managed);
 
             // 环模式：**只选"表面能碰到的部分"** —— 对齐 V2 / SuperSplat 的 selection depth 语义：
             // 渲染一次深度 pass（每像素最前表面），只保留落在那层表面前后极薄一带里的高斯。
@@ -1180,19 +1177,27 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                     picked.add(pick[i]);
                 }
                 for (let i = 0; i < numSplats; i++) {
-                    hit[i] = picked.has(i) ? 255 : 0;
+                    if (picked.has(i)) {
+                        hit[i] = 255;
+                        managed[i] = 1;
+                    } else {
+                        hit[i] = 0;
+                    }
                 }
                 console.log(`[v3] rings pick (V2 logic): ${picked.size} visible ids`);
-                // 记下来给滑块重切用（见 rangePost）：不清空的话，下一次推杆会用解析穿透掩码
+                // 记下来给滑块重切用（见 rangeMask）：不清空的话，下一次推杆会用解析穿透掩码
                 // 覆盖掉这次拾取，"只选表面"就静默失效了
-                ringPickMask = hit.slice();
+                ringPickMask = hit;
+            }
+            // 手势开始时就选中的行也在"被接管"之列（旧实现里它们先被 clearBits(pre) 清掉）
+            for (let i = 0; i < numSplats; i++) {
+                if (preMask[i] !== 0) managed[i] = 1;
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
-            const post = IndexRanges.fromPredicate(numSplats, rangeCombinePredicate(opKind, preMask, hit));
 
             entries.push({
                 splat,
-                op: new SelectRangeOp(splat, pre, post),
+                op: new SelectRangeOp(splat, preMask, pre, hit, managed, selectionOps[opKind]),
                 view,
                 extent,
                 cache,
@@ -1200,6 +1205,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 screenTails,
                 ringPick: ringPickMask,
                 preMask,
+                hit,
+                managed,
                 opKind
             });
         }
@@ -1300,7 +1307,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 }
                 deferBounds(gesture.entries.map(entry => entry.splat));
                 for (const entry of gesture.entries) {
-                    entry.op.setPost(rangePost(gesture, entry));
+                    entry.op.setMask(rangeMask(gesture, entry));
                     await scene.commandQueue.enqueue(() => entry.op.do());
                 }
             }
