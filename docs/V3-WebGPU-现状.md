@@ -2258,6 +2258,138 @@ WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
   在 `verify-load-worker.cjs` 里那条「为什么还关着」的 informational（手势 213 vs 2000）变成两边一致
   之前，开关保持 opt-in。
 
+### 6.49 第四十七轮：A2（导出/回退的冗余拷贝）+ A3（投影缓存量化与可见提示）—— 审计「执行顺序」全部走完
+
+这一轮做完的是上一节「还剩什么」里的前两项：**A2**（第 8 条）与 **A3**（第 10 条）。
+两条的硬约束都不是"更快"，而是**不许改变结果** —— A2 是「**输出字节不变**」，
+A3 是"两端仍然精确"（0/100 = 整段穿透的语义不能动）。
+
+**本轮提交链**：`28b69e5` A2 → **`bc4e6a0` A3**（写这一节时 A3 还在工作树里，后来提交为 `bc4e6a0`；
+改动 = `selection-range.ts` / `editor.ts` / `selection-depth-bar.ts` / `select-toolbar.scss` /
+9 个 locale + 新套件 `verify-range-cache-hint.cjs`）。
+
+| # | 审计条目 | 改了什么 | 硬约束 / 实测 |
+| --- | --- | --- | --- |
+| 1 | **A2**（第 8 条，≥500 万点） | 导出前置过滤「两遍完整谓词」→ 廉价谓词定上界 + 单遍填充 + 尾部裁剪；面细化回退副本 741MB 无条件预复制 → 惰性 provider | **输出字节不变**；往返套件 5 项：导出 213 点、逐点比 x/y/z **0 个不一致** |
+| 2 | **A3**（第 10 条） | 投影缓存 `dist` Float32 → **Uint16**（8 → **6 B/点**）；门槛从写死 2400 万点 → **字节预算 192MB ⇒ ≈3200 万点**；被拒时给**可见提示** | 两端 0/65535 **精确**，内部误差 ≤ extent/65535；选择套件双后端 0 失败 |
+
+**A2 第一半 —— PLY 序列化的前置过滤：两遍完整谓词 → 廉价谓词定上界 + 单遍填充**
+
+**为什么这么改**：`splat-serialize.ts` 的构造函数里，`countGaussians()`（只为知道映射表多长）
+与填表**两遍都用完整谓词**，而 PLY 导出路径（`file-handler` 强制 `minOpacity = 1/255` +
+`removeInvalid = true`）的完整谓词**每个高斯都要遍历全部顶点属性**做 `Number.isFinite` ——
+13M × 14 列就是**两遍 1.8 亿次属性检查**。
+
+- `GaussianFilter` 拆出 `bound(i)`：只有 `deleted` / `selected` / `opacity` 判定，**不含逐属性扫描**。
+  凡是 `test` 拒绝的 `bound` 也拒绝 ⇒ 用 `bound` 数出来的长度**必然 ≥ 实际行数**；
+- 构造函数改成：`countGaussianBound()` 定长度 → `test` **单遍**填充 → 尾部裁剪。前置停顿因此**砍半**；
+- 裁剪策略：差值 **> 10%** 才 `slice()` 真正丢掉大缓冲（否则 `subarray` 零拷贝）——
+  常见情形（几乎没有非法行）**不付任何拷贝**；
+- **补上硬报错**：`idx > bound` 直接 throw。旧代码里两遍谓词一旦不一致，映射表尾部会留 0 ⇒
+  **每行都指向源的第 0 行、行数照样对、内容是错的**，而且没有任何提示。现在要么正确、要么响亮地失败；
+- 顺带修掉热路径：`getElement('vertex')` 原本在**谓词内部**（每点一次），
+  `infOk` / `negInfOk` 是 `Set<string>.has(name)` **每点每属性一次**字符串哈希 ——
+  两者都挪到 `set()` 里按 splat 缓存（属性表 + 两个权限位预计算成布尔）。
+
+**A2 第二半 —— 面细化回退副本：无条件预复制 → 惰性 provider**
+
+`surface-worker-client.ts` 在 postMessage（会 detach）之前**无条件**复制一份 **741MB@13M** 的回退副本，
+而它只在 worker 失败或 10 分钟超时才用得上。
+
+- `refineSurfaceInWorker` 新增可选 `fallbackProvider?: () => RefineBuffers`；传了就**不预复制**，
+  只有真的走到 `catch` 才现取；
+- `surface-refiner.ts` 传的 provider 从 **splat 自己的数据**重新 clone —— 被 transfer 的是那份
+  `cloneGSplatData()` 的克隆，splat 的存储没被碰过，所以随时可以重建；
+- 没传 provider 的调用方**保持老行为**（预先复制），入口自身仍然安全。
+
+**A2 的验证**（新增 `docs/verify/verify-export-roundtrip.cjs`，**5 项**）：
+`import test-model` → 框选 **213/2000** → `edit.duplicate`（内部就是 `writeSplatFile(selected:true)`
+→ Blob → 重新 load）→ 断言：导出点数 **213 = 选中数**；**排序后逐点比 x/y/z，213 个点 0 个不一致**；
+且没有退化成"每行都是源第 0 行"（前 50 行里 **49 行**与源首行不同）。
+33 套批量里原本**没有任何一套碰过 `splat-serialize`**，所以这个往返套件是这一条**唯一的回归保护**。
+
+**踩到的坑**：比较必须**行序无关**。重新 load 时 loader 会做一次空间（morton）重排，
+第一版按行号比对得到 **208/213 不一致** —— 那是**量法错、不是导出错**。
+
+**A3 —— 投影缓存：Float32 深度 → 16 位量化，门槛改成字节预算，被拒时给可见提示**
+
+**为什么这么改**：缓存是 `sx`/`sy` Int16 + `dist` Float32 = **8 B/点**，上限写死 **2400 万点**；
+13M 已经占了 54%，而**一旦超限就静默退回逐点重投影**（审计记 ~900ms，13M 上实测约 **2 秒**）——
+用户看到的现象只是"滑块好像坏了"。
+
+- `dist` 从 Float32 **量化到 `Uint16Array`**（8 B/点 → **6 B/点**）。量化区间是**模型沿视轴的深度范围**
+  （`extent`，见 `viewExtentFromBound`）：所有高斯都在这个区间里，所以**两端精确** ——
+  0/100（整段穿透）仍然精确落在 0 与 65535 上，只有**区间内部**引入
+  ≤ `extent / 65535` 的误差（13M 房间扫描实测 ≈ **0.001** 世界单位，而深度窗口的步长是 extent 的
+  0.5% ≈ **0.33**，**差三个数量级**）；
+- 缓存结构新增 `distMin` / `distScale = (max-min)/65535`；`createRangeCache(numSplats, distMin, distMax)`；
+  写入侧 `q = round((distance - distMin) / distScale)`（夹到 0..65535），读取侧
+  `distance = distMin + dist[i] * distScale`（`selectRangeFromCache` 那一趟只多两次乘加）。
+  退化（`span <= 0`）时 `distScale = 0`，反解恒等于 `distMin`，与线性映射一致；
+- 门槛从写死的点数改成**字节预算**：`CACHE_BYTES_PER_SPLAT = 6` /
+  `CACHE_MAX_BYTES = 192MB` ⇒ `CACHE_MAX_SPLATS = ⌊192MB / 6⌋ ≈ **3200 万点**`
+  —— 正好**覆盖 30M 那一档**（原来 8 B/点 + 2400 万上限会把 30M 直接拒掉，
+  于是每次推杆都退回全量重投影）；
+- **可见提示**：`runRangeSelection` 在所有 entry 都没拿到缓存时 fire
+  `selection.rangeCacheRefused`，`selection-depth-bar.ts` 把标题换成一句说明
+  （新增 locale 键 `select-toolbar.rangeCacheTooLarge`，**9 语言 685 → 686 键**），
+  并加 CSS 类 `.range-refused`（`$clr-hilight`，字号 11px / 行高 1.25）。
+  旧行为是**完全静默**，用户只觉得"滑块坏了"。
+
+**A3 的验证**：`verify-selection-range`（**24 项**，含审计点名的 **far 100→90→85 端点用例**）
+与 `verify-selection-depth-bar` / `verify-selection-depth` / `verify-mask-vs-rect`
+在 **webgpu + webgl2 全 0 失败**；新增 `docs/verify/verify-range-cache-hint.cjs`（**4 项**）
+验证**接线**：正常时标题是「选区范围」，被拒时换成说明并带 `range-refused` 类，恢复后回到原文。
+
+**踩到的坑**：真的做不出 3200 万点的模型来触发阈值，所以提示这条只能验**事件 → 标题/类名**的接线；
+阈值本身由常量表达（`CACHE_BYTES_PER_SPLAT × CACHE_MAX_SPLATS ≤ CACHE_MAX_BYTES`，见源码注释），
+不靠"跑一个大模型"来保证。
+
+**本轮新增的验证资产**（两个都**进 33 套批量**，不需要额外夹具）
+
+| 资产 | 项数 | 跑法 |
+| --- | --- | --- |
+| `docs/verify/verify-export-roundtrip.cjs` | **5 项** | `node docs/verify/verify-export-roundtrip.cjs "http://localhost:3621/?gpu=webgpu"` |
+| `docs/verify/verify-range-cache-hint.cjs` | **4 项** | `node docs/verify/verify-range-cache-hint.cjs "http://localhost:3621/?gpu=webgpu"` |
+
+`verify-export-roundtrip.cjs` 是**批量里第一个碰 `splat-serialize` 的套件**（写文件 → Blob → 重新 load，
+逐点比 x/y/z 且与行序无关）；`verify-range-cache-hint.cjs` 固化「事件 → 标题/类名」的接线。
+
+**验证**（本轮两条的回归）：
+
+- A2（`28b69e5` 的记录）：`verify-export-roundtrip` **5 项** 0 失败；`verify-export-image` /
+  `verify-export-orientation` / `verify-equirect-export` / `verify-edit-grade-crop` /
+  `verify-edit-hide` / `verify-model-renders` / `verify-selection-range` / `verify-degenerate-bound` /
+  `verify-shape-selection` 全 0 失败；`npm run check` 干净；
+- A3：`verify-selection-range`(24) / `verify-selection-depth-bar`(19) / `verify-selection-depth` /
+  `verify-mask-vs-rect` webgpu + webgl2 全 0 失败；`verify-range-cache-hint`(4) 0 失败；
+  `npm run lint:locales` 通过（9 语言 × **686** 键）。
+
+**审计第〇节「执行顺序（修订版）」的 11 条到此全部走完**：
+
+| # | 条目 | 状态 |
+| --- | --- | --- |
+| 1 | O1 选区变更不触发 GPU 包围盒 pass | ✓ 6.48（T2 单杆 600.06 → 452.54ms） |
+| 2 | O3 去掉每索引闭包 | ✓ 6.48 |
+| 3 | ±1e6 高危（全选+删除切空场景） | ✓ 6.48（半径 3.23 / near 2.0e-4） |
+| 4 | 环模式 UI 二选一 | ✓ 3.21.0 就做了（环模式下隐藏范围面板） |
+| 5 | O2 掩码→状态位一趟按位写 | ✓ 6.48（再降到 **275.71ms**） |
+| 6 | A1 簇过滤 dense + 去浮云内存 | ✓ 6.48（并量出审计算错网格 6300 倍） |
+| 7 | load worker | ✓ **评估后结论：不能开**，退回 opt-in（`7a16371`） |
+| 8 | A2 导出/回退冗余拷贝 | ✓ 本轮（输出字节不变，往返 5 项） |
+| 9 | O5 导出排序间隔自适应 | ✓ 6.48（13M ~300ms → **~23ms/帧**） |
+| 10 | A3 投影缓存量化 + 门槛 + 提示 | ✓ 本轮（6 B/点、≈3200 万点、被拒可见） |
+| 11 | 着色器窗口判定 | ⏳ **按审计自己的门槛（>2400 万点才启用）暂不需要** —— A3 已把 30M 拉回缓存路径 |
+
+**还剩什么**（详见 `docs/进度存档.md` 第 2 节）：
+
+1. **第 11 条（着色器窗口判定）**：审计的结论是"门槛设在 A3 悬崖的位置（n > 2400 万，量化后 > 3200 万）"，
+   而 A3 把上限提到 ≈3200 万之后，30M 重新走缓存 ⇒ **这条的触发条件暂时不存在**；
+   T0/T1 上它净负、T2 边际，所以先不做；
+2. **13M 上 floater/cluster 检测的 101 秒冻结**：网格 2.4e10 格 ⇒ 永远走 `Map` 回退，
+   A1 的 dense 化救不了它，要换数据结构或改成「点『计算』才跑 + 给预估耗时」；
+3. **load worker 输出不等价**：列字节一致但选区结果不同（213 vs 2000），查清之前保持 opt-in。
+
 
 
 
