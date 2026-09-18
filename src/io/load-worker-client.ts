@@ -31,9 +31,13 @@ type Pending = {
     skipReorder?: boolean;
 };
 
-// Feature flag — enabled only by setting window.__SPLATROOM_ENABLE_LOAD_WORKER__ = true.
+// Feature flag — ON by default, per the header's promise that the fallback makes it safe.
+// It used to be opt-in via `window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`, and since nothing
+// in the repo ever set that (see docs/audit/00-总结.md 高危 7), the worker never ran and the whole
+// decode + morton sort + row reorder stayed on the main thread — the ~15s freeze on a 13M import.
+// `window.__SPLATROOM_NO_LOAD_WORKER__ = true` disables it for A/B testing.
 const USE_LOAD_WORKER =
-    (typeof window !== 'undefined') && (window as any).__SPLATROOM_ENABLE_LOAD_WORKER__ === true;
+    (typeof window !== 'undefined') && (window as any).__SPLATROOM_NO_LOAD_WORKER__ !== true;
 
 const ctorMap: Record<string, any> = {
     Int8Array,

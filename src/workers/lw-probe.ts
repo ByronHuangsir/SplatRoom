@@ -122,7 +122,14 @@ const run = async () => {
             result.match.cols[p] = { worker: wc, main: mc, same: wc === mc };
         }
         result.ok = result.match.numSplats &&
-            Object.values(result.match.cols).every((c: any) => c.same);
+            Object.values(result.match.cols).every((c: any) => c.same) &&
+            // The old probe only *recorded* the worker dispatch count, so a run with the feature
+            // flag off called the same synchronous loader twice and still reported ok=true —
+            // a false green (docs/audit/00-总结.md 高危 7). The worker must actually have run.
+            result.workerResults > 0;
+        if (result.workerResults === 0) {
+            result.why = 'load worker never ran (0 worker results): the flag is off or the worker failed to start';
+        }
         result.stage = 'done';
     } catch (e: any) {
         result.error = String(e && e.message ? e.message : e);
