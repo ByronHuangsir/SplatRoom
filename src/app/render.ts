@@ -1496,7 +1496,14 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                 // export cost on large models (~300ms/frame at 14M points), so
                 // re-sort only every SORT_INTERVAL frames; skipped frames reuse
                 // the previous order with no visible difference.
-                const SORT_INTERVAL = 2;
+                //
+                // O5 (docs/audit/00-总结.md): the interval is now a function of the model size,
+                // using the same formula as camera-preview.ts's adaptive throttle. A constant 2
+                // meant a 13M export waited ~150ms per frame on the strict sort; sorting every
+                // 13th frame brings that to ~23ms. Small models keep the constant 2 — they sort in
+                // a few ms anyway, so a tighter interval only buys quality insurance.
+                const exportSplatCount = (scene.getElementsByType(ElementType.splat) as Splat[]).reduce((n, splat) => Math.max(n, splat.splatData?.numSplats ?? 0), 0);
+                const SORT_INTERVAL = Math.max(2, Math.ceil(exportSplatCount / 1e6));
                 let sortSkipCounter = 0;
 
                 // Track first frame for keyframe forcing (same reason as main render)
