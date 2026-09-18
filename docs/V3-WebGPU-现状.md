@@ -1990,11 +1990,16 @@ offset(dx) = sign(dx) · 0.02 · ( |dx| + dx² / 80 )        （dx 单位 px）
 那是下一轮的事。93 万点的扫描上推杆仍是 **30–43ms**（顺滑）。
 
 
-### 6.48 第四十六轮：按审计「执行顺序」做的六项（O1/O3/±1e6 高危/O2/A1/O5）+ 启用 load worker
+### 6.48 第四十六轮：按审计「执行顺序」做的六项（O1/O3/±1e6 高危/O2/A1/O5）+ load worker 评估（实测证明不能开）
 
 这一轮的输入不是用户反馈，而是审计文档：`docs/audit/00-总结.md` 第〇节「**执行顺序（修订版）**」
-（11 条）里的前 9 条，做了其中 6 条 + 高危 7。**每一条都是先量再改，改完在同一台机、同一个
-`merged-scene`（13,007,105 点 / 695MB）上复核**，量出来的数字写在下面每一节里。
+（11 条）里的前 9 条 —— **6 条做完，高危 7（load worker）评估过、实测证明不能开**（第 7 条见下）。
+**每一条都是先量再改，改完在同一台机、同一个 `merged-scene`（13,007,105 点 / 695MB）上复核**，
+量出来的数字写在下面每一节里。
+
+**本轮提交链**（`git log`）：`978553a` O1 → `ad9a549` O3 + ±1e6 高危 → `b63d99b` O2 → `bb0b2b6` A1
+→ `ef62816` O5 → `04dd8c9` load worker 默认开启 → **`7a16371` revert：load worker 退回 opt-in**
+（下面第 7 条按 revert 之后的结论写）。
 
 | # | 审计条目 | 一句话 | 13M 上的实测 |
 | --- | --- | --- | --- |
@@ -2004,7 +2009,7 @@ offset(dx) = sign(dx) · 0.02 · ( |dx| + dx² / 80 )        （dx 单位 px）
 | 4 | O2（第 5 条，门槛 ≥250 万点） | 掩码 → 状态位压成一趟按位写 | 一杆 452.54 → **275.71ms**（相对最初 600ms **−54%**）|
 | 5 | A1（第 6 条） | 簇过滤 dense 化 + 去浮云内存 | T1 冻结 406 → **323ms**；并量出审计算错网格 **6300 倍** |
 | 6 | O5（第 9 条，≥300 万点） | 导出的排序间隔 `max(2, ceil(n/1e6))` | 13M 一次排序 ~300ms ⇒ **~23ms/帧** |
-| 7 | load worker（高危 7 / 第 7 条） | 开关反转为**默认开启** | 931k 主线程最长冻结 1640 → **855ms（−48%）** |
+| 7 | load worker（高危 7 / 第 7 条） | 试过默认开启，**实测证明不能开**，已 revert 回 opt-in（`7a16371`） | 同一手势选中 **213 → 2000（整个模型）**；冻结确实 1640 → 855ms，但**每一次框选都静默选错** |
 
 **O1 —— 选区变更不再触发 GPU 包围盒 pass（第 1 条，全档必做）**
 
@@ -2157,29 +2162,41 @@ WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
 注：审计的 O5 明确说**交互路径的排序节流不做**（主线程从来没被排序阻塞过，节流只会让「顺序滞后」
 更明显），只有导出路径成立 —— 所以这里只动导出这一处。
 
-**load worker 默认开启（高危 7 / 第 7 条）**
+**load worker —— 评估过，实测证明不能开（高危 7 / 第 7 条）**
 
 `load-worker-client.ts` 的开关是「显式 opt-in」（`window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`），
 而**全仓没有任何地方设置它** ⇒ 解码 + 莫顿排序 + 行重排一直在**主线程**上跑，
-`workers/load-worker.ts` 是死代码 —— 这正是「导入 13M 要 ~15 秒、界面完全不能动」的大头。
+`workers/load-worker.ts` 是死代码 —— 这确实是「导入 13M 要 ~15 秒、界面完全不能动」的大头。
+所以按审计把它**反转为默认开启**（`__SPLATROOM_NO_LOAD_WORKER__ = true` 可关）试了一次，
+**结果当场被验证拦下来了**：`04dd8c9` 之后紧跟着就是 **`7a16371` revert（退回 opt-in）**。
 
-- 开关**反转为默认开启**（`window.__SPLATROOM_NO_LOAD_WORKER__ = true` 可关，供 A/B 与调试），
-  与文件头原本的承诺（"safe to enable by default"）以及失败自动回退到同步 `loadGSplatData` 一致；
-- `lw-probe.ts` 的**假绿**修掉：旧判据只比较「worker 结果 vs 主线程结果」，而开关没开时
-  `loadGSplatDataAsync` 直接调**同一个** `loadGSplatData`（同一函数、同一线程）⇒ 两边必然相同 ⇒ `ok=true`。
-  现在附加 `workerResults > 0`，并在为 0 时给出 why。
+**实测（小模型夹具上的行为对比，这一栏是决定性的）**：
 
-**实测**（新增 `docs/verify/verify-load-worker.cjs`；同一个浏览器里同一模型跑两遍，一遍开一遍关）：
-
-| 931k（scan.ply，210MB） | worker 开 | worker 关 |
+| 2000 点夹具 / 同一个矩形手势（0.35–0.65） | worker 关（默认） | worker 开 |
 | --- | --- | --- |
-| 导入墙钟 | 2205 ms | 2262 ms |
-| **主线程最长冻结（20ms 心跳最大间隔）** | **855 ms** | **1640 ms** |
-| 高斯数 | 931,720 ✓ | 931,720 ✓ |
-| worker 派发计数 | **1** ✓ | **0** ✓ |
+| 矩形选中数 | **213**（框内那 10%） | **2000（整个模型）** |
+| 之后再推一次「最远 99」 | **202** | **0** |
+| x/y/z/opacity/state/rot_0 逐字节校验和 | 完全一致 | 完全一致 |
+| 主线程最长冻结（931k 导入） | 1640 ms | **855 ms** |
+| worker 派发计数（931k 导入） | 0 | 1 |
 
-⇒ 墙钟差不多（总时长受 I/O 主导），但**最长冻结砍掉一半（−48%）** —— 这才是「界面能不能动」的指标。
-13M 上的绝对值没能复测（本机后半程 13M 导入必然卡住，见下面的环境坑）。
+也就是说：worker 的输出在**列字节上完全一样**（`verify-load-worker.cjs` 里的 FNV-1a 校验和两边相同），
+却让选择结果从「框内那 10%」变成「整个模型」—— **差异藏在列哈希抓不到的地方（中心点 / 排序元数据）**。
+开启它 = **每一次框选都静默选错**，比「导入慢 15 秒」严重得多，所以开关**退回 opt-in**，
+原因与证据也写进了 `src/io/load-worker-client.ts` 的注释。
+
+- worker 本身**不删**：它能跑（`workerResults = 1`），931k 导入的主线程最长冻结确实从 1640 → **855ms**
+  （墙钟 2262 → 2205ms），**等把「输出为什么不等价」查出来再打开**；
+- `lw-probe.ts` 的**假绿**修掉并且**保留**：旧判据只比较「worker 结果 vs 主线程结果」，而开关没开时
+  `loadGSplatDataAsync` 直接调**同一个** `loadGSplatData`（同一函数、同一线程）⇒ 两边必然相同 ⇒ `ok=true`。
+  现在附加 `workerResults > 0`、为 0 时给 why —— **正是这道「先修探针」让上面那次对比有了可信信号**，
+  它也是将来重开开关前必须先过的一关。
+
+**顺带踩到的坑（值得单独记一条）**：开关默认打开时，**全套批量里 9 个彼此无关的套件同时变红**
+（`selection-range` 16 项、`shape-volume-lines` 10 项、`shape-selection` 6 项、`edit-grade-crop` 4 项、
+`effects` 4 项、`pip-camera` 3 项、`centers-overlay` 3 项、`ortho-camera` 2 项、`degenerate-bound` 1 项）；
+退回 opt-in 后**全部 0 失败**。**同一批红是同一个根因（选区错），别当成各自的问题去逐个查** ——
+那一轮如果挨个查会白烧掉一整天。
 
 **本轮新增的验证资产**
 
@@ -2188,7 +2205,7 @@ WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
 | `docs/verify/verify-index-ranges.mts` | **18 项**（纯 node，不占浏览器） | `node --experimental-strip-types docs/verify/verify-index-ranges.mts` |
 | `docs/verify/verify-degenerate-bound.cjs` | **10 项**（含自证伪断言，双后端） | `node docs/verify/verify-degenerate-bound.cjs "http://localhost:3621/?gpu=webgpu"` |
 | `docs/verify/gen-floater-biggrid-splat.cjs` + `verify-floater-biggrid.cjs` | **5 项** | 先生成模型 `node docs/verify/gen-floater-biggrid-splat.cjs`（默认写 `dist/floater-biggrid-test.ply`），再跑套件 |
-| `docs/verify/verify-load-worker.cjs` | **4 项**（**不进批量**） | 需 `dist\scan.ply`：`copy _tmp\scan.ply dist\scan.ply` → 跑 → **立刻删**（否则进 asar）|
+| `docs/verify/verify-load-worker.cjs` | **7 条检查**（含 2 条 informational：冻结时长、「为什么还关着」） | 小模型即可、秒级：`node docs/verify/verify-load-worker.cjs "http://localhost:3621/?gpu=webgpu" test-model.ply`；默认模型是 `scan.ply`（需 `dist\scan.ply`，所以**不进批量**）|
 | `docs/probes/o1-bound-probe.cjs` | 探针（统计 `updateLocalBounds` 次数/耗时 + 单杆落地延迟） | `node docs/probes/o1-bound-probe.cjs [model] [url]` |
 
 `verify-index-ranges.mts` 覆盖：运行长度编码（单个索引用高位置位、连续段用 `[start,count]`）、
@@ -2206,12 +2223,21 @@ WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
    `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；
 4. 跑到后半程，13M 的导入在本机变得**必然卡住**（新旧构建都一样 ⇒ 与本轮改动无关，疑似反复 kill
    无头 Edge 之后 GPU/驱动状态坏了），所以 A1 修好之后没能再量一次 13M 的浮云数，
-   改用上面的合成模型做**判定性验证**。
+   改用上面的合成模型做**判定性验证**；
+5. **一个开关能让 9 个彼此无关的套件同时变红**（本轮 load worker 就是这样）：`selection-range` 16 项 /
+   `shape-volume-lines` 10 项 / `shape-selection` 6 项 / `edit-grade-crop` 4 项 / `effects` 4 项 /
+   `pip-camera` 3 项 / `centers-overlay` 3 项 / `ortho-camera` 2 项 / `degenerate-bound` 1 项，
+   退回 opt-in 后全部 0 失败 —— **同一批红是同一个根因，先怀疑最近那个开关，别逐个套件查**。
 
 **验证**（本轮各条的回归，逐条都跑过）：
 
 - 新增：`verify-index-ranges.mts` **18 项** 0 失败（纯 node）、`verify-degenerate-bound.cjs` **10 项**
-  webgpu + webgl2 双 0 失败、`verify-floater-biggrid.cjs` **5 项** 0 失败、`verify-load-worker.cjs` **4 项** 0 失败；
+  webgpu + webgl2 双 0 失败、`verify-floater-biggrid.cjs` **5 项** 0 失败、`verify-load-worker.cjs`
+  **7 条检查** 0 失败（它把「默认路径不走 worker / 开了真跑 / 点数与列字节一致 / **为什么还关着**」固化了）；
+- **revert 之后（`7a16371`）重跑**：`verify-selection-range`(24)、`verify-degenerate-bound`(10)、
+  `verify-shape-volume-lines`、`verify-shape-selection`、`verify-pip-camera`、`verify-ortho-camera`、
+  `verify-edit-grade-crop`、`verify-effects`、`verify-centers-overlay` **全部 0 失败** —— 这 9 套正是
+  开关默认打开时一起变红的那 9 套（见「环境坑」第 5 条）；
 - 选择相关：`verify-selection-range`(24) / `verify-selection-depth-bar`(19) / `verify-mask-vs-rect` /
   `verify-selection-depth` / `verify-shape-selection` / `verify-edit-hide`，webgpu + webgl2 全 0 失败；
 - 导出相关：`verify-export-image` / `verify-export-orientation` / `verify-equirect-export` /
@@ -2220,13 +2246,17 @@ WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
   `verify-floater-scale` / `verify-floater-scope` 全 0 失败；
 - `npm run check` 干净。
 
-**还剩什么**（审计执行顺序里没做的三项，详见 `docs/进度存档.md` 第 2 节）：
+**还剩什么**（审计执行顺序里没做的三项 + load worker 重开的前提，详见 `docs/进度存档.md` 第 2 节）：
 
 - **A2**（第 8 条，≥500 万点）：导出/回退的冗余拷贝 —— `surface-worker-client.ts` 无条件预复制
   **741MB** 回退副本（正常路径不用）、`splat-serialize.ts` 的前置过滤；
 - **A3**（第 10 条）：投影缓存 **6 B/点**量化 + 内存预算门槛（≤3200 万点）+ 超限给可见提示；
 - **13M 上 floater/cluster 检测的 101 秒冻结**：dense 化救不了它（实测网格 2.4e10 格 ⇒ 永远走 `Map` 回退），
-  要换数据结构或改成「点『计算』才跑 + 给预估耗时」。
+  要换数据结构或改成「点『计算』才跑 + 给预估耗时」；
+- **load worker 重开的前提**：先查清**输出为什么不等价** —— 列字节（x/y/z/opacity/state/rot_0）
+  完全一致，但同一个矩形手势选中 213（关）vs 2000（开），差异在中心点 / 排序元数据那一层；
+  在 `verify-load-worker.cjs` 里那条「为什么还关着」的 informational（手势 213 vs 2000）变成两边一致
+  之前，开关保持 opt-in。
 
 
 
