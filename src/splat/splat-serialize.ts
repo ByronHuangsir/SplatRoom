@@ -154,16 +154,40 @@ type ProgressFunc = (loaded: number, total: number) => void;
 class GaussianFilter {
     set: (splat: Splat) => void;
     test: (i: number) => boolean;
+    /** 廉价版（不含逐属性有限性检查）：`test` 的**上界**，用来给映射表定长度。 */
+    bound: (i: number) => boolean;
 
     constructor(serializeSettings: SerializeSettings) {
         let splat: Splat = null;
         let state: Uint8Array = null;
         let opacity: Float32Array = null;
+        // A2 (docs/audit/00-总结.md): the per-property work used to be done *per gaussian* —
+        // `splatData.getElement('vertex')` was re-fetched inside the predicate, and the
+        // inf-permission checks were `Set<string>.has(name)` lookups for every property of every
+        // gaussian. The PLY export path forces removeInvalid = true, so on 13M gaussians × 14
+        // properties that is ~180M string hash lookups plus 13M element lookups. The property
+        // list and its two permission flags are constant for a splat, so they are cached in set().
+        let props: { storage: any, infOk: boolean, negInfOk: boolean }[] = [];
 
         this.set = (s: Splat) => {
             splat = s;
             state = splat.splatData.getProp('state') as Uint8Array;
             opacity = splat.splatData.getProp('opacity') as Float32Array;
+            props = [];
+            if (removeInvalid) {
+                const element = splat.splatData.getElement('vertex');
+                for (let k = 0; k < element.properties.length; ++k) {
+                    const prop = element.properties[k];
+                    if (!prop.storage) {
+                        continue;
+                    }
+                    props.push({
+                        storage: prop.storage,
+                        infOk: infOk.has(prop.name),
+                        negInfOk: negInfOk.has(prop.name)
+                    });
+                }
+            }
         };
 
         const onlySelected = serializeSettings.selected ?? false;
@@ -175,7 +199,10 @@ class GaussianFilter {
         // properties where -Infinity is a valid value
         const negInfOk = new Set(['scale_0', 'scale_1', 'scale_2']);
 
-        this.test = (i: number) => {
+        // The cheap half of test(): everything except the per-property finiteness sweep. Anything
+        // test() rejects, bound() also rejects (test only adds rejections), so counting with
+        // bound() gives a size that is guaranteed to be >= the number of rows test() accepts.
+        this.bound = (i: number) => {
             // splat is deleted, always removed
             if ((state[i] & State.deleted) !== 0) {
                 return false;
@@ -193,17 +220,22 @@ class GaussianFilter {
                 return false;
             }
 
-            if (removeInvalid) {
-                const { splatData } = splat;
+            return true;
+        };
 
+        this.test = (i: number) => {
+            if (!this.bound(i)) {
+                return false;
+            }
+
+            if (removeInvalid) {
                 // check if any property of the gaussian is NaN/Infinity
-                const element = splatData.getElement('vertex');
-                for (let k = 0; k < element.properties.length; ++k) {
-                    const prop = element.properties[k];
-                    const { storage, name } = prop;
-                    if (storage && !Number.isFinite(storage[i])) {
-                        if (storage[i] === -Infinity && (infOk.has(name) || negInfOk.has(name))) continue;
-                        if (storage[i] === Infinity && infOk.has(name)) continue;
+                for (let k = 0; k < props.length; ++k) {
+                    const { storage, infOk: propInfOk, negInfOk: propNegInfOk } = props[k];
+                    const v = storage[i];
+                    if (!Number.isFinite(v)) {
+                        if (v === -Infinity && (propInfOk || propNegInfOk)) continue;
+                        if (v === Infinity && propInfOk) continue;
                         return false;
                     }
                 }
@@ -214,14 +246,19 @@ class GaussianFilter {
     }
 }
 
-// count the total number of gaussians given a filter
-const countGaussians = (splats: Splat[], filter: GaussianFilter) => {
+// A2: count with the cheap predicate — an upper bound on the exact count, and the whole point of
+// it is that it skips the per-property finiteness sweep the exact count would have to pay.
+const countGaussianBound = (splats: Splat[], filter: GaussianFilter) => {
     return splats.reduce((accum, splat) => {
         filter.set(splat);
-        for (let i = 0; i < splat.splatData.numSplats; ++i) {
-            accum += filter.test(i) ? 1 : 0;
+        const n = splat.splatData.numSplats;
+        let count = 0;
+        for (let i = 0; i < n; ++i) {
+            if (filter.bound(i)) {
+                count++;
+            }
         }
-        return accum;
+        return accum + count;
     }, 0);
 };
 
@@ -556,10 +593,21 @@ class SplatRoomChunkSource implements ChunkSource {
         this.numRest = numRest;
 
         // Build the filtered output->source index map (in splat order).
+        //
+        // A2 (docs/audit/00-总结.md): this used to run the FULL predicate twice — once in
+        // countGaussians (only to learn the array length) and once to fill the map — and on the
+        // PLY export path the full predicate walks every vertex property of every gaussian
+        // (removeInvalid is forced on). The length now comes from the cheap `bound` predicate,
+        // which is a guaranteed upper bound, and the map is filled in a single exact pass.
+        //
+        // The tail of the old arrays could stay zero if the two passes ever disagreed, and a zero
+        // entry silently exports row 0 — i.e. wrong rows, no error. `idx > bound` is therefore a
+        // hard error now, and a loose bound is trimmed (and the oversized buffers dropped) rather
+        // than left resident.
         const filter = new GaussianFilter(settings);
-        const total = countGaussians(splats, filter);
-        const splatOf = new Uint32Array(total);
-        const localOf = new Uint32Array(total);
+        const bound = countGaussianBound(splats, filter);
+        let splatOf = new Uint32Array(bound);
+        let localOf = new Uint32Array(bound);
         let idx = 0;
         for (let s = 0; s < splats.length; ++s) {
             filter.set(splats[s]);
@@ -572,6 +620,23 @@ class SplatRoomChunkSource implements ChunkSource {
                 }
             }
         }
+        if (idx > bound) {
+            // cannot happen: `bound` is a superset of `test`. If it ever does, the map is
+            // truncated and the export would silently contain wrong rows, so fail loudly.
+            throw new Error(`splat-serialize: filter bound ${bound} exceeded by ${idx} accepted rows`);
+        }
+        if (idx < bound) {
+            // the finiteness sweep rejected rows the cheap bound allowed: keep only what is real.
+            // Trim only when the difference is material, so the common case pays no copy.
+            if (idx < bound * 0.9) {
+                splatOf = splatOf.slice(0, idx);
+                localOf = localOf.slice(0, idx);
+            } else {
+                splatOf = splatOf.subarray(0, idx);
+                localOf = localOf.subarray(0, idx);
+            }
+        }
+        const total = idx;
         this.splatOf = splatOf;
         this.localOf = localOf;
 

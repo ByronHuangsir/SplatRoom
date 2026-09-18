@@ -559,7 +559,13 @@ export async function refineSurfaceMainThread(
 export const refineSurfaceInWorker = async (
     bufs: RefineBuffers,
     options: { strength: number; edgeSplit: boolean; removeScatter: boolean; targetSplitSize: number },
-    onProgress?: (fraction: number) => void
+    onProgress?: (fraction: number) => void,
+    // A2 (docs/audit/00-总结.md): the fallback copy used to be taken UNCONDITIONALLY before the
+    // transfer — 741MB on a 13M model, duplicated on the main thread for a path that only runs if
+    // the worker fails or times out (10 minutes). It is now a provider the caller supplies, so the
+    // bytes are only materialised when the fallback actually fires. The caller can rebuild them
+    // from data the transfer does not touch (the splat itself), which is what surface-refiner does.
+    fallbackProvider?: () => RefineBuffers
 ): Promise<RefineOutcome> => {
     let w: Worker | null = null;
     try {
@@ -569,12 +575,11 @@ export const refineSurfaceInWorker = async (
     }
 
     // The transferred buffers are DETACHED on the main thread the moment
-    // postMessage runs (their typed arrays become length 0). Keep a pristine
-    // copy so the fallback path can still compute if the worker fails —
-    // otherwise the main-thread fallback reads detached arrays and throws
-    // 'Cannot read properties of undefined (reading "0")' deep inside the
-    // analysis (the reported symptom for 1.7M-splat models).
-    const fallbackBufs: RefineBuffers = {
+    // postMessage runs (their typed arrays become length 0), so a fallback needs pristine bytes from
+    // somewhere. They used to be copied here, up front, for every refine (see the signature note).
+    // `fallbackProvider` supplies them lazily instead; when the caller does not supply one we keep
+    // the old eager copy so this entry point stays safe on its own.
+    const fallbackBufs: RefineBuffers = fallbackProvider ? null : {
         x: bufs.x.slice(),
         y: bufs.y.slice(),
         z: bufs.z.slice(),
@@ -640,9 +645,13 @@ export const refineSurfaceInWorker = async (
         onProgress?.(1);
         return outcome;
     } catch (e) {
-        // Worker path failed or timed out --last-resort main-thread compute
-        // on the pristine copy (never on the detached buffers).
+        // Worker path failed or timed out -- last-resort main-thread compute on pristine bytes:
+        // either the lazily rebuilt buffers (provider) or the eagerly kept copy.
         console.warn('[surface-refine] worker failed, using main-thread fallback:', (e as any)?.message ?? e);
-        return refineSurfaceMainThread(fallbackBufs, options, onProgress);
+        const pristine = fallbackBufs ?? fallbackProvider?.();
+        if (!pristine) {
+            throw e instanceof Error ? e : new Error(String(e));
+        }
+        return refineSurfaceMainThread(pristine, options, onProgress);
     }
 };

@@ -259,6 +259,40 @@ export async function refineSurface(
 
     const { refineSurfaceInWorker } = await import('../workers/surface-worker-client');
 
+    // A2: the fallback buffers are only built if the worker path actually fails. `gsplatData` here
+    // is a CLONE of the splat, and the clone's arrays are the ones transferred (detached) — the
+    // splat's own storage is untouched, so it can be re-cloned on demand. That replaces the
+    // unconditional pre-transfer copy (741MB on a 13M model, for a path that normally never runs).
+    const buildBuffers = (data: typeof gsplatData) => {
+        const get = (name: string) => data.getProp(name) as Float32Array;
+        const extraCols: { name: string; data: Float32Array }[] = [];
+        const knownNames = new Set(['x', 'y', 'z', 'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3', 'opacity', 'state']);
+        for (const el of data.elements) {
+            for (const prop of el.properties) {
+                if (knownNames.has(prop.name)) continue;
+                if (prop.storage instanceof Float32Array) {
+                    extraCols.push({ name: prop.name, data: prop.storage });
+                }
+            }
+        }
+        return {
+            x: get('x'),
+            y: get('y'),
+            z: get('z'),
+            s0: get('scale_0'),
+            s1: get('scale_1'),
+            s2: get('scale_2'),
+            r0: get('rot_0'),
+            r1: get('rot_1'),
+            r2: get('rot_2'),
+            r3: get('rot_3'),
+            op: get('opacity'),
+            state: data.getProp('state') as Uint8Array,
+            extra: extraCols,
+            N: data.numSplats
+        };
+    };
+
     const outcome = await refineSurfaceInWorker({
         x, y, z, s0, s1, s2, r0, r1, r2, r3, op, state, extra, N
     }, {
@@ -266,7 +300,7 @@ export async function refineSurface(
         edgeSplit: options.edgeSplit !== false,
         removeScatter: options.removeScatter !== false,
         targetSplitSize: options.targetSplitSize ?? 0
-    }, f => fireProgress(Math.round(95 * f)));
+    }, f => fireProgress(Math.round(95 * f)), () => buildBuffers(cloneGSplatData(splat.splatData)));
 
     // Rebuild the GSplatData from the returned columns.
     // getProp returns the storage (typed array), not the property descriptor,
