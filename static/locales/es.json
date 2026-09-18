@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Desconectado",
     "panel.surface-refine.densify": "Rellenar huecos (división por densidad)",
     "panel.surface-refine.cleanup": "Eliminar dispersión exterior",
-    "panel.surface-refine.progress": "Alisando la superficie…"
+    "panel.surface-refine.progress": "Alisando la superficie…",
+    "select-toolbar.rangeCacheTooLarge": "Este modelo es demasiado grande para recortar el rango en vivo: al ajustarlo se recalculan todas las gaussianas, así que tardará un momento."
 }

@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Déconnecté",
     "panel.surface-refine.densify": "Combler les trous (division par densité)",
     "panel.surface-refine.cleanup": "Supprimer la dispersion extérieure",
-    "panel.surface-refine.progress": "Lissage de la surface…"
+    "panel.surface-refine.progress": "Lissage de la surface…",
+    "select-toolbar.rangeCacheTooLarge": "Ce modèle est trop volumineux pour un recadrage de plage en direct : chaque gaussienne est recalculée, cela prend un instant."
 }

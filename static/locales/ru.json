@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Не подключён",
     "panel.surface-refine.densify": "Заполнить пустоты (разделение по плотности)",
     "panel.surface-refine.cleanup": "Удалить внешний разброс",
-    "panel.surface-refine.progress": "Сглаживание поверхности…"
+    "panel.surface-refine.progress": "Сглаживание поверхности…",
+    "select-toolbar.rangeCacheTooLarge": "Эта модель слишком велика для пересчёта диапазона в реальном времени: при изменении заново вычисляются все гауссианы, подождите немного."
 }

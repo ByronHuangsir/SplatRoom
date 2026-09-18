@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "未接続",
     "panel.surface-refine.densify": "穴を埋める（密度分割）",
     "panel.surface-refine.cleanup": "外側の散布を削除",
-    "panel.surface-refine.progress": "表面を平滑化しています…"
+    "panel.surface-refine.progress": "表面を平滑化しています…",
+    "select-toolbar.rangeCacheTooLarge": "このモデルは大きすぎるため、範囲の再切り出しがリアルタイムに行えません。スライダーを動かすと全ガウスを再計算するので、少しお待ちください。"
 }

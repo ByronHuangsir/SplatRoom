@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Disconnected",
     "panel.surface-refine.densify": "Fill holes (density split)",
     "panel.surface-refine.cleanup": "Remove outside scatter",
-    "panel.surface-refine.progress": "Surface Refining…"
+    "panel.surface-refine.progress": "Surface Refining…",
+    "select-toolbar.rangeCacheTooLarge": "This model is too large for a live range re-cut: adjusting the range recomputes every gaussian, so give it a moment."
 }

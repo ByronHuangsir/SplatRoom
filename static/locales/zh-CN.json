@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "未连接",
     "panel.surface-refine.densify": "补洞（分裂稠密化）",
     "panel.surface-refine.cleanup": "清理外侧散点",
-    "panel.surface-refine.progress": "表面平整中…"
+    "panel.surface-refine.progress": "表面平整中…",
+    "select-toolbar.rangeCacheTooLarge": "这个模型太大，范围无法实时重切：拖动滑块会逐点重算，请稍等一下。"
 }

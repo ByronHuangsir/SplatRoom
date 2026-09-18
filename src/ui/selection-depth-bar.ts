@@ -144,6 +144,24 @@ class SelectionDepthBar {
         events.on('selection.depthRange', () => sync());
         events.on('selection.screenRange', () => sync());
 
+        // A3（docs/audit/00-总结.md）：模型超过投影缓存的字节预算时，推杆会退回逐点重算
+        // （13M 上实测约 2 秒）。以前这完全静默，用户看到的只是"滑块好像坏了"，所以这里
+        // 把标题换成一句说明 —— 文字变了就是可见提示，不需要新的 UI 元素。
+        let cacheRefused = false;
+        const applyTitle = () => {
+            const key = cacheRefused ? 'select-toolbar.rangeCacheTooLarge' : 'select-toolbar.selectionRange';
+            title.text = i18n.t(key);
+            title.dom.title = cacheRefused ? i18n.t(key) : '';
+            title.class[cacheRefused ? 'add' : 'remove']('range-refused');
+        };
+        events.on('selection.rangeCacheRefused', (refused: boolean) => {
+            if (!!refused === cacheRefused) {
+                return;
+            }
+            cacheRefused = !!refused;
+            applyTitle();
+        });
+
         // the bar follows the active tool, and is hidden entirely in 环模式（rings）:
         // 环模式的选中集合由 GPU id 拾取决定（V2 的语义），滑块无从作用，留着就是"死 UI"
         // （用户 2026-09-15 拍板：环模式下不需要调范围 —— 见 docs/audit/01-量级复查-bug.md 第 8 条）。

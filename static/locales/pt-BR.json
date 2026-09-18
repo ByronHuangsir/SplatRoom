@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Desconectado",
     "panel.surface-refine.densify": "Preencher Furos (Divisão por Densidade)",
     "panel.surface-refine.cleanup": "Remover Dispersão Externa",
-    "panel.surface-refine.progress": "Refinando Superfície…"
+    "panel.surface-refine.progress": "Refinando Superfície…",
+    "select-toolbar.rangeCacheTooLarge": "Este modelo é grande demais para recortar o intervalo em tempo real: ao ajustar, todas as gaussianas são recalculadas, então leve um instante."
 }

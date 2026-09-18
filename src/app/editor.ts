@@ -1148,7 +1148,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
             // the projection cache is filled by this same pass, so later slider pushes are cheap.
             // O2: hit / managed 都是**每 entry 一块、复用**的缓冲 —— 推杆时 hit 只 fill(0) 再重写。
-            const cache = createRangeCache(numSplats);
+            // A3: 深度的量化区间 = 模型沿视轴的深度范围（extent），两端因此精确、内部误差远小于窗口步长。
+            const cache = createRangeCache(numSplats, extent.min, extent.max);
             const hit = new Uint8Array(numSplats);
             const managed = new Uint8Array(numSplats);
             selectRange(splat, region, view, cache, hit, managed);
@@ -1223,6 +1224,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         rangeGesture = entries.length ? { region, bounds, entries } : null;
         rangeOps.clear();
         entries.forEach(entry => rangeOps.add(entry.op));
+
+        // A3: 模型超过投影缓存的字节预算（`CACHE_BYTES_PER_SPLAT × n > 192MB`，约 3200 万点）时
+        // `createRangeCache` 返回 null —— 推杆会退回逐点重算（13M 上实测约 2 秒），
+        // 以前这是**完全静默**的，用户只会觉得滑块坏了。把这件事报给范围浮条去显示。
+        events.fire('selection.rangeCacheRefused', entries.length > 0 && entries.every(entry => !entry.cache));
     };
 
     // live re-cut while one of the three range controls moves. Recomputed as fast as the CPU

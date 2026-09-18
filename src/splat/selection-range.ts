@@ -278,19 +278,46 @@ export const rangeDistances = (
 export type RangeProjectionCache = {
     sx: Int16Array;
     sy: Int16Array;
-    dist: Float32Array;
+    /**
+     * A3（docs/audit/00-总结.md）：沿视轴的深度**量化到 16 位**（8 B/点 → 6 B/点）。
+     * 反解：`distance = distMin + dist[i] * distScale`。
+     * 量化区间用**模型沿视轴的深度范围**（包围盒在该轴上的投影，见 viewExtentFromBound），
+     * 所有高斯都在这个区间里，所以两端（0/100 = 整段穿透）仍然精确落在 0 与 65535 上 ——
+     * 只有区间内部会引入 ≤ (extent / 65535) 的误差（13M 房间扫描实测 ≈ 0.001 世界单位，
+     * 而深度窗口的步长是 extent 的 0.5% ≈ 0.33，差三个数量级）。
+     */
+    dist: Uint16Array;
+    /** 量化区间下限（世界单位） */
+    distMin: number;
+    /** 每个量化步长对应的世界单位： (max - min) / 65535 */
+    distScale: number;
 };
 
-/** 缓存的内存上限（约 8 字节/点）：超过就退回逐点投影，避免 30M+ 的模型吃几百 MB。 */
-export const CACHE_MAX_SPLATS = 24_000_000;
+/**
+ * 缓存的内存预算是**按字节**算的（不再是写死的 2400 万点）：Int16 + Int16 + Uint16 = 6 B/点。
+ * 192MB ÷ 6 B ≈ 3200 万点，正好覆盖 30M 那一档（原来 8 B/点 + 2400 万上限会把 30M 直接拒掉，
+ * 于是每次推杆退回全量重投影，实测 ~2 秒）。超过预算时 createRangeCache 返回 null，
+ * 调用方会退回逐点投影，并且应当给用户一个可见提示（不再是静默变慢）。
+ */
+export const CACHE_BYTES_PER_SPLAT = 6;
+export const CACHE_MAX_BYTES = 192 * 1024 * 1024;
+export const CACHE_MAX_SPLATS = Math.floor(CACHE_MAX_BYTES / CACHE_BYTES_PER_SPLAT);
 
-export const createRangeCache = (numSplats: number): RangeProjectionCache | null => {
+export const createRangeCache = (numSplats: number, distMin: number, distMax: number): RangeProjectionCache | null => {
     if (!(numSplats > 0) || numSplats > CACHE_MAX_SPLATS) {
         return null;
     }
     const sx = new Int16Array(numSplats);
     sx.fill(-1);
-    return { sx, sy: new Int16Array(numSplats), dist: new Float32Array(numSplats) };
+    const span = distMax - distMin;
+    return {
+        sx,
+        sy: new Int16Array(numSplats),
+        dist: new Uint16Array(numSplats),
+        distMin,
+        // 退化（范围为零）时把所有点都量化到 0，反解恒等于 distMin，与线性映射一致
+        distScale: span > 0 ? span / 65535 : 0
+    };
 };
 
 /**
@@ -426,10 +453,12 @@ export const selectRange = (
         const sy = Math.min(height - 1, Math.max(0, Math.floor((1 - (ndcY * 0.5 + 0.5)) * height)));
 
         if (cache) {
-            // 投影结果与窗口无关，存下来给后面的推杆用（见 RangeProjectionCache）
+            // 投影结果与窗口无关，存下来给后面的推杆用（见 RangeProjectionCache）。
+            // 深度按模型自身的深度范围量化到 16 位（A3），两端精确、内部误差远小于窗口步长。
             cache.sx[i] = sx;
             cache.sy[i] = sy;
-            cache.dist[i] = distance;
+            const q = cache.distScale > 0 ? Math.round((distance - cache.distMin) / cache.distScale) : 0;
+            cache.dist[i] = q < 0 ? 0 : (q > 65535 ? 65535 : q);
         }
 
         if (distance < minDistance || distance > maxDistance) {
@@ -477,6 +506,8 @@ export const selectRangeFromCache = (
     const numSplats = splatData.numSplats;
     const state = splatData.getProp('state') as Uint8Array;
     const { sx: cxs, sy: cys, dist: cd } = cache;
+    const distMin = cache.distMin;
+    const distScale = cache.distScale;
     if (numSplats === 0 || cxs.length < numSplats) {
         return selectRange(splat, region, view, null, out, mark);
     }
@@ -506,7 +537,7 @@ export const selectRangeFromCache = (
         if (state && (state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
-        const distance = cd[i];
+        const distance = distMin + cd[i] * distScale;
         if (distance < minDistance || distance > maxDistance) {
             continue;
         }

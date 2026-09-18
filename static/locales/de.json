@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "Nicht verbunden",
     "panel.surface-refine.densify": "Löcher füllen (Dichteaufteilung)",
     "panel.surface-refine.cleanup": "Äußere Streupunkte entfernen",
-    "panel.surface-refine.progress": "Oberflächenglättung läuft…"
+    "panel.surface-refine.progress": "Oberflächenglättung läuft…",
+    "select-toolbar.rangeCacheTooLarge": "Dieses Modell ist zu groß für einen sofortigen Bereichs-Zuschnitt: Beim Verstellen wird jeder Gauß neu berechnet, das dauert einen Moment."
 }

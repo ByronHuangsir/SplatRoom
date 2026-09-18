@@ -683,5 +683,6 @@
     "dialog.control-customize.disconnected": "연결 끊김",
     "panel.surface-refine.densify": "구멍 채우기 (밀도 분할)",
     "panel.surface-refine.cleanup": "외부 산포 제거",
-    "panel.surface-refine.progress": "표면 평탄화 중…"
+    "panel.surface-refine.progress": "표면 평탄화 중…",
+    "select-toolbar.rangeCacheTooLarge": "이 모델은 너무 커서 범위를 실시간으로 다시 자를 수 없습니다. 슬라이더를 움직이면 모든 가우시안을 다시 계산하므로 잠시 기다려 주세요."
 }

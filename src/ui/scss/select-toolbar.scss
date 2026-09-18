@@ -80,6 +80,14 @@
             color: $clr-active;
         }
 
+        // A3：模型太大、投影缓存被拒（推杆要逐点重算）时标题换成一句说明并染成警示色
+        .select-toolbar-label.range-refused {
+            color: $clr-hilight;
+            font-size: 11px;
+            line-height: 1.25;
+            margin: 0px 0px 3px 0px;
+        }
+
         .select-range-reset-row {
             display: flex;
             justify-content: flex-end;
