@@ -1,4 +1,4 @@
-import { estimateSpacing } from './floater-removal';
+import { DENSE_MAX_CELLS, estimateSpacing } from './floater-removal';
 import { Splat } from './splat';
 import { State } from './splat-state';
 
@@ -56,9 +56,23 @@ const KEY_BITS = 17;
 const KEY_STRIDE = 1 << KEY_BITS;          // 131072 cells per axis
 const KEY_LIMIT = KEY_STRIDE - 1;
 
-/** 把体素坐标打包成一个整数键（用于 Map 查找）。 */
+/** 把体素坐标打包成一个整数键（只在 Map 回退路径上用）。 */
 const packKey = (ix: number, iy: number, iz: number) => {
     return (ix * KEY_STRIDE + iy) * KEY_STRIDE + iz;
+};
+
+/** 按需倍增的 Int32Array（voxel 坐标表用；JS number[] 在 13M 上要几十上百 MB）。 */
+const growInt32 = (src: Int32Array<ArrayBuffer>, needed: number): Int32Array<ArrayBuffer> => {
+    if (src.length >= needed) {
+        return src;
+    }
+    let capacity = src.length;
+    while (capacity < needed) {
+        capacity *= 2;
+    }
+    const next = new Int32Array(capacity);
+    next.set(src);
+    return next;
 };
 
 export function detectClusters(splat: Splat, options: ClusterOptions = {}): ClusterResult {
@@ -82,12 +96,14 @@ export function detectClusters(splat: Splat, options: ClusterOptions = {}): Clus
     }
 
     // ---- 1) bounds over the valid gaussians ----
-    const valid = (i: number) => (state[i] & (State.deleted | State.locked)) === 0;
+    // A1: the `valid(i)` closure used to be called once per point here, again in the voxelize
+    // pass and again inside estimateSpacing — on 13M that is ~50M closure calls for one
+    // masked compare, so it is inlined.
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     let validCount = 0;
     for (let i = 0; i < numSplats; i++) {
-        if (!valid(i)) continue;
+        if ((state[i] & (State.deleted | State.locked)) !== 0) continue;
         validCount++;
         if (x[i] < minX) minX = x[i];
         if (y[i] < minY) minY = y[i];
@@ -104,35 +120,63 @@ export function detectClusters(splat: Splat, options: ClusterOptions = {}): Clus
     // voxel size follows the point cloud's own sampling density (median nearest-neighbour distance)
     // times a factor: 24x (coarse) down to 8x (fine) across the detail slider. Calibrated on a real
     // 931k scan, where 8x shreds the main body into 111k clusters but 16x keeps it at 99.5%.
-    const spacing = Math.max(estimateSpacing(x, y, z, numSplats, valid), diag * 1e-6);
+    const spacing = Math.max(estimateSpacing(x, y, z, numSplats, state), diag * 1e-6);
     const extent = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || diag;
     const voxelSize = Math.max(spacing * (24 - (detail / 100) * 16), extent / KEY_LIMIT, diag * 1e-6);
 
-    // ---- 2) voxelize: voxel key -> voxel index, and point -> voxel index ----
+    // ---- 2) voxelize: point -> voxel index, and (dense grid | Map) voxel key -> voxel index ----
     // coordinates are relative to the lower bound, so they are non-negative and small enough to
-    // pack exactly
+    // pack exactly. The per-axis cell counts come from the actual extent (not the 2^17 key
+    // stride), because the dense grid is indexed as a real 3D array.
     const voxelOfPoint = new Int32Array(numSplats).fill(-1);
-    const keys: number[] = [];               // voxel index -> packed key
-    const voxelCoords: number[] = [];        // voxel index -> (ix, iy, iz) flattened, for neighbours
-    const keyToIndex = new Map<number, number>();
     const inv = 1 / voxelSize;
+    const nX = Math.max(1, Math.min(KEY_STRIDE, Math.floor((maxX - minX) * inv) + 1));
+    const nY = Math.max(1, Math.min(KEY_STRIDE, Math.floor((maxY - minY) * inv) + 1));
+    const nZ = Math.max(1, Math.min(KEY_STRIDE, Math.floor((maxZ - minZ) * inv) + 1));
+
+    // A1: a dense Int32Array grid instead of Map<packedKey, index>. The flood fill below asks for
+    // up to 26 neighbours of every occupied voxel, which on the 30M scale was ~800M hash lookups;
+    // the grid makes each one an array read. Falls back to the Map when the grid would not fit the
+    // memory budget (the key packing is unchanged, so both paths see the same topology).
+    const grid: Int32Array<ArrayBuffer> | null = nX * nY * nZ <= DENSE_MAX_CELLS ? new Int32Array(nX * nY * nZ).fill(-1) : null;
+    const keyToIndex = grid ? null : new Map<number, number>();
+    let coords: Int32Array<ArrayBuffer> = new Int32Array(3 * 1024);   // voxel index -> (ix, iy, iz) flattened
+    let voxelCount = 0;
+
     for (let i = 0; i < numSplats; i++) {
-        if (!valid(i)) continue;
-        const ix = Math.min(KEY_LIMIT, Math.floor((x[i] - minX) * inv));
-        const iy = Math.min(KEY_LIMIT, Math.floor((y[i] - minY) * inv));
-        const iz = Math.min(KEY_LIMIT, Math.floor((z[i] - minZ) * inv));
-        const key = packKey(ix, iy, iz);
-        let vi = keyToIndex.get(key);
-        if (vi === undefined) {
-            vi = keys.length;
-            keys.push(key);
-            voxelCoords.push(ix, iy, iz);
-            keyToIndex.set(key, vi);
+        if ((state[i] & (State.deleted | State.locked)) !== 0) continue;
+        const ix = Math.min(nX - 1, Math.floor((x[i] - minX) * inv));
+        const iy = Math.min(nY - 1, Math.floor((y[i] - minY) * inv));
+        const iz = Math.min(nZ - 1, Math.floor((z[i] - minZ) * inv));
+        let vi: number;
+        if (grid) {
+            const cell = (ix * nY + iy) * nZ + iz;
+            vi = grid[cell];
+            if (vi === -1) {
+                vi = voxelCount++;
+                grid[cell] = vi;
+                coords = growInt32(coords, voxelCount * 3);
+                coords[vi * 3] = ix;
+                coords[vi * 3 + 1] = iy;
+                coords[vi * 3 + 2] = iz;
+            }
+        } else {
+            const key = packKey(ix, iy, iz);
+            const found = keyToIndex.get(key);
+            if (found === undefined) {
+                vi = voxelCount++;
+                keyToIndex.set(key, vi);
+                coords = growInt32(coords, voxelCount * 3);
+                coords[vi * 3] = ix;
+                coords[vi * 3 + 1] = iy;
+                coords[vi * 3 + 2] = iz;
+            } else {
+                vi = found;
+            }
         }
         voxelOfPoint[i] = vi;
     }
 
-    const voxelCount = keys.length;
     if (voxelCount === 0) {
         return empty;
     }
@@ -157,21 +201,24 @@ export function detectClusters(splat: Splat, options: ClusterOptions = {}): Clus
         label[v] = id;
         while (sp > 0) {
             const cur = stack[--sp];
-            const ix = voxelCoords[cur * 3];
-            const iy = voxelCoords[cur * 3 + 1];
-            const iz = voxelCoords[cur * 3 + 2];
+            const cb = cur * 3;
+            const ix = coords[cb];
+            const iy = coords[cb + 1];
+            const iz = coords[cb + 2];
             for (let dx = -1; dx <= 1; dx++) {
                 const nx = ix + dx;
-                if (nx < 0 || nx > KEY_LIMIT) continue;
+                if (nx < 0 || nx >= nX) continue;
                 for (let dy = -1; dy <= 1; dy++) {
                     const ny = iy + dy;
-                    if (ny < 0 || ny > KEY_LIMIT) continue;
+                    if (ny < 0 || ny >= nY) continue;
                     for (let dz = -1; dz <= 1; dz++) {
                         if (dx === 0 && dy === 0 && dz === 0) continue;
                         const nz = iz + dz;
-                        if (nz < 0 || nz > KEY_LIMIT) continue;
-                        const nv = keyToIndex.get(packKey(nx, ny, nz));
-                        if (nv !== undefined && label[nv] === -1) {
+                        if (nz < 0 || nz >= nZ) continue;
+                        const nv = grid ?
+                            grid[(nx * nY + ny) * nZ + nz] :
+                            (keyToIndex.get(packKey(nx, ny, nz)) ?? -1);
+                        if (nv !== -1 && label[nv] === -1) {
                             label[nv] = id;
                             stack[sp++] = nv;
                         }

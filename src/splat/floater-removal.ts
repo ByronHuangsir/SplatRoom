@@ -122,6 +122,13 @@ const KEY_LIMIT = KEY_STRIDE - 1;
 const packKey = (ix: number, iy: number, iz: number) => (ix * KEY_STRIDE + iy) * KEY_STRIDE + iz;
 
 /**
+ * A1（docs/audit/00-总结.md）：稠密计数网格的**字节预算**。Int32Array 是 4 B/格，128MB ⇒ 3200 万格。
+ * 旧的固定 8e6 格阈值在约 2100 万点上越线，之后每点 27 次 Map.get（30M 上约 8 亿次哈希）。
+ * cluster-filter 也用这个预算。
+ */
+export const DENSE_MAX_CELLS = 32_000_000;
+
+/**
  * 典型点间距 = **最近邻距离的中位数**（抽样估计）。
  *
  * 对全点云建一个 64³ 的计数网格（counting sort，不用 Map），再对约 2000 个抽样点逐个向外扩圈找最近邻。
@@ -130,7 +137,9 @@ const packKey = (ix: number, iy: number, iz: number) => (ix * KEY_STRIDE + iy) *
  */
 export function estimateSpacing(
     x: Float32Array, y: Float32Array, z: Float32Array, n: number,
-    isValid?: (i: number) => boolean
+    // A1: the state column instead of a `valid(i)` callback — the closure was called once per
+    // point here (and again in the caller), i.e. tens of millions of calls for one masked compare
+    state?: Uint8Array | null
 ): number {
     if (n <= 0) {
         return 1e-6;
@@ -140,7 +149,7 @@ export function estimateSpacing(
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     let validCount = 0;
     for (let i = 0; i < n; i++) {
-        if (isValid && !isValid(i)) {
+        if (state && (state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
         const px = x[i], py = y[i], pz = z[i];
@@ -174,7 +183,7 @@ export function estimateSpacing(
     const pointOf = new Int32Array(validCount);
     let w = 0;
     for (let i = 0; i < n; i++) {
-        if (isValid && !isValid(i)) {
+        if (state && (state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
         const px = x[i], py = y[i], pz = z[i];
@@ -294,15 +303,10 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
         return empty;
     }
 
-    const isValid = (i: number) => (state[i] & (State.deleted | State.locked)) === 0;
-    const isSelected = (i: number) => (state[i] & State.selected) !== 0;
-    const inScope = (i: number) => scope === 'all' ||
-        (scope === 'selection' ? isSelected(i) : !isSelected(i));
-
     // ---- 1) typical point spacing + bounds ----
     let spacing: number;
     try {
-        spacing = Math.max(estimateSpacing(x, y, z, numSplats, isValid), 1e-6);
+        spacing = Math.max(estimateSpacing(x, y, z, numSplats, state), 1e-6);
     } catch (e) {
         spacing = 1e-6;
     }
@@ -311,7 +315,7 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     let validCount = 0;
     for (let i = 0; i < numSplats; i++) {
-        if (!isValid(i)) {
+        if ((state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
         validCount++;
@@ -335,29 +339,43 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
     // The grid must see the whole cloud: counting only a sample would thin the density by the
     // sampling ratio and make every point look sparse. A dense counting-sort array is used whenever
     // the grid stays small enough, which is several times faster than a Map on million-point models.
-    const cellX = new Int32Array(numSplats);
-    const cellY = new Int32Array(numSplats);
-    const cellZ = new Int32Array(numSplats);
+    //
+    // A1 (docs/audit/00-总结.md): one linear cell index per point instead of three coordinate
+    // arrays (12 B/point -> 4 B/point: 104MB saved on a 13M model), and the dense/sparse cutoff is
+    // a byte budget on that array rather than a fixed 8e6 cells — 8e6 cells was crossed at ~21M
+    // points, where the code silently fell back to a Map and paid ~810M hash lookups.
     const gridNX = Math.min(KEY_LIMIT, Math.floor((maxX - minX) * inv)) + 1;
     const gridNY = Math.min(KEY_LIMIT, Math.floor((maxY - minY) * inv)) + 1;
     const gridNZ = Math.min(KEY_LIMIT, Math.floor((maxZ - minZ) * inv)) + 1;
     const denseCells = gridNX * gridNY * gridNZ;
-    const useDense = denseCells <= 8e6;
+    const useDense = denseCells <= DENSE_MAX_CELLS;
+    if (!useDense) {
+        // Measured note (see docs/audit/00-总结.md A1): a real 13M scan needs a 3061x3059x2562 grid
+        // = 2.4e10 cells, i.e. ~750x the budget, so it can never go dense. The Map fallback then
+        // holds one entry per occupied cell and the neighbour pass does 27 lookups per gaussian —
+        // on that model this is the ~100s freeze opening the floater panel causes. Saying so is
+        // better than being silently slow.
+        console.warn(`[FloaterRemoval] counting grid ${gridNX}x${gridNY}x${gridNZ} = ${denseCells} cells exceeds the ${DENSE_MAX_CELLS}-cell budget: using the Map fallback (slow on large models)`);
+    }
     const denseGrid = useDense ? new Int32Array(denseCells) : null;
     const sparseGrid = useDense ? null : new Map<number, number>();
+    // A1: one linear cell index per point instead of three coordinate arrays. It MUST be a
+    // Float64Array once the grid is bigger than 2^31 cells: the index is (ix*nY + iy)*nZ + iz,
+    // and a real 13M scan lands at ~2.4e10 cells (3061³), which silently wraps in an Int32Array —
+    // every lookup then misses, the neighbour sum comes out 0, the median goes negative and the
+    // detector reports a meaningless handful of floaters. Built as Int32Array when it fits.
+    const cellOf = denseCells < 0x7fffffff ? new Int32Array(numSplats) : new Float64Array(numSplats);
 
     for (let i = 0; i < numSplats; i++) {
-        if (!isValid(i)) {
+        if ((state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
         const ix = Math.min(gridNX - 1, Math.max(0, Math.floor((x[i] - minX) * inv)));
         const iy = Math.min(gridNY - 1, Math.max(0, Math.floor((y[i] - minY) * inv)));
         const iz = Math.min(gridNZ - 1, Math.max(0, Math.floor((z[i] - minZ) * inv)));
-        cellX[i] = ix;
-        cellY[i] = iy;
-        cellZ[i] = iz;
+        cellOf[i] = (ix * gridNY + iy) * gridNZ + iz;
         if (useDense) {
-            denseGrid[(ix * gridNY + iy) * gridNZ + iz]++;
+            denseGrid[cellOf[i]]++;
         } else {
             const key = packKey(ix, iy, iz);
             sparseGrid.set(key, (sparseGrid.get(key) || 0) + 1);
@@ -365,15 +383,26 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
     }
 
     // ---- 3) neighbour count of every valid point, plus the median that defines "typical density" ----
-    const counts = new Int32Array(numSplats);
-    const medianSamples: number[] = [];
+    // Uint16 keeps 26MB off a 13M model; counted neighbours above 65535 all read as "very dense",
+    // which is all the comparison against `limit` needs (a saturated value can never be a floater).
+    const counts = new Uint16Array(numSplats);
+    const NEIGHBOUR_SATURATION = 65535;
+    const medianCapacity = Math.ceil(validCount / Math.max(1, Math.floor(validCount / 200000))) + 1;
+    const medianSamples = new Int32Array(medianCapacity);
+    let medianCount = 0;
     const medianStep = Math.max(1, Math.floor(validCount / 200000));
     let validIndex = 0;
     for (let i = 0; i < numSplats; i++) {
-        if (!isValid(i)) {
+        if ((state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
         }
-        const ix = cellX[i], iy = cellY[i], iz = cellZ[i];
+        const cell = cellOf[i];
+        // decode the linear index (A1). Two divides per point; the quotient always fits in int32
+        // here, so `| 0` truncation is safe (the *index* is what can exceed 2^31, not the quotient).
+        const q = (cell / gridNZ) | 0;
+        const iz = cell - q * gridNZ;
+        const ix = (q / gridNY) | 0;
+        const iy = q - ix * gridNY;
         let neighbours = 0;
         if (useDense) {
             const loX = Math.max(0, ix - 1), hiX = Math.min(gridNX - 1, ix + 1);
@@ -397,14 +426,15 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
             }
         }
         neighbours--;                       // the point itself
-        counts[i] = neighbours;
+        counts[i] = neighbours > NEIGHBOUR_SATURATION ? NEIGHBOUR_SATURATION : neighbours;
         if (validIndex % medianStep === 0) {
-            medianSamples.push(neighbours);
+            medianSamples[medianCount++] = neighbours;
         }
         validIndex++;
     }
-    medianSamples.sort((a, b) => a - b);
-    const reference = medianSamples.length ? medianSamples[medianSamples.length >> 1] : 0;
+    // Int32Array.sort() is numeric and needs no comparator closure/boxed array
+    const sorted = medianSamples.subarray(0, medianCount).sort();
+    const reference = medianCount ? sorted[medianCount >> 1] : 0;
     const limit = Math.max(0, Math.round(reference * ratioForSensitivity(sensitivity)));
     const hardLimit = Math.max(0, Math.floor(limit * HARD_FRACTION));
     const t = Math.max(0, Math.min(100, sensitivity)) / 100;
@@ -414,11 +444,19 @@ export function detectFloaters(splat: Splat, sensitivity: number, options: Float
     // no opacity property at all -> the faintness clause cannot be evaluated, so only the count decides
     const hasOpacity = !!opacity;
     const sigmoid = (v: number) => 1 / (1 + Math.exp(-v));
+    // scope as a number so the hot loop carries no closure call per point (A1)
+    const scopeMode = scope === 'selection' ? 1 : (scope === 'exclude' ? 2 : 0);
     let hits = 0;
     let candidates = 0;
     for (let i = 0; i < numSplats; i++) {
-        if (!isValid(i) || !inScope(i)) {
+        if ((state[i] & (State.deleted | State.locked)) !== 0) {
             continue;
+        }
+        if (scopeMode !== 0) {
+            const selected = (state[i] & State.selected) !== 0;
+            if (scopeMode === 1 ? !selected : selected) {
+                continue;
+            }
         }
         candidates++;
         const count = counts[i];
