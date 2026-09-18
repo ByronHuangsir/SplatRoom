@@ -91,6 +91,11 @@ class Splat extends Element {
     private cpuBoundStorage = new BoundingBox();
     worldBoundStorage: BoundingBox;
 
+    // O1 (docs/audit/00-总结.md): set while a range-slider drag is in flight so that
+    // selection-only state changes skip the GPU bound pass. See updateState().
+    private _boundsDeferred = false;
+    private _selectionBoundDirty = false;
+
     _visible = true;
     transformPalette: TransformPalette;
 
@@ -544,6 +549,16 @@ class Splat extends Element {
         // handle splats being added or removed
         if (changedState & State.deleted) {
             await this.updateSorting();
+        } else if (this._boundsDeferred) {
+            // O1 (docs/audit/00-总结.md): a selection-only change cannot move either bound
+            // in a way this pass is needed for. `localBound` is reduced from non-deleted rows
+            // only (bound-shader skips state bit 4 and never reads bit 1) and the sole reader
+            // of `selectionBound` is the transform handle's pivot (splat.getPivot, selection
+            // = true). During a range-slider drag the pass therefore buys nothing while
+            // costing a whole frame (waitForGpuDrain) plus four synchronous readbacks on every
+            // push — 93k splats: 22-32ms, 13M: 25-60ms, and 99.9% of a push on a 2k fixture.
+            // Mark it dirty instead; refreshDeferredBounds() recomputes once the drag settles.
+            this._selectionBoundDirty = true;
         } else {
             await this.updateLocalBounds();
         }
@@ -1082,6 +1097,34 @@ class Splat extends Element {
         }
 
         this.updateWorldBound();
+
+        // the pass just refreshed both bounds, so nothing is pending any more (O1)
+        this._selectionBoundDirty = false;
+    }
+
+    /** True while selection-only state changes postpone the GPU bound pass (O1). */
+    get boundsDeferred() {
+        return this._boundsDeferred;
+    }
+
+    set boundsDeferred(value: boolean) {
+        this._boundsDeferred = value;
+    }
+
+    /** True when a selection change landed while the bound pass was postponed (O1). */
+    get selectionBoundDirty() {
+        return this._selectionBoundDirty;
+    }
+
+    /**
+     * Recompute the bounds once after a burst of deferred selection changes — i.e. when a
+     * range-slider drag settles. No-op when nothing was postponed, and cheap
+     * (`state.flush()` is already a no-op by then) when there was.
+     */
+    async refreshDeferredBounds(): Promise<void> {
+        if (this._selectionBoundDirty) {
+            await this.updateLocalBounds();
+        }
     }
 
     // a bound is usable when it has a finite centre and a non-zero extent

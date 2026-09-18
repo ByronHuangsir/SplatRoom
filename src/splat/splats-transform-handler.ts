@@ -22,6 +22,12 @@ class SplatsTransformHandler implements TransformHandler {
     transform = new Mat4();
     paletteMap = new Map<number, number>();
 
+    // O1 (docs/audit/00-总结.md, 门槛表第 1 条): throttled to 33ms. Dragging for one second
+    // used to queue 60 x "bound pass + yield a frame + 4 synchronous readbacks" = 1-2s of pure
+    // waiting, and nothing reads the result before end() (which awaits
+    // updatePositions -> updateSorting -> updateLocalBounds for a fresh value anyway).
+    private lastBoundUpdateAt = 0;
+
     constructor(events: Events) {
         this.events = events;
 
@@ -155,7 +161,15 @@ class SplatsTransformHandler implements TransformHandler {
         // on CalcBound's shared render targets / readback buffers. fire-and-
         // forget is fine: the final bound is recomputed when end() awaits
         // updatePositions -> updateSorting -> updateLocalBounds.
-        this.events.invoke('queue', () => this.splat.updateLocalBounds());
+        //
+        // O1: throttled to 30Hz. Each of these costs a whole frame (waitForGpuDrain)
+        // plus four synchronous readbacks, and no consumer reads the result until
+        // end(). Unthrottled that is 1-2s of pure waiting per second of dragging.
+        const now = performance.now();
+        if (now - this.lastBoundUpdateAt >= 33) {
+            this.lastBoundUpdateAt = now;
+            this.events.invoke('queue', () => this.splat.updateLocalBounds());
+        }
     }
 
     async end() {

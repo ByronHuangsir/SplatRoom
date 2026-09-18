@@ -1187,7 +1187,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             });
         }
 
-        // applied through history so every gesture stays one undo step
+        // applied through history so every gesture stays one undo step.
+        // O1: 这批 op 的 do() 会各自 updateState(State.selected)（原本每次都跑一遍包围盒 pass），
+        // 这里先声明"拖动中"，让它们并进同一次停手补算。
+        deferBounds(entries.map(entry => entry.splat));
         for (const entry of entries) {
             await editHistory.add(entry.op);
         }
@@ -1203,6 +1206,57 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     let rangePumpBusy = false;
     let rangePending = false;
 
+    // ---- O1: 拖动期间合并包围盒重算（见 docs/audit/00-总结.md O1 / 01-量级复查-perf.md O1）
+    // 一次拖动会推几十上百次，而每次 `Splat.updateState(State.selected)` 原本都要跑一遍
+    // 「GPU 包围盒 pass + waitForGpuDrain（整一帧）+ 4 次同步回读 + JS 归约」，
+    // 93 万点实测 22–32ms、13M 上 25–60ms，在 2000 点的夹具上更是占一次推杆的 99.9%。
+    // 这次 pass 对"只是选中位变了"毫无必要：localBound 由非删除行归约（bound-shader 只跳 bit 4），
+    // selectionBound 的唯一读点是变换手柄的枢轴。所以拖动期间只置脏，
+    // **停手 120ms 后补算一次**（`refreshDeferredBounds` 无事可做时是空转）。
+    const BOUND_SETTLE_MS = 120;
+    const deferredBoundSplats = new Set<Splat>();
+    let boundSettleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushDeferredBounds = async () => {
+        boundSettleTimer = null;
+        const pending = Array.from(deferredBoundSplats);
+        deferredBoundSplats.clear();
+        if (!pending.length) {
+            return;
+        }
+        // 停止推迟：即使这个模型已经被卸载，也不能把标记留在对象上
+        for (const splat of pending) {
+            splat.boundsDeferred = false;
+        }
+        // 等待期间模型可能已经卸载；只处理还挂在场景里的（destroy 后 gsplat 实例为空）
+        const alive = scene.getElementsByType(ElementType.splat) as Splat[];
+        const live = pending.filter(splat => alive.includes(splat));
+        if (!live.length) {
+            return;
+        }
+        // CalcBound 的渲染目标与回读缓冲是共享的，必须走同一条队列
+        // （splats-transform-handler 里有同样的注释），所以这里也 enqueue。
+        await scene.commandQueue.enqueue(async () => {
+            for (const splat of live) {
+                await splat.refreshDeferredBounds();
+            }
+        });
+    };
+
+    // 推迟这一批模型的包围盒重算，并把"停手补算"的定时器重置到 BOUND_SETTLE_MS 之后
+    const deferBounds = (splats: Splat[]) => {
+        for (const splat of splats) {
+            splat.boundsDeferred = true;
+            deferredBoundSplats.add(splat);
+        }
+        if (boundSettleTimer !== null) {
+            clearTimeout(boundSettleTimer);
+        }
+        boundSettleTimer = setTimeout(() => {
+            void flushDeferredBounds();
+        }, BOUND_SETTLE_MS);
+    };
+
     const pumpRange = async () => {
         if (rangePumpBusy) {
             return;
@@ -1215,6 +1269,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 if (!gesture) {
                     continue;
                 }
+                deferBounds(gesture.entries.map(entry => entry.splat));
                 for (const entry of gesture.entries) {
                     entry.op.setPost(rangePost(gesture, entry));
                     await scene.commandQueue.enqueue(() => entry.op.do());
