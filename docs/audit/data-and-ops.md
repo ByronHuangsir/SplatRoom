@@ -309,6 +309,12 @@ const minNeighbors = Math.max(1, Math.round(denseAvg * lowFrac));
 - 离质心距离（`:346-374`）：实测手工删除点反而**更靠近**中心（0.152 vs 0.296，`:1004`）。
 因此对比工具的浮云黄标记在真实扫描上更可能高亮"贴表面的软边/雾面/远处地面片"，而不是飘点——与共享检测器在同样数据上的行为相反。
 
+**附：同一文件里的"静默退化"家族**（不单列条目，避免与第 6 条重复占位；均为实读确认）：
+- `:456-457` `return dists[Math.floor(sample / 2)] * 0.3 || 1;` —— 估计器失败时兜底成"1 个世界单位"（该模型世界尺度下毫无意义），无告警；退化输入（全同点/NaN 坐标）会直接落到这个分支。共享检测器对应位置用的是 `extent * 1e-3`（`floater-removal.ts:252-255`）。
+- `:246-248` `gsplatData?.getProp?.('x') || centers` —— 分轴属性缺失时把**交错**的 `centers` 当分轴数组用（`xs[idx]` vs `centers[idx*3]`，相差 3 倍且不报错）。
+- 全文件 `grep Number.isFinite` **零命中**，而共享检测器在两处显式过滤非有限值（`floater-removal.ts:147,181`）⇒ 含 NaN 的行会被 `Math.floor(NaN * inv)` 归进同一个字符串键格子（`:312,337`），质心也变 NaN，策略 4 的距离比较恒假、静默零命中。
+- 两处空 `catch` 在每点热循环里（`:654` 读 scale 失败 → `maxScale` 静默取 0.5；`:690` 读 `f_dc` 失败 → 静默取 0.5 灰）。
+
 **建议改法**：`compare-analysis.ts:302` 改用已导出的 `estimateSpacing(xs, ys, zs, numSplats)`（`floater-removal.ts:131`），并去掉 `× (5 − sens × 0.03)` 这层额外放大（共享检测器整体只有 `RADIUS_FACTOR = 34.5` 与 `1.2` 两个尺度，`floater-removal.ts:103,330-331`）；`denseAvg` 也应改为全量网格统计（共享检测器明确写过"抽样建网格会让密度整体变稀、所有点都显得孤立"，`floater-removal.ts:74-77`）。风险/行为变更：**会大幅改变标记集合（这正是目的）**；注意两处灵敏度语义不同（对比默认 65，共享检测器标定默认 ~40），不能 1:1 照搬，需要重新映射并重跑对比工具的验证。若暂时不想改可见行为，最低限度是把三条已证伪的信号替换为共享检测器的"稀疏**且**偏透明"（`floater-removal.ts:413-429`）。
 
 ---
@@ -387,7 +393,17 @@ const outcome = await Promise.race([
 
 **影响（估算）**：13M 模型 14 列 × 52.03 MB ≈ 728 MB + `state` 12.4 MB ⇒ **741 MB 主线程峰值，正常路径一行都用不到**（用户测试模型恰是 14 个 float 列、无 SH，与 `merged-scene.ply` 头部一致）。叠加 `cloneGSplatData` 的另一份 741 MB 与 worker 侧 `analyzeAll` 的 12×N Float32Array（≈624 MB），两线程合计估算 **3.5–4 GB**——这是"表面细化在 13M 上失败/卡死"最可疑的内存来源。第二处缺陷：超时分支**只 reject**，既不清 `pending`（只有 `:624` 的 transfer 失败分支与结果消息里删），也不 `worker.terminate()`；worker 若"假死仍在跑"，随后主线程又从 741 MB 副本重算一遍 ⇒ CPU 与内存双份占用；且 `editor.ts:112` 的 `progressStart(..., false)` 意味着**没有取消按钮**——10 分钟里用户只能等。
 
-**建议改法**：①把回退改成**惰性 provider**：`refineSurfaceInWorker(bufs, options, onProgress, () => /* 从活的 splatData 现场克隆 */ )`，只在 `catch` 里调用（`refineSurface` 内本来就有活数据可克隆），正常路径省下 741 MB；②超时分支补 `pending.delete(id)` + `worker.terminate(); worker = null;`；③给 `progressStart` 传 `true` 并接受 `AbortSignal`（`ui/editor.ts:776`、`render.ts:568` 是现成范例）；④超时值按 `N` 缩放而不是固定 10 分钟。预期收益：主线程峰值 −741 MB；假死时可恢复。风险：低—中（provider 不能闭包引用已被 transfer 的数组）；不改变算法与输出。
+**附：同一 refine 流水线里的一处多余开销**（不单列条目；实读确认）：`src/geometry/surface-analyzer.ts:660-666` 为了取两个中位数，把 13M 元素各拷成 JS 数组并带闭包比较器排序两遍：
+
+```ts
+const sorted = Array.from(densities).sort((a, b) => a - b);
+const medianDensity = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 1;
+const sortedRegion = Array.from(regionDensities).sort((a, b) => a - b);
+```
+
+两个数组（`densities`/`regionDensities`）的唯一用途就是中位数（逐点值已经在 pass 里填进 `analyses` 列了）⇒ 每次 refine 多 ≈208 MB 临时对象 + 约 3 亿次闭包比较（估算，数秒级），而密度是整数，固定桶直方图一遍 O(n) 就能取到精确中位数，顺带可删掉 `regionDensities` 这个列副本（省 2×52 MB）。在 worker 里只是浪费，在主线程回退路径上直接表现为额外卡顿。
+
+**建议改法**：①把回退改成**惰性 provider**：`refineSurfaceInWorker(bufs, options, onProgress, () => /* 从活的 splatData 现场克隆 */ )`，只在 `catch` 里调用（`refineSurface` 内本来就有活数据可克隆），正常路径省下 741 MB；②超时分支补 `pending.delete(id)` + `worker.terminate(); worker = null;`；③给 `progressStart` 传 `true` 并接受 `AbortSignal`（`ui/editor.ts:776`、`render.ts:568` 是现成范例）；④超时值按 `N` 缩放而不是固定 10 分钟；⑤中位数改直方图（见上附注）。预期收益：主线程峰值 −741 MB；假死时可恢复。风险：低—中（provider 不能闭包引用已被 transfer 的数组）；不改变算法与输出。
 
 ---
 
@@ -434,6 +450,22 @@ if (hasPosition) { [data.x, data.y, data.z] = [v.x, v.y, v.z]; }          // 每
 - 完整过滤判定 **2 × 13M = 2600 万次**，每次 14 次属性读取（≈3.6 亿次属性访问）——全部发生在**写出第一个字节之前**，且无进度反馈；
 - `splatOf` + `localOf` = 2 × 13M × 4 B = **104 MB 常驻**到导出结束；
 - 每点：14 次字典查表（≈1.8 亿次）、`getMat/getRot/getScale` 各一次 `Map.get`（≈3900 万次）、2 次短命数组（≈2600 万次分配）、3 次 `Math.exp` + `Math.log`（其中 `Math.log(scale.*)` 对同一 palette 索引是常量，却每点重算）。
+
+**附：同一导出路径的峰值内存（实读确认，不单列条目）**：无 FSA（`window.showSaveFilePicker` 不可用）时 `BrowserDownloadWriter` 把整份输出先缓存在 `MemoryFileSystem`，`close()` 再 `new Blob([data])`：
+
+```ts
+// io/write/browser-file-system.ts:96-102
+close(): void {
+    this.innerWriter.close();
+    const data = this.memFs.results.get(this.filename);
+    if (data) { triggerDownload(data, this.filename); }
+}
+// :50-52
+const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+const url = window.URL.createObjectURL(blob);
+```
+
+Blob 构造会再复制一份 ⇒ 峰值 ≈ **2 × 文件大小**（13M 的 PLY 约 695 MB ⇒ 约 1.4 GB）；且 `:70` 在派发 click 后立即 `revokeObjectURL`（Chromium 一般能活，其它引擎有竞态，建议延后到下载真正开始）。另外 `compressed-ply` 是**唯一不流式**的格式：库内 `writeCompressedPlySource` 第一句就是 `materializeToDataTable(source, pool)`（`node_modules/@playcanvas/splat-transform/dist/index.mjs:25933-25936`），而 `ply/splat/sog` 都是逐 chunk —— 该模型 14 列 × 13M × 4 B ⇒ 额外 **≈728 MB 物化表**。于是"compressed-ply + 无 FSA"在 13M 上是 728 MB（物化）+ 695 MB（内存缓冲）+ 695 MB（Blob 复制）叠加，最容易撞进程上限（表现为导出失败或整窗崩）。改法：无 FSA 时改走 Electron 侧 `splatroomFS.writeFile`（`electron-preload.js:39-42` 已暴露）或分片流式写；compressed-ply 导出前提示内存成本。风险低—中（依赖 Electron 分支）；不改变格式与精度。
 
 **建议改法**：①第一遍换成**廉价谓词**（只看 `state` 的 deleted/selected 位）用来分配上界，第二遍用完整谓词填充，末尾 `subarray(0, idx)` 并同步 `meta.numGaussians = idx`（贵的逐属性扫描 2 遍 → 1 遍，前置停顿大致砍半）；②补一句 `idx !== total` 断言——当前若两遍不一致，尾部条目保持 0，会**静默写出"第 0 个 splat 的第 0 个高斯"而不是报错**；③`element`/属性表提到谓词外；④`SingleSplat.read` 用预分配槽位表替代 `data[name]` 动态键、去掉解构数组字面量、把 `getTransform(i)` 一次取全（消掉 3 次 Map 查找）、把 `Math.log(scale)` 预算进缓存。风险：低；**不改变输出字节**（若要求严格逐字节一致，就只做前 3 项 + 第 ④ 项里除"log 加法化"以外的部分，log 加法化会引入 1 ulp 差异）。
 
@@ -506,7 +538,7 @@ if (nv !== undefined && label[nv] === -1) { label[nv] = id; stack[sp++] = nv; }
 
 ## 12.【中】平面修复（熨平地面）全在主线程同步跑：字符串 key 空间哈希 + 每候选 2×27 次查询
 
-**位置**：`src/geometry/planar-fix.ts:105-127`（`countWithin` 内层拼字符串 key）、`272-350`（检测主循环）、`403-578`（`applyFix` 全列重分配）；调用方 `src/geometry/semantic-select.ts:104-122`、`src/app/editor.ts:1837-1851`
+**位置**：`src/geometry/planar-fix.ts:105-127`（`countWithin` 内层拼字符串 key）、`272-350`（检测主循环）、`403-578`（`applyFix` 全列重分配）、**同一模式也在 `src/geometry/region-detect.ts:604-623`**（`clusterInliers` 对全量内点跑同一套 `grid.get(\`${cx+dx},${cy+dy},${cz+dz}\`)`）；调用方 `src/geometry/semantic-select.ts:104-122`、`src/app/editor.ts:1837-1851`
 
 **问题**：右键「熨平地面」→ `semanticSelect(..., flattenGround: true)` → `applyFix` 全程同步在主线程，且邻居查询用**字符串 key**：
 

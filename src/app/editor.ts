@@ -969,6 +969,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         tails: { near: number, far: number } | null;
         // the same for 左右 / 上下: the gesture box's sparse margins get compressed too
         screenTails: { x: { near: number, far: number } | null, y: { near: number, far: number } | null } | null;
+        // 环模式（rings）下这次手势的**拾取掩码**（V2 的语义：去重的可见 id 就是选中集合）。
+        // 存下来后，滑块重切时沿用它 —— 否则每一次推杆都会用解析穿透掩码覆盖拾取结果，
+        // "只选表面"会静默变回整段穿透（审计 selection.md 第 1 条）。
+        ringPick: Uint8Array | null;
         // selection bits as they were before the gesture, locked rows excluded (that is
         // SelectOp's notion of valid): add / remove / intersect recombine off this
         preMask: Uint8Array;
@@ -1063,10 +1067,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     // one entry's post mask for the current range: the 2D hit mask recombined with the
     // selection the gesture started from
     const rangePost = (gesture: RangeGesture, entry: RangeEntry): IndexRanges => {
-        const view = rangeView(gesture, entry);
-        const mask = entry.cache ?
-            selectRangeFromCache(entry.splat, gesture.region, view, entry.cache) :
-            selectRange(entry.splat, gesture.region, view);
+        // 环模式：沿用这次手势的拾取掩码。以前这里会重算解析穿透掩码，于是任何一次推杆都把
+        // "只选表面"悄悄翻回整段穿透（审计 selection.md 第 1 条）。
+        const mask = entry.ringPick ?? (entry.cache ?
+            selectRangeFromCache(entry.splat, gesture.region, rangeView(gesture, entry), entry.cache) :
+            selectRange(entry.splat, gesture.region, rangeView(gesture, entry)));
         const combine = rangeCombine[entry.opKind];
         const preMask = entry.preMask;
         return IndexRanges.fromPredicate(entry.splat.splatData.numSplats, i => combine(preMask[i] !== 0, mask[i] === 255));
@@ -1144,6 +1149,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             // The id pass records the front-most splat per pixel; the de-duplicated ids ARE the
             // selection. No intersection with the analytic mask and no fallback - those were mine and
             // were exactly what made it "sometimes nothing, sometimes only a few".
+            let ringPickMask: Uint8Array | null = null;
             if (events.invoke('camera.mode') === 'rings') {
                 scene.camera.pickPrep(splat, opKind);
                 const pick = await scene.camera.pickRect(
@@ -1160,6 +1166,9 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                     hit[i] = picked.has(i) ? 255 : 0;
                 }
                 console.log(`[v3] rings pick (V2 logic): ${picked.size} visible ids`);
+                // 记下来给滑块重切用（见 rangePost）：不清空的话，下一次推杆会用解析穿透掩码
+                // 覆盖掉这次拾取，"只选表面"就静默失效了
+                ringPickMask = hit.slice();
             }
             const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
             const post = IndexRanges.fromPredicate(numSplats, i => combine(preMask[i] !== 0, hit[i] === 255));
@@ -1172,6 +1181,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 cache,
                 tails,
                 screenTails,
+                ringPick: ringPickMask,
                 preMask,
                 opKind
             });
