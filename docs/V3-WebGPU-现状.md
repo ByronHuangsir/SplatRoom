@@ -1990,6 +1990,245 @@ offset(dx) = sign(dx) · 0.02 · ( |dx| + dx² / 80 )        （dx 单位 px）
 那是下一轮的事。93 万点的扫描上推杆仍是 **30–43ms**（顺滑）。
 
 
+### 6.48 第四十六轮：按审计「执行顺序」做的六项（O1/O3/±1e6 高危/O2/A1/O5）+ 启用 load worker
+
+这一轮的输入不是用户反馈，而是审计文档：`docs/audit/00-总结.md` 第〇节「**执行顺序（修订版）**」
+（11 条）里的前 9 条，做了其中 6 条 + 高危 7。**每一条都是先量再改，改完在同一台机、同一个
+`merged-scene`（13,007,105 点 / 695MB）上复核**，量出来的数字写在下面每一节里。
+
+| # | 审计条目 | 一句话 | 13M 上的实测 |
+| --- | --- | --- | --- |
+| 1 | O1（第 1 条，全档必做） | 选区变更不再触发 GPU 包围盒 pass | 一杆 600.06 → **452.54ms**（−25%）；拖动期间 pass **12 → 1 次** |
+| 2 | O3（第 2 条，全档为正） | 去掉「每索引一次闭包」+ 新增 `forEachRun` | 13M 上原本每次推杆 **39–52M 次闭包调用** |
+| 3 | 新发现的高危（第 3 条） | 全选 + 删除 ⇒ 包围盒 ±1e6 ⇒ 近裁剪切空整场景 | 新套件 10 项（含自证伪）双后端 0 失败 |
+| 4 | O2（第 5 条，门槛 ≥250 万点） | 掩码 → 状态位压成一趟按位写 | 一杆 452.54 → **275.71ms**（相对最初 600ms **−54%**）|
+| 5 | A1（第 6 条） | 簇过滤 dense 化 + 去浮云内存 | T1 冻结 406 → **323ms**；并量出审计算错网格 **6300 倍** |
+| 6 | O5（第 9 条，≥300 万点） | 导出的排序间隔 `max(2, ceil(n/1e6))` | 13M 一次排序 ~300ms ⇒ **~23ms/帧** |
+| 7 | load worker（高危 7 / 第 7 条） | 开关反转为**默认开启** | 931k 主线程最长冻结 1640 → **855ms（−48%）** |
+
+**O1 —— 选区变更不再触发 GPU 包围盒 pass（第 1 条，全档必做）**
+
+**为什么这么改**：`SelectRangeOp.do()` → `updateState(selected)` → `updateLocalBounds()`，里面含
+`waitForGpuDrain()`（= 让出一整帧）+ 4 次 `immediate` 同步回读 + JS 归约，**还占着全局 `commandQueue` 等**；
+而 `localBound` 只依赖 `deleted`（与 selected 无关），`selectionBound` 的唯一消费者是变换手柄枢轴。
+WebGPU 上这次 pass 的结果随后还会被 `splat.ts` 的 CPU AABB 覆盖 ⇒ **纯浪费**。
+改法：拖动期间不跑 bound pass，只在**手势结束**补算一次。
+
+**实测**（新增 `docs/probes/o1-bound-probe.cjs`，同机同会话 A/B，`Splat.updateLocalBounds` 包一层只统计不改行为）：
+
+| 档 | 拖动期间包围盒 pass | 单杆落地延迟 |
+| --- | --- | --- |
+| T0a 2000 点 | 12 次 / 115–166ms ⇒ **1 次 / 5ms** | 10.4–14.5ms ⇒ **1.03ms（−90~93%）** |
+| T1 93 万点 | 12 次 / 101–103ms ⇒ **1 次 / 21ms** | 27.3–31.2ms ⇒ **25.19ms（−8~19%）** |
+| T2 1300 万点 | 12 次 / 321ms ⇒ **1 次 / 29ms** | 600.06ms ⇒ **452.54ms（−25%）** |
+
+隔离测**单次 pass 的纯耗时**：2000 点 **8.5–21.5ms**、93 万点 **5.9–22.5ms**、13M **27–75ms**
+—— 成本是「让出一帧 + 4 次同步回读」，**与点数几乎无关**，正是审计的口径。
+
+**踩到的坑**：pump 的补算定时器**只在 pump 真正排空时才重置**。第一版按「每次推杆都重置」写，
+13M 上一杆 370ms 比 120ms 的窗口还长，定时器在拖动中途就到点，实测 12 杆跑了 **12 次 pass**（等于没省）。
+
+**O3 —— 去掉「每索引一次闭包」（第 2 条）+ 顺手修掉 `sortedPredicate` 的游标 bug**
+
+- `IndexRanges.fromPredicate` 不再往可增长的 JS `number[]` 里 push 再转 `Uint32Array`
+  （13M 碎片化选择**最坏 104MB 垃圾 + 一次整拷**），改成直写**复用的 `Uint32Array` scratch**
+  （按需倍增，> 4M 条目不留存，避免病态选择常驻 16MB 以上）；
+- 新增 `IndexRanges.forEachRun(start, end)`：按**连续段**回调，**O(runs) 而不是 O(indices)**，
+  调用方在内层自己转紧密循环；`SplatState.setBits/clearBits/toggleBits` 改用它 ——
+  热路径不再有 per-index 闭包（13M 上原本每次推杆 **39–52M 次闭包调用**）；
+- `edit-ops.SelectOp.captureRanges`：把 `valid(i)` 内联掉（它是一次掩码比较），add/remove 把
+  `locked` 与 `selected` 两次判定合并成一次 `state[i] & (locked|selected)`；
+- `editor.ts`：`rangeCombine` 的每索引一次闭包，换成按 `opKind` 选好的谓词
+  （`rangeCombinePredicate`），流式循环里只剩数组读；
+- **顺手修的 bug**：`sortedPredicate` 的游标改成先跳过小于 `i` 的 id。调用方用短路 `&&` 跳过某些 `i` 时，
+  旧实现会让游标卡住、此后的 id 全部读成未命中（**静默丢选择**）。
+
+**高危 —— 全选 + 删除把包围盒打成 ±1e6，整个视口被近裁剪面切空（第 3 条）**
+
+出处 `docs/audit/01-量级复查-bug.md` §13。这条的关键是**它是全局的**：被删空的那个模型的退化包围盒
+参与了 `scene.bound` 的并集，于是 `boundRadius` 变成 ~1.7e6、near 变成 `far/16384 ≈ 105` ——
+同一场景里**其它完好的模型也一起消失**，而且相机怎么缩放都救不回来（near 每帧重算），只能撤销。
+WebGL2 无兜底，WebGPU 只是靠 CPU AABB 兜底才没事。
+
+- `calc-bound.ts`：shader 用 ±1e6 哨兵（要过 GLSL→WGSL 转译，**不能用真无穷**），一行都没匹配回来
+  就是 `min=1e6 / max=-1e6`。匹配到行时每轴必然 `min ≤ max`，所以**出现倒置轴就是「这里什么都没有」**
+  ⇒ **保留上一次的 bound**，不再写出 `center=0 / halfExtents=-1e6` 的箱子；可见集为空时 `console.warn` 一次
+  （只报一次）。新增 `selectedEmpty` / `localEmpty` 两个只读状态；
+- `splat.isUsableBound`：补「halfExtents 三分量不得为负」（−1e6 正是从这道门溜过去的）；
+  CPU AABB 兜底从「仅 WebGPU」**放开到两个后端**；
+- `camera.fitClippingPlanes`：加**自证伪守卫** —— far 必须有限且 > 0；near 不得超过
+  「相机到包围盒中心距离的一半」（近裁剪面伸到你看的东西之外，一定不对）。
+
+**实测**（新增 `docs/verify/verify-degenerate-bound.cjs`，10 项，webgpu/webgl2 双 0 失败）：
+导入两个模型 → 删空一个 → 断言 `localBound` 的 halfExtents 非负、`scene.bound` 半径 **3.23**
+（旧 **~1.7e6**）、`near = 2.0e-4`（旧 **~105**），并且另一个模型 **200/200 个采样点仍在 [near,far] 内**；
+同一套件带**自证伪断言**：按旧公式算出的 `near = 105.7` 会让 **0/200** 个点活下来
+—— 所以这条用例真的抓得住回归，而不是恒绿。
+
+**O2 —— 掩码 → 状态位压成一趟按位写（第 5 条，门槛 ≥250 万点）**
+
+**为什么这么改**：原来每一杆推杆 = 掩码（**13MB 新分配**）→ `fromPredicate` 建 `IndexRanges`（13M 次闭包）
+→ `clearBits(pre)` + `clearBits(applied)` + `setBits(post)` 三次区间遍历（最多 3×13M）
+→ flush 的**全表 recount**（13M）。13M 上实测一次推杆 500–700ms。
+
+- `SplatState.applySelectionMask(preMask, mask, managed, op)`：**一趟**扫完，按 `want = combine(preMask, mask)`
+  写选中位；**同一趟里增量维护 `numSelected`**（替掉 recount）。`opKind='add'` 是 `had||hit`、
+  `'remove'` 是 `had&&!hit`、`'intersect'` 是 `had&&hit`、其余（`set`）就是 `hit` —— 与旧实现的净效果**逐位等价**；
+- `managed`（每 entry 一块的位图，只增不减）= 手势开始时的选中集 ∪ 用过的每一个掩码。
+  **只有被接管的行才写**，所以 locked（隐藏）的行带着 selected 位原样保留 —— 旧实现 `clearBits(pre)`
+  也只碰「selected 且没锁」的行；
+- `SelectionOp` 枚举（set/add/remove/intersect）让内层循环里没有字符串比较；
+  `revertSelectionMask()` 供 undo：清掉「当前掩码会选中的行」（= 旧的 `clearBits(applied)`），
+  再 `setBits(pre)` 把手势前的选区放回去 —— **三快照语义不变**；
+- `selection-range.ts` 的 `selectRange` / `selectRangeFromCache` 增加 `out` / `mark` 两个可选出口：
+  `out` 让掩码缓冲**每 entry 复用**（13M 上每杆省一次 13MB 分配，顺带把环模式那次 `hit.slice()` 的
+  13MB 拷贝也省掉），`mark` 在写掩码的同一趟里顺手置 managed 位（不额外扫一遍）；
+- `SplatState.flush()` 只在 `countsExact` 为假时才 recount；批量算子（`setBits`/`clearBits`/`toggleBits`）
+  会把它置假，按掩码写的那一趟保持为真 —— **recount 这条全表扫从热路径上消失**（O4 的实质收益）。
+
+**实测**（13M merged-scene / WebGPU / 同一台机，12 杆串行推杆取平均）：
+
+| 版本 | 平均一杆 | 拖动期间包围盒 pass |
+| --- | --- | --- |
+| 基线（O1 之前） | 600.06 ms | 12 次 / 321 ms |
+| + O1 + O3 | 452.54 ms | 1 次 / 29 ms |
+| **+ O2（本轮）** | **275.71 ms**（min 259.8 / max 297.2） | 1 次 / 27 ms |
+
+⇒ O2 自己贡献 **−177ms（−39%）**；相对最初的 600ms **累计 −54%**。手势 726ms；隔离测单次包围盒 pass
+19.7–32.1ms。93 万点在 O2 之前各项套件与探针均绿，O2 后 6 套选择相关套件双后端 0 失败。
+
+**A1 —— 簇过滤 dense 化 + 去浮云内存；顺带量出审计把 13M 的网格量级算错了 6300 倍（第 6 条）**
+
+**改了什么（三条）**：
+
+1. **cluster-filter**：体素化从 `Map<packedKey,index>` 换成**稠密 `Int32Array` 网格**
+   （洪水填充里每个占用体素 26 次 `Map.get` 变成数组读）；voxel 坐标表从 JS `number[]` 换成按需倍增的
+   `Int32Array`；每点的 `valid(i)` 闭包内联（原本一次检测里要被调三遍）；
+2. **floater-removal 内存**：`cellX/cellY/cellZ` 三张 `Int32Array`（12 B/点）→ **一张线性格号**（4 B/点），
+   13M 上省 **104MB**；`counts` 从 `Int32Array` → **`Uint16Array`**（13M 上省 **26MB**，超过 65535 的
+   邻居数饱和 —— 饱和值永远不可能是浮云，比较结果不变）；`medianSamples` 从 20 万元素的 JS `number[]`
+   + 比较器排序 → `Int32Array`（数值排序、无闭包）；
+3. **阈值从「固定 8e6 格」改成「字节预算」**（`DENSE_MAX_CELLS = 32e6` ⇒ Int32 的 128MB），
+   与 cluster-filter 共用同一个常量；`estimateSpacing` 收 `state` 列而不是 `valid(i)` 闭包
+   （一次检测里它被调两遍）；处理范围（scope）与合法性判定内联进热循环。
+
+**实测**：
+
+| 档 | 检测冻结主线程（20ms 心跳最大间隔） | 结果 |
+| --- | --- | --- |
+| T1 93 万点 | 406ms → **323ms（−20%）** | 浮云数 **9797 → 9797**（逐位不变）|
+| T2 1300 万点 | **101s → 101s（没改善）** | 137107 → 137107 |
+
+（心跳法：打开去浮云面板 → 200ms 防抖后同步跑两套全量检测，记录 20ms 定时器的最大间隔。）
+
+**顺手量出一个审计算错的数（重要）**：`docs/audit/01-量级复查-perf.md` 的「补 3」用
+`denseCells ∝ N^1.5`、`spacing ∝ extent/√N` 推出「13M → 约 **3.8e6 格**、dense ✓、余量 2×」，
+于是把「2100 万格」当成 T3 专属悬崖。**实测（13M merged-scene）**：`spacing = 0.000949`、
+`extent ≈ 66.8`、`cellSize = 0.0218` ⇒ 网格 **3061×3059×2562 = 2.4e10 格**，是审计估计的**约 6300 倍**，
+也远超新预算的 750 倍。结论修正三条：
+
+1. 13M 上 floater 的计数网格**永远是 `Map` 回退**（一张 ~1300 万条目的 Map，邻域查找
+   27×13M ≈ **3.5 亿次 `Map.get`**）—— 这就是**打开面板冻结 101 秒**的原因，**与「2100 万点悬崖」无关**；
+2. 所以 A1 的 dense 化**救不了 13M**（T1 只小幅受益），要治它得换数据结构
+   （开放寻址哈希网格 / 复用一次排序过的键）—— 留作下一步；
+3. 阈值改成字节预算仍然是对的（8e6 → 32e6 覆盖了 2100 万~3200 万那一段），**只是它管的不是 T2**。
+
+另：稀疏路径现在会在控制台 `warn` 一行（说明网格多大、为什么慢），不再静默地慢。
+
+**自己在实现里踩到并修掉的坑（重要）**：线性格号 `(ix*nY + iy)*nZ + iz` **必须**在超过 2^31 格时用
+`Float64Array`。真实 13M 扫描的网格是 **2.4e10 格**，`Int32Array` 会**静默回绕** ⇒ 每次邻居查找都落空
+⇒ 邻居和恒为 0 ⇒ 中位数变成 **−1** ⇒ `limit = 0` ⇒ 检测结果变成一个毫无意义的「**8458**」。
+已加断言级回归：`docs/verify/verify-floater-biggrid.cjs`（+ `gen-floater-biggrid-splat.cjs`，
+16k 点的合成模型故意做出 **~6.6e11 格**的网格）断言中位数 == 簇内邻居数 **7**、且**正好只选中 50 个孤立点**。
+
+**O5 —— 导出的排序间隔按点数自适应（第 9 条）**
+
+**为什么这么改**：`render.ts` 的视频/关键帧导出路径里 `SORT_INTERVAL` 原本是常数 **2**，而
+`sortSplatsAndWaitStrict` 是**主线程 await**：13M 上一次排序约 **300ms**，所以导出时平均每帧等 **150ms**，
+是这个路径最大的单项开销。改成 `max(2, ceil(n / 1e6))`（与 `camera-preview.ts` 已有的自适应节流同一公式）：
+
+| 点数 | 排序间隔 | 每帧摊销 |
+| --- | --- | --- |
+| 2000 / 12 万 / 93 万 | 2（`ceil` 得 1 → 取 2，**不变**） | 不变 |
+| 13M | 13 | 300/13 ≈ **23ms/帧** |
+| 30M | 30 | 同样 ~23ms/帧 |
+
+`n` 取导出目标里**最大**的 `numSplats`（与导出循环里 `sortAndWait` 用的是同一份 splat 列表）。
+注：审计的 O5 明确说**交互路径的排序节流不做**（主线程从来没被排序阻塞过，节流只会让「顺序滞后」
+更明显），只有导出路径成立 —— 所以这里只动导出这一处。
+
+**load worker 默认开启（高危 7 / 第 7 条）**
+
+`load-worker-client.ts` 的开关是「显式 opt-in」（`window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`），
+而**全仓没有任何地方设置它** ⇒ 解码 + 莫顿排序 + 行重排一直在**主线程**上跑，
+`workers/load-worker.ts` 是死代码 —— 这正是「导入 13M 要 ~15 秒、界面完全不能动」的大头。
+
+- 开关**反转为默认开启**（`window.__SPLATROOM_NO_LOAD_WORKER__ = true` 可关，供 A/B 与调试），
+  与文件头原本的承诺（"safe to enable by default"）以及失败自动回退到同步 `loadGSplatData` 一致；
+- `lw-probe.ts` 的**假绿**修掉：旧判据只比较「worker 结果 vs 主线程结果」，而开关没开时
+  `loadGSplatDataAsync` 直接调**同一个** `loadGSplatData`（同一函数、同一线程）⇒ 两边必然相同 ⇒ `ok=true`。
+  现在附加 `workerResults > 0`，并在为 0 时给出 why。
+
+**实测**（新增 `docs/verify/verify-load-worker.cjs`；同一个浏览器里同一模型跑两遍，一遍开一遍关）：
+
+| 931k（scan.ply，210MB） | worker 开 | worker 关 |
+| --- | --- | --- |
+| 导入墙钟 | 2205 ms | 2262 ms |
+| **主线程最长冻结（20ms 心跳最大间隔）** | **855 ms** | **1640 ms** |
+| 高斯数 | 931,720 ✓ | 931,720 ✓ |
+| worker 派发计数 | **1** ✓ | **0** ✓ |
+
+⇒ 墙钟差不多（总时长受 I/O 主导），但**最长冻结砍掉一半（−48%）** —— 这才是「界面能不能动」的指标。
+13M 上的绝对值没能复测（本机后半程 13M 导入必然卡住，见下面的环境坑）。
+
+**本轮新增的验证资产**
+
+| 资产 | 项数 | 跑法 |
+| --- | --- | --- |
+| `docs/verify/verify-index-ranges.mts` | **18 项**（纯 node，不占浏览器） | `node --experimental-strip-types docs/verify/verify-index-ranges.mts` |
+| `docs/verify/verify-degenerate-bound.cjs` | **10 项**（含自证伪断言，双后端） | `node docs/verify/verify-degenerate-bound.cjs "http://localhost:3621/?gpu=webgpu"` |
+| `docs/verify/gen-floater-biggrid-splat.cjs` + `verify-floater-biggrid.cjs` | **5 项** | 先生成模型 `node docs/verify/gen-floater-biggrid-splat.cjs`（默认写 `dist/floater-biggrid-test.ply`），再跑套件 |
+| `docs/verify/verify-load-worker.cjs` | **4 项**（**不进批量**） | 需 `dist\scan.ply`：`copy _tmp\scan.ply dist\scan.ply` → 跑 → **立刻删**（否则进 asar）|
+| `docs/probes/o1-bound-probe.cjs` | 探针（统计 `updateLocalBounds` 次数/耗时 + 单杆落地延迟） | `node docs/probes/o1-bound-probe.cjs [model] [url]` |
+
+`verify-index-ranges.mts` 覆盖：运行长度编码（单个索引用高位置位、连续段用 `[start,count]`）、
+`fromPredicate` 与「直接扫一遍」的参考实现**逐位一致**、**scratch 跨扩容复用不串味**、
+`forEachRun` 与 `forEach` 等价、`sortedPredicate` 在「调用方跳过一些 i」时仍正确（修掉的游标 bug）。
+
+**环境坑（这一轮踩到的，写下来省得下次再花一小时）**
+
+1. **无头 Edge 下 app 的导入路径有启动竞态**：`window.scene` 一就绪就立刻导入，13M 会**永远卡在
+   0 个 splat**（页面事件循环是活的、CPU 几乎为 0）。**等 1.5s 再导入**就 12.5s 完成；
+2. **`npx serve` 的进程会僵死**：curl 拉 695MB 无限等待。探针卡住时**先 curl 一下服务端**，
+   重启后 1.7s 正常 —— 别急着怀疑应用；
+3. **不要用 PowerShell 的 `Set-Content` / `Get-Content` 往返 CJK 源码**（这一轮又写坏过一个探针的注释；
+   `editor.ts`、`splat.ts` 之前都中过招）。要用 read/write/edit 工具，或
+   `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`；
+4. 跑到后半程，13M 的导入在本机变得**必然卡住**（新旧构建都一样 ⇒ 与本轮改动无关，疑似反复 kill
+   无头 Edge 之后 GPU/驱动状态坏了），所以 A1 修好之后没能再量一次 13M 的浮云数，
+   改用上面的合成模型做**判定性验证**。
+
+**验证**（本轮各条的回归，逐条都跑过）：
+
+- 新增：`verify-index-ranges.mts` **18 项** 0 失败（纯 node）、`verify-degenerate-bound.cjs` **10 项**
+  webgpu + webgl2 双 0 失败、`verify-floater-biggrid.cjs` **5 项** 0 失败、`verify-load-worker.cjs` **4 项** 0 失败；
+- 选择相关：`verify-selection-range`(24) / `verify-selection-depth-bar`(19) / `verify-mask-vs-rect` /
+  `verify-selection-depth` / `verify-shape-selection` / `verify-edit-hide`，webgpu + webgl2 全 0 失败；
+- 导出相关：`verify-export-image` / `verify-export-orientation` / `verify-equirect-export` /
+  `verify-model-renders` 全 0 失败；
+- 去浮云/簇相关：`verify-cluster-filter` / `verify-floater-removal` / `verify-floater-detect` /
+  `verify-floater-scale` / `verify-floater-scope` 全 0 失败；
+- `npm run check` 干净。
+
+**还剩什么**（审计执行顺序里没做的三项，详见 `docs/进度存档.md` 第 2 节）：
+
+- **A2**（第 8 条，≥500 万点）：导出/回退的冗余拷贝 —— `surface-worker-client.ts` 无条件预复制
+  **741MB** 回退副本（正常路径不用）、`splat-serialize.ts` 的前置过滤；
+- **A3**（第 10 条）：投影缓存 **6 B/点**量化 + 内存预算门槛（≤3200 万点）+ 超限给可见提示；
+- **13M 上 floater/cluster 检测的 101 秒冻结**：dense 化救不了它（实测网格 2.4e10 格 ⇒ 永远走 `Map` 回退），
+  要换数据结构或改成「点『计算』才跑 + 给预估耗时」。
+
+
 
 
 

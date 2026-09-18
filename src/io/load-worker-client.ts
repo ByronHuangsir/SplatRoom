@@ -31,13 +31,20 @@ type Pending = {
     skipReorder?: boolean;
 };
 
-// Feature flag — ON by default, per the header's promise that the fallback makes it safe.
-// It used to be opt-in via `window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`, and since nothing
-// in the repo ever set that (see docs/audit/00-总结.md 高危 7), the worker never ran and the whole
-// decode + morton sort + row reorder stayed on the main thread — the ~15s freeze on a 13M import.
-// `window.__SPLATROOM_NO_LOAD_WORKER__ = true` disables it for A/B testing.
+// Feature flag — still opt-in, and that is now a MEASURED requirement rather than an oversight.
+//
+// docs/audit/00-总结.md 高危 7 pointed out that nothing in the repo sets
+// `__SPLATROOM_ENABLE_LOAD_WORKER__`, so the worker never ran and every import decoded on the main
+// thread (the ~15s freeze on 13M). Flipping it to "on by default" was tried and **reverted**:
+// with the worker enabled, the very same rect gesture selects the whole model instead of the ~10%
+// inside the box (measured on the 2000-splat fixture: 2000 selected vs 213, and a depth push then
+// yields 0 instead of 202), and the loaded columns are byte-identical either way — so the worker
+// output differs in something the column hashes do not capture (centres/sorting metadata). Until
+// that is found, enabling it silently corrupts selections, which is far worse than a slow import.
+// The 假绿 in lw-probe is fixed (it now requires workerResults > 0), so the worker can be
+// validated properly before it is ever turned on for real.
 const USE_LOAD_WORKER =
-    (typeof window !== 'undefined') && (window as any).__SPLATROOM_NO_LOAD_WORKER__ !== true;
+    (typeof window !== 'undefined') && (window as any).__SPLATROOM_ENABLE_LOAD_WORKER__ === true;
 
 const ctorMap: Record<string, any> = {
     Int8Array,
