@@ -135,8 +135,10 @@
   `src/lod/lod.ts:95-141`（>2M 走行采样 `sampleGsplatData`）、`:218-222`（`planLodFractions`）、
   `src/splat/splat.ts:290-305`（`transform` 列无条件重建为全 0）、`:507-517`（`applyLod`→`replaceData`）、
   `src/lod/editor-lod.ts:24`（`LOD_GENERATE_MIN = 900_000`）、`:31,42-54,107-120`（`autoEnabled` 默认 false，且生成也只在 auto 模式）、
-  `src/scene/scene.ts:595-621`（每帧切层）
+  `src/scene/scene.ts:595-621`（切层；注意 `:609` 有 **1000 ms 冷却**，`:604-607` 在门控关闭时立刻强制回全分辨率
+  —— 所以不是第一轮说的"每帧都切"，而是"**每秒最多切一次，且只在浏览态**"）
 - **判据**：**只看 `numSplats ≥ 900,000` 且 `lod.autoEnabled === true`**（默认关）。与分辨率无关。
+  代理**生效窗口**还要求：无选中、未拖相机、未撤销重做（`editor-lod.ts:57-67`）——即"拉远相机随便看看"那一类操作。
 - **分档表**：
 
   | 档 | 是否生成代理 | 代理级数 | 触发 |
