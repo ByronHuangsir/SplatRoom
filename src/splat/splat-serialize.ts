@@ -1,8 +1,11 @@
 import {
+    Column,
     createChunkDataPool,
+    DataTable,
     logger as splatTransformLogger,
     MemoryFileSystem,
     Transform,
+    writeHtml,
     writeLodSource,
     writeSource,
     ZipFileSystem,
@@ -21,6 +24,7 @@ import {
     type SHBands,
     type Writer
 } from '@playcanvas/splat-transform';
+import { defaultSettings } from '@playcanvas/splat-transform/viewer-settings';
 import {
     GSplatData,
     Mat3,
@@ -870,10 +874,492 @@ const createProgressRenderer = (header: string, events?: Events): Renderer => ({
     }
 });
 
+// ---------------------------------------------------------------------------
+// 查看器导出：把"整包在内存里 base64 再拼 HTML"改成流式
+// （用户报的 ④；本会话目标：去掉 O(输出) 的瞬时分配）
+//
+// splat-transform 的 `html-bundle` 分支（writeHtml bundle:true）走的是：
+//   writeSource 的 default 分支 → materializeToDataTable（整表一份拷贝，13M/16 列约 700MB）
+//   → writeSog 把 .sog 写进 MemoryFileSystem（又一份 O(输出) 常驻）
+//   → toBase64：先按 32KB 块拼出一个 O(输出) 的 binary 字符串，再 btoa 出第二个
+//   → renderViewerHtml 把 base64 拼进 HTML → TextEncoder 再编一份字节。
+// 1300 万点（merged-scene，无 SH）实测：瞬时 ≥8MB 分配合计 4251.5MB，单次最大 396.9MB。
+//
+// 这里改成分块：
+//   1) 用"1 个高斯点"的假数据调一次 writeHtml(bundle:false)，拿到 viewer 的
+//      html/css/js（模板与数据无关，取一次就缓存住）；
+//   2) 按 renderViewerHtml 的同名接缝把 css/js 内联、contentUrl 换成占位符；
+//   3) .sog 仍由 writeSource 的 `sog-bundle` 分支（流式，不 materialize）产出，
+//      边产出边 base64 直接写进同一个 HTML 输出流 —— 中间不再有 O(输出) 的拷贝。
+// 产物与旧路径逐字节同构（.sog 载荷、HTML 结构、bootstrap JSON 都一致），
+// 见 docs/verify/verify-viewer-stream.cjs 里"新旧对拍"的判定。
+// ---------------------------------------------------------------------------
+
+type ViewerTemplate = {
+    html: string;
+    css: string;
+    js: string;
+    // writeHtml 实际用的条目名（取回来原样复用，避免自己猜 './' 之类的规范化差异）
+    htmlName: string;
+    cssName: string;
+    jsName: string;
+    settingsName: string;
+    sogName: string;
+};
+
+const VIEWER_HTML_FILENAME = 'index.html';
+const VIEWER_ZIP_FILENAME = 'output.zip';
+const VIEWER_CONTENT_FILENAME = 'scene.sog';
+const VIEWER_DATA_URI_PREFIX = 'data:application/octet-stream;base64,';
+// 占位符只会出现在我们自己写进 bootstrap 的 contentUrl 里：下面按字节定位它、
+// 再用流式 base64 原地替换，于是 HTML 其余字节与"先拼好再替换"完全一致。
+const VIEWER_PLACEHOLDER = 'SPLATROOM_SOG_PAYLOAD_PLACEHOLDER';
+
+// renderViewerHtml 的三处接缝（照抄 @playcanvas/splat-transform 的 dist/index.mjs）。
+// 任何一处对不上就说明上游换了模板：返回 null，让调用方退回官方 bundle 分支，绝不猜。
+const SEAM_STYLESHEET = /<link\b[^>]+href="\.\/index\.css"[^>]*>/;
+const SEAM_MODULE_IMPORT = /import \{ main \} from '\.\/index\.js';/;
+const SEAM_BOOTSTRAP = /<script type="application\/json" id="sse-bootstrap">[\s\S]*?<\/script>/;
+
+const jsonForScriptBlock = (value: unknown): string => {
+    let json = JSON.stringify(value);
+    json = json.replace(/</g, '\\u003c');
+    json = json.replace(/\u2028/g, '\\u2028');
+    json = json.replace(/\u2029/g, '\\u2029');
+    return json;
+};
+
+const indentText = (text: string, spaces: number): string => {
+    const ws = ' '.repeat(spaces);
+    return text.split('\n').map(line => ws + line).join('\n');
+};
+
+// splat-transform 的 logger 只提供 setRenderer，没有 getter，所以自己记一份当前
+// renderer，取模板那段临时换静默 renderer 再换回来（否则假导出会在进度条上多报几步）。
+let activeProgressRenderer: Renderer | null = null;
+
+const setProgressRenderer = (header: string, events?: Events): void => {
+    activeProgressRenderer = createProgressRenderer(header, events);
+    splatTransformLogger.setRenderer(activeProgressRenderer);
+};
+
+const silentRenderer: Renderer = {
+    handle: () => {
+        // 取模板用的假导出：不往进度条上写
+    }
+};
+
+let viewerTemplate: ViewerTemplate | null = null;
+let viewerTemplateInFlight: Promise<ViewerTemplate | null> | null = null;
+
+const buildViewerTemplate = async (): Promise<ViewerTemplate | null> => {
+    const names = ['x', 'y', 'z', 'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity'];
+    const dataTable = new DataTable(
+        names.map(name => new Column(name, new Float32Array(1))),
+        new Transform()
+    );
+
+    const memFs = new MemoryFileSystem();
+    splatTransformLogger.setRenderer(silentRenderer);
+    try {
+        await writeHtml({
+            filename: VIEWER_HTML_FILENAME,
+            dataTable,
+            bundle: false,
+            iterations: 1,
+            createDevice: createGpuDevice
+        }, memFs);
+    } finally {
+        if (activeProgressRenderer) {
+            splatTransformLogger.setRenderer(activeProgressRenderer);
+        }
+    }
+
+    // writeHtml 内部用 join(dirname(filename), name) 拼路径，所以条目名可能带目录前缀。
+    // 按后缀找一遍再原样复用，不去猜它规范化的结果。
+    const findName = (...candidates: string[]): string | null => {
+        for (const key of memFs.results.keys()) {
+            for (const c of candidates) {
+                if (key === c || key.endsWith(`/${c}`)) {
+                    return key;
+                }
+            }
+        }
+        return null;
+    };
+    const decode = (name: string | null): string | null => {
+        const bytes = name ? memFs.results.get(name) : null;
+        return bytes ? new TextDecoder().decode(bytes) : null;
+    };
+
+    const htmlName = findName(VIEWER_HTML_FILENAME);
+    const cssName = findName('index.css');
+    const jsName = findName('index.js');
+    const settingsName = findName('settings.json');
+    const sogName = findName('index.sog', `${VIEWER_HTML_FILENAME.slice(0, -'.html'.length)}.sog`);
+    const html = decode(htmlName);
+    const css = decode(cssName);
+    const js = decode(jsName);
+    if (!htmlName || !cssName || !jsName || !settingsName || !sogName || !html || !css || !js) {
+        return null;
+    }
+
+    return { html, css, js, htmlName, cssName, jsName, settingsName, sogName };
+};
+
+const getViewerTemplate = (): Promise<ViewerTemplate | null> => {
+    if (viewerTemplate) {
+        return Promise.resolve(viewerTemplate);
+    }
+    if (!viewerTemplateInFlight) {
+        viewerTemplateInFlight = buildViewerTemplate().then((tpl) => {
+            viewerTemplateInFlight = null;
+            if (tpl) {
+                viewerTemplate = tpl;
+            }
+            return tpl;
+        }, (err): ViewerTemplate | null => {
+            viewerTemplateInFlight = null;
+            console.warn(`viewer template unavailable, falling back to the splat-transform bundle writer: ${err}`);
+            return null;
+        });
+    }
+    return viewerTemplateInFlight;
+};
+
+/**
+ * 复刻 renderViewerHtml 的接缝替换（只做查看器需要的那几处：内联 css/js + bootstrap）。
+ * 任何接缝对不上都返回 null，由调用方退回官方 writer。
+ */
+const renderViewerDocument = (tpl: ViewerTemplate, bootstrap: Record<string, unknown>, inline: boolean): string | null => {
+    if (!SEAM_STYLESHEET.test(tpl.html) || !SEAM_MODULE_IMPORT.test(tpl.html) || !SEAM_BOOTSTRAP.test(tpl.html)) {
+        return null;
+    }
+
+    let result = tpl.html;
+    if (inline) {
+        // `<style>` 是 rawtext：样式表里出现 `</style` 就没法内联（上游同样会拒绝）
+        if (/<\/style/i.test(tpl.css)) {
+            return null;
+        }
+        const js = tpl.js.replace(/\n\/\/# sourceMappingURL=\S+\s*$/, '\n');
+        // 内联 module script 遇到 `</script` / `<!--` + `<script` 会提前结束（上游同一套检查）
+        if (/<\/script|<!--|<script/i.test(js)) {
+            return null;
+        }
+        result = result.replace(SEAM_STYLESHEET, () => `<style>\n${indentText(tpl.css, 12)}\n        </style>`);
+        result = result.replace(SEAM_MODULE_IMPORT, () => js);
+    }
+    // bootstrap 最后替换：上面的插入内容里若出现接缝样式的文本，也不会被当成接缝
+    result = result.replace(SEAM_BOOTSTRAP, () => `<script type="application/json" id="sse-bootstrap">${jsonForScriptBlock(bootstrap)}</script>`);
+    return result;
+};
+
+const BASE64_TABLE = (() => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const table = new Uint8Array(64);
+    for (let i = 0; i < 64; i++) {
+        table[i] = chars.charCodeAt(i);
+    }
+    return table;
+})();
+
+// 每次喂进来的字节数取 3 的整数倍，于是每块的 base64 都自成一体、不带填充，
+// 可以边收边写，不需要把 .sog 整份留在内存里。
+// 块取 12MiB：1300 万点（181MB base64）只要 ~12 次编码，而每次的临时串是 12MB+16MB
+// 量级 —— 块太小会把 btoa 的调用次数和短命对象数量放大好几倍（实测这样最省时）。
+const BASE64_INPUT_CHUNK = 3 * 4 * 1024 * 1024;
+
+// 手写编码（没有 btoa 时的兜底，也用于收尾那一小块 1~2 字节）
+const encodeBase64Manual = (bytes: Uint8Array, final: boolean): Uint8Array => {
+    const groups = Math.floor(bytes.length / 3);
+    const rest = bytes.length - groups * 3;
+    const out = new Uint8Array((final ? Math.ceil(bytes.length / 3) : groups) * 4);
+    let o = 0;
+    for (let i = 0; i < groups; i++) {
+        const p = i * 3;
+        const a = bytes[p];
+        const b = bytes[p + 1];
+        const c = bytes[p + 2];
+        out[o++] = BASE64_TABLE[a >> 2];
+        out[o++] = BASE64_TABLE[((a & 3) << 4) | (b >> 4)];
+        out[o++] = BASE64_TABLE[((b & 15) << 2) | (c >> 6)];
+        out[o++] = BASE64_TABLE[c & 63];
+    }
+    if (final && rest === 1) {
+        const a = bytes[groups * 3];
+        out[o++] = BASE64_TABLE[a >> 2];
+        out[o++] = BASE64_TABLE[(a & 3) << 4];
+        out[o++] = 0x3d;
+        out[o++] = 0x3d;
+    } else if (final && rest === 2) {
+        const a = bytes[groups * 3];
+        const b = bytes[groups * 3 + 1];
+        out[o++] = BASE64_TABLE[a >> 2];
+        out[o++] = BASE64_TABLE[((a & 3) << 4) | (b >> 4)];
+        out[o++] = BASE64_TABLE[(b & 15) << 2];
+        out[o++] = 0x3d;
+    }
+    return out;
+};
+
+const base64Encoder = new TextEncoder();
+// 一次 fromCharCode 喂 24KiB（3 的整数倍）远低于参数上限
+const BASE64_NATIVE_STEP = 3 * 8192;
+
+const indexOfBytes = (haystack: Uint8Array, needle: Uint8Array): number => {
+    const first = needle[0];
+    const last = haystack.length - needle.length;
+    for (let i = haystack.indexOf(first); i !== -1 && i <= last; i = haystack.indexOf(first, i + 1)) {
+        let j = 1;
+        while (j < needle.length && haystack[i + j] === needle[j]) {
+            j++;
+        }
+        if (j === needle.length) {
+            return i;
+        }
+    }
+    return -1;
+};
+
+/**
+ * 把 `.sog` 的字节边收边 base64 直接写进 HTML 输出流的 Writer。
+ * `close()` 不关底层 sink —— HTML 尾部还要接着写。
+ */
+class Base64RelayWriter implements Writer {
+    private carry: Uint8Array | null = null;
+    private size = 0;
+    // 编码输出复用一块缓冲（TextEncoder.encodeInto 直接写进去，不产生 O(输出) 的分配）。
+    // 只有最后一块（1~2 字节）走手写编码，单独分配 4 字节。
+    private scratch: Uint8Array | null = null;
+    private readonly sink: Writer;
+
+    constructor(sink: Writer) {
+        this.sink = sink;
+    }
+
+    get bytesWritten(): number {
+        return this.size;
+    }
+
+    private encodeInto(piece: Uint8Array): Uint8Array {
+        if (typeof btoa !== 'function') {
+            return encodeBase64Manual(piece, false);
+        }
+        let binary = '';
+        for (let i = 0; i < piece.length; i += BASE64_NATIVE_STEP) {
+            binary += String.fromCharCode(...piece.subarray(i, i + BASE64_NATIVE_STEP));
+        }
+        const b64 = btoa(binary);
+        const need = (piece.length / 3) * 4;
+        if (!this.scratch || this.scratch.length < need) {
+            this.scratch = new Uint8Array(need);
+        }
+        // base64 全是 ASCII，encodeInto 写出的长度就是 need
+        base64Encoder.encodeInto(b64, this.scratch);
+        return this.scratch.subarray(0, need);
+    }
+
+    async write(data: Uint8Array): Promise<void> {
+        this.size += data.byteLength;
+
+        // 上一块剩下 1~2 字节：和这一块拼起来，保证编码按 3 字节对齐
+        let buf = data;
+        if (this.carry) {
+            const merged = new Uint8Array(this.carry.length + data.length);
+            merged.set(this.carry, 0);
+            merged.set(data, this.carry.length);
+            buf = merged;
+            this.carry = null;
+        }
+
+        const usable = buf.length - (buf.length % 3);
+        for (let i = 0; i < usable; i += BASE64_INPUT_CHUNK) {
+            const end = Math.min(i + BASE64_INPUT_CHUNK, usable);
+            await this.sink.write(this.encodeInto(buf.subarray(i, end)));
+        }
+        if (usable < buf.length) {
+            this.carry = buf.slice(usable);
+        }
+    }
+
+    async close(): Promise<void> {
+        if (this.carry) {
+            await this.sink.write(encodeBase64Manual(this.carry, true));
+            this.carry = null;
+        }
+    }
+
+    async abort(): Promise<void> {
+        this.carry = null;
+        this.scratch = null;
+        await this.sink.abort();
+    }
+}
+
+/**
+ * 一个只给"流式 SOG → base64 → HTML"用的 FileSystem：它只会开一个 writer，
+ * 内容直接接力到 HTML 输出流里，不落任何中间缓冲。
+ */
+class Base64RelayFileSystem implements FileSystem {
+    private readonly sink: Writer;
+    private opened = false;
+
+    constructor(sink: Writer) {
+        this.sink = sink;
+    }
+
+    createWriter(filename: string): Writer {
+        if (this.opened) {
+            // 单文件 HTML 只能容下一份 .sog；真出现第二个文件说明契约变了，宁可报错
+            throw new Error(`viewer stream: unexpected second output file '${filename}'`);
+        }
+        this.opened = true;
+        return new Base64RelayWriter(this.sink);
+    }
+
+    mkdir(_path: string): Promise<void> {
+        return Promise.resolve();
+    }
+}
+
+const writeViewerFile = async (fs: FileSystem, filename: string, bytes: Uint8Array): Promise<void> => {
+    const writer = await fs.createWriter(filename);
+    await writer.write(bytes);
+    await writer.close();
+};
+
+/**
+ * 流式查看器导出是否启用。默认启用；`window.__SPLATROOM_VIEWER_STREAM__ = false`
+ * 可以退回 splat-transform 官方的 bundle writer（现场排查用，不需要重新打包）。
+ * 模板接缝对不上时也会自动退回，并打一条 warning（验证套件据此判断走的哪条路）。
+ */
+const useViewerStream = (): boolean => (globalThis as any).__SPLATROOM_VIEWER_STREAM__ !== false;
+
+/**
+ * 把 .sog 流式写进给定的 fs（走 sog-bundle 分支：不 materialize 整表）。
+ * 返回是否真的写了内容。
+ */
+const writeExportSog = async (splats: Splat[], settings: SerializeSettings, fs: FileSystem, filename: string, iterations: number): Promise<boolean> => {
+    const built = createExportSource(splats, settings);
+    if (!built) {
+        return false;
+    }
+    const { source, pool } = built;
+    try {
+        await writeSource({
+            filename,
+            outputFormat: 'sog-bundle',
+            source,
+            pool,
+            options: { iterations },
+            createDevice: createGpuDevice
+        }, fs);
+    } finally {
+        await source.close();
+        pool.destroy();
+    }
+    return true;
+};
+
+// 单文件 HTML：HTML 头 + 流式 base64 的 .sog + HTML 尾，写进同一个输出流。
+const writeBundledViewer = async (splats: Splat[], serializeSettings: SerializeSettings, options: ViewerExportSettings, fs: FileSystem): Promise<boolean> => {
+    if (!useViewerStream()) {
+        return false;
+    }
+    const tpl = await getViewerTemplate();
+    if (!tpl) {
+        return false;
+    }
+    const encoder = new TextEncoder();
+    const document = renderViewerDocument(tpl, {
+        // 与官方 writer 一致：没给 settings 时用库里的默认设置（否则导出的 HTML 会去
+        // 找同目录的 settings.json，单文件场景下必然拿不到）
+        settings: options.experienceSettings ?? defaultSettings('object'),
+        contentUrl: `${VIEWER_DATA_URI_PREFIX}${VIEWER_PLACEHOLDER}`,
+        contentFilename: VIEWER_CONTENT_FILENAME
+    }, true);
+    if (!document) {
+        console.warn('viewer stream: the viewer html seams do not match — falling back to the splat-transform bundle writer');
+        return false;
+    }
+
+    const bytes = encoder.encode(document);
+    const at = indexOfBytes(bytes, encoder.encode(VIEWER_PLACEHOLDER));
+    if (at === -1) {
+        return false;
+    }
+
+    const built = createExportSource(splats, serializeSettings);
+    if (!built) {
+        // 没有可导出的点：与旧路径一致，什么都不写
+        return true;
+    }
+
+    const writer = await fs.createWriter('output.html');
+    const { source, pool } = built;
+    try {
+        await writer.write(bytes.subarray(0, at));
+        await writeSource({
+            filename: 'output.sog',
+            outputFormat: 'sog-bundle',
+            source,
+            pool,
+            options: { iterations: 10 },
+            createDevice: createGpuDevice
+        }, new Base64RelayFileSystem(writer));
+        await writer.write(bytes.subarray(at + VIEWER_PLACEHOLDER.length));
+        await writer.close();
+    } catch (err) {
+        // 半截文件比没有文件更糟：明确放弃这次输出
+        await writer.abort();
+        throw err;
+    } finally {
+        await source.close();
+        pool.destroy();
+    }
+    return true;
+};
+
+// 打包（zip）：.sog 直接流式写进 zip 条目，不再先塞一遍 MemoryFileSystem
+const writePackagedViewer = async (splats: Splat[], serializeSettings: SerializeSettings, options: ViewerExportSettings, fs: FileSystem): Promise<boolean> => {
+    if (!useViewerStream()) {
+        return false;
+    }
+    const tpl = await getViewerTemplate();
+    if (!tpl) {
+        return false;
+    }
+    const encoder = new TextEncoder();
+    // html 引用的是同目录的 .sog（旧路径这里写的就是这个名字）
+    const sogRef = tpl.sogName.split('/').pop() ?? tpl.sogName;
+    const html = renderViewerDocument(tpl, { contentUrl: sogRef }, false);
+    if (!html) {
+        console.warn('viewer stream: the viewer html seams do not match — falling back to the splat-transform writer');
+        return false;
+    }
+
+    const zipWriter = await fs.createWriter(VIEWER_ZIP_FILENAME);
+    const zipFs = new ZipFileSystem(zipWriter);
+    try {
+        const wrote = await writeExportSog(splats, serializeSettings, zipFs, tpl.sogName, 10);
+        if (wrote) {
+            await writeViewerFile(zipFs, tpl.cssName, encoder.encode(tpl.css));
+            await writeViewerFile(zipFs, tpl.jsName, encoder.encode(tpl.js));
+            await writeViewerFile(zipFs, tpl.settingsName, encoder.encode(JSON.stringify(options.experienceSettings ?? defaultSettings('object'), null, 4)));
+            await writeViewerFile(zipFs, tpl.htmlName, encoder.encode(html));
+        }
+    } finally {
+        // 收尾（写中央目录）；出错时也走这里，与旧路径一致
+        await zipFs.close();
+    }
+    return true;
+};
+
 const serializeViewer = async (splats: Splat[], serializeSettings: SerializeSettings, options: ViewerExportSettings, fs: FileSystem): Promise<void> => {
     const { experienceSettings, events } = options;
 
-    splatTransformLogger.setRenderer(createProgressRenderer('Exporting HTML', events));
+    setProgressRenderer('Exporting HTML', events);
 
     // splat-transform's writers leave their top-level scope open on error
     // (their contract is for the caller to unwind), so we explicitly
@@ -881,33 +1367,33 @@ const serializeViewer = async (splats: Splat[], serializeSettings: SerializeSett
     // renderer. That fires `progressEnd` and dismisses the dialog before
     // any error popup is shown.
     try {
-        if (options.type === 'html') {
-            // Bundled HTML - a single self-contained file
-            await writeSplatFile(splats, serializeSettings, 'html-bundle', 'output.html', {
-                viewerSettingsJson: experienceSettings,
-                iterations: 10
-            }, fs);
-        } else {
-            // Package - write unbundled into a MemoryFileSystem, then ZIP
-            const memFs = new MemoryFileSystem();
-            await writeSplatFile(splats, serializeSettings, 'html', 'index.html', {
-                viewerSettingsJson: experienceSettings,
-                iterations: 10
-            }, memFs);
+        const streamed = options.type === 'html' ?
+            await writeBundledViewer(splats, serializeSettings, options, fs) :
+            await writePackagedViewer(splats, serializeSettings, options, fs);
 
-            // Create ZIP from memory filesystem results. The try/finally
-            // ensures zipFs (and its underlying writer) is closed even if a
-            // write throws partway through, so we don't leak the output file.
-            const zipWriter = await fs.createWriter('output.zip');
-            const zipFs = new ZipFileSystem(zipWriter);
-            try {
-                for (const [filename, data] of memFs.results.entries()) {
-                    const writer = await zipFs.createWriter(filename);
-                    await writer.write(data);
-                    await writer.close();
+        if (!streamed) {
+            // 模板对不上（上游换了 viewer 模板）：退回官方 writer，产物照旧
+            if (options.type === 'html') {
+                await writeSplatFile(splats, serializeSettings, 'html-bundle', 'output.html', {
+                    viewerSettingsJson: experienceSettings,
+                    iterations: 10
+                }, fs);
+            } else {
+                const memFs = new MemoryFileSystem();
+                await writeSplatFile(splats, serializeSettings, 'html', VIEWER_HTML_FILENAME, {
+                    viewerSettingsJson: experienceSettings,
+                    iterations: 10
+                }, memFs);
+
+                const zipWriter = await fs.createWriter(VIEWER_ZIP_FILENAME);
+                const zipFs = new ZipFileSystem(zipWriter);
+                try {
+                    for (const [filename, data] of memFs.results.entries()) {
+                        await writeViewerFile(zipFs, filename, data);
+                    }
+                } finally {
+                    await zipFs.close();
                 }
-            } finally {
-                await zipFs.close();
             }
         }
     } catch (err) {

@@ -708,6 +708,17 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             //     sog        98.6 s / 瞬时 1881.3 MB (×2.7) / 单次最大 148.9 MB
             // ⇒ 倍数随体积**超线性**涨（贴图/编码缓冲），所以取**最大的一档**（夹具 C），
             //   宁可把提示说得保守一点，也别让用户以为"很小很快"然后崩在中间。
+            //
+            // 2026-09-19（同一会话内 A/B，见 docs/probes/export-alloc-per-type.cjs 与
+            // docs/verify/verify-viewer-stream.cjs）：查看器两条路都改成"边产出边 base64 直接
+            // 流进输出流"之后，包装层的那 2.3 GB 没了 —— 现在两条查看器路径都≈纯 SOG 编码的开销：
+            //     htmlViewer     流式 99.3 s / 瞬时 1979.1 MB (×2.85) / 单次最大 148.9 MB
+            //     htmlViewer     官方 80.4 s / 瞬时 4251.5 MB (×6.1)  / 单次最大 396.9 MB  ← 旧口径
+            //     packageViewer  流式 97.4 s / 瞬时 1881.3 MB (×2.71) / 单次最大 148.9 MB
+            //     packageViewer  官方 77.3 s / 瞬时 4251.5 MB (×6.1)  / 单次最大 396.9 MB  ← 旧口径
+            //     sog                  97.5 s / 瞬时 1881.3 MB (×2.71) / 单次最大 148.9 MB
+            // 所以把查看器的倍数从 6.1 收到 3.2/3.1（≈实测 ×1.12 的余量）；这也等于把
+            // "离谱才拒绝"的 12 GB 硬线从"数据集 1.97 GB"放宽到"数据集 3.75 GB"。
             const datasetBytes = splats.reduce((n, s) => {
                 const props = s.splatData.getElement('vertex').properties as any[];
                 const perRow = props.reduce((m, p) => m + (p.byteSize ?? 4), 0);
@@ -720,8 +731,8 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 splat: 0.4,
                 spz: 2.8,
                 sog: 2.7,
-                htmlViewer: 6.1,
-                packageViewer: 6.1
+                htmlViewer: 3.2,
+                packageViewer: 3.1
             } as Record<string, number>)[fileType] ?? 1.0;
             const estimatedGBValue = (datasetBytes * memoryMultiple) / 1073741824;
             estimatedOutputGB = Math.max(0.1, estimatedGBValue).toFixed(1);
@@ -730,11 +741,13 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             // splat 是分块流式的，不需要提示。
             //
             // **不再一刀拒绝**（用户明确说查看器/SOG 是日常要用的导出）：实测这两条在他的
-            // 1300 万点模型上**真的能跑完**，只是又慢又吃内存 ——
+            // 1300 万点模型上**真的能跑完**，只是又慢又吃内存；2026-09-19 又把查看器改成流式组装
+            // 之后，瞬时分配从 4251.5 MB 降到 1979.1 MB（单次最大 396.9 → 148.9 MB），
+            // 所以"离谱到不可能成功"的线可以放宽：
             //   13,007,105 点 / 16 列无 SH（merged-scene）：
-            //     查看器 81.3 秒 / 瞬时分配 4251.5 MB（单次最大 396.9 MB、91 次）
-            //     SOG    98.6 秒 / 瞬时分配 1881.3 MB（单次最大 148.9 MB、30 次）
-            // 所以改成：超过舒适线就**报出体积与预估耗时、由用户决定**；只有离谱到 12 GB
+            //     查看器 99.3 秒 / 瞬时分配 1979.1 MB（单次最大 148.9 MB、34 次）
+            //     SOG    97.5 秒 / 瞬时分配 1881.3 MB（单次最大 148.9 MB、30 次）
+            // 改成：超过舒适线就**报出体积与预估耗时、由用户决定**；只有离谱到 12 GB
             // 才直接拒绝（那已经不可能成功了）。
             // 比较用**未取整**的值：`toFixed(1)` 会把 1.029 压成 "1.0"、`1.0 > 1.0` 判不出来。
             const inMemoryTypes = ['htmlViewer', 'packageViewer', 'sog', 'spz'];
