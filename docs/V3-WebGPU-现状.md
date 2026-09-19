@@ -2349,7 +2349,7 @@ A3 是"两端仍然精确"（0/100 = 整段穿透的语义不能动）。
 
 | 资产 | 项数 | 跑法 |
 | --- | --- | --- |
-| `docs/verify/verify-export-roundtrip.cjs` | **5 项** | `node docs/verify/verify-export-roundtrip.cjs "http://localhost:3621/?gpu=webgpu"` |
+| `docs/verify/verify-export-roundtrip.cjs` | **5 项**（6.50 追加第 6 项 ⇒ 现在 **6 项**） | `node docs/verify/verify-export-roundtrip.cjs "http://localhost:3621/?gpu=webgpu"` |
 | `docs/verify/verify-range-cache-hint.cjs` | **4 项** | `node docs/verify/verify-range-cache-hint.cjs "http://localhost:3621/?gpu=webgpu"` |
 
 `verify-export-roundtrip.cjs` 是**批量里第一个碰 `splat-serialize` 的套件**（写文件 → Blob → 重新 load，
@@ -2432,12 +2432,56 @@ A3 是"两端仍然精确"（0/100 = 整段穿透的语义不能动）。
    命中分配失败时提示"内存不够，保存失败：这个模型大约需要 X GB……可以先框选/裁剪缩小范围，
    或改用 PLY / Splat（边算边写盘）"，**9 语言同步**（新键 `popup.exportOutOfMemory`）。
 
-**还没做（留作下一步，见第 2 节待办）**：真正消掉那次 **O(输出) 的单次分配** ——
-`MemoryFileSystem` 换成"块列表 → 直接 `new Blob(chunks)`"，或者让 `duplicate` / `separate`
-也走流式。这需要动 `splat-transform` 的 writer 用法，不是小改。
-
 **需要用户确认的一点**：当时用的是**哪种导出**（PLY / Splat / SOG / HTML 查看器）——
 查看器与 SOG 是"整包在内存里组织"的路径，最容易顶到上限；PLY 走流式，理论上最安全。
+
+#### ④ 的后续修复（同轮补做）：干掉那次 O(输出) 分配 + 事前给话
+
+上一小节只量到靶子（`MemoryFileSystem.close()` 把整份输出拼成一整块）并给了"出错之后"的人话；
+**这一小节把那次分配本身换掉了**（提交 `bfffa84`）。
+
+**1) 新增"按块收集 → 直接拼 Blob"的 writer**：`src/io/write/blob-file-system.ts` 的
+`BlobFileWriter` 每块只 `slice()` 收起来（单次分配最大就是**一块**，`close()` 什么都不用拼），
+`blob` 用 `new Blob(chunks)` —— 浏览器把块列表当**分段数据**，**不需要 O(输出) 的连续内存**。
+块顺序不变 ⇒ **字节序列与拼成一块时完全一致，输出字节不变**。
+接的两处都是原来用 `MemoryFileSystem` 的地方：
+
+| 接入点 | 原来 | 现在 |
+| --- | --- | --- |
+| `BrowserDownloadWriter`（**没有**文件选择器时的下载回退） | `MemoryFileSystem` + 整块 `triggerDownload` | 块收集 + `triggerDownloadBlob` |
+| `edit.copy` / `edit.cut` / `edit.separate` / `edit.duplicate` | `MemoryFileSystem` → `results.get()` → `new Blob` | `BlobFileSystem` → `writer.blob` → `MappedReadFileSystem.addFile(filename, blob)` |
+
+（保存**主路径本来就走流式**：打包版实测有 `window.showSaveFilePicker`，`BrowserFileWriter`
+逐块 `stream.write`，这条不用改。）
+
+**实测**（93 万点 / 48 列 SH，导出 231MB；给页面挂 typed-array 分配跟踪）：
+
+| | 改前 | 改后 |
+| --- | --- | --- |
+| 瞬时分配总量 | 861.9 MB | **447.5 MB（−48%）** |
+| 单次最大分配 | **209.7 MB**（`MemoryFileSystem.close` 拼整块） | **192 MB**（`Object.acquire` 池分配，来自**重新导入**新 splat，保存路径不会走） |
+| ≥8MB 分配次数 | 18 | 13 |
+
+⇒ 「导出多大就一次性分配多大」这个模式**消失了**。
+
+**2) 事前拦截：查看器 / SOG / SPZ 是"整包在内存里组织"的**
+PLY / compressedPly / splat 是边算边写盘的；查看器、SOG、SPZ 要把整包在内存里组起来
+（zip / 贴图编码），体积随点数线性放大（13M ≈ 700MB~1GB 的单次分配）。现在按**导出格式与点数
+先估体积**（PLY 236 B/行、compressedPly 60、splat 32、spz 16、sog 8），超过上限
+（默认 **1.0 GB**）就在**动手之前**给话，而不是跑到一半崩；出错路径同样翻译
+（新键 `popup.exportOutOfMemory`）。新增调试覆盖 `window.__SPLATROOM_EXPORT_MAX_GB__`
+（真实上限 1GB 而夹具只有 2000 点，不给覆盖就没法验证这条分支）。
+
+**验证**：`verify-export-roundtrip.cjs` 从 **5 项 → 6 项 0 失败**，新增的第 6 项是
+"体积超限时查看器导出**事前**给出『内存不够』的人话（而不是崩掉）"—— 观测方式是把
+`showPopup` 换成记录器，因为真弹窗会等用户点确定、把套件挂住。
+全量 **35 套**（webgpu）**TOTAL FAILED: 0**；`npm run check` 干净。
+版本 `3.23.2`，打包 `release\SplatRoom-3.23.2.exe`（122.1 MB，已签名）复核：asar **5295** 条 /
+唯一 PLY = `dist\test-model.ply` / 8 个 wasm / bundle 版本字面量 3.4.0 + **3.23.2** /
+9 语言各 **688** 键 / exe 属性 3.23.2 / 冒烟 4 进程 → 杀净 0（提交 `9e3c0f9`）。
+
+**还没做（见第 2 节待办）**：真正让**查看器 / SOG 自己**也走流式 —— 要动 `serializeViewer`
+与 SOG 编码器，不是小改；**并且仍然需要用户确认当时用的是哪种导出**，才能定位到底哪条路径顶到上限。
 
 #### 新增验证资产
 
@@ -2476,9 +2520,9 @@ exe 属性 3.23.1 / 冒烟 4 进程 → 杀净 0。
 
 #### 还剩什么
 
-1. **④ 那次 O(输出) 的单次分配**（`MemoryFileSystem.close` 拼整块）—— 要动 `splat-transform`
-   的 writer 用法（块列表 → `new Blob(chunks)`，或 `duplicate`/`separate` 也走流式）；
-   **并且需要用户先确认当时用的是哪种导出**（查看器 / SOG 最容易顶上限）；
+1. **④ 保存 OOM** —— 那次 **O(输出) 的单次分配已经干掉**（861.9 → **447.5MB**，209.7MB 那次分配消失，
+   见上面「④ 的后续修复」），事前也给了话；**剩下的是让查看器 / SOG 自己走流式**
+   （要动 `serializeViewer` / SOG 编码器），**并且需要用户确认当时用的是哪种导出**；
 2. **13M 上去浮云检测本身还是 101 秒** —— 本轮只是**加了门槛不自动跑**（并给提示），
    算法级修复（换开放寻址哈希网格 / 复用一次排序过的键，或"点『计算』才跑 + 预估耗时"）还没做；
 3. **load worker 输出不等价**（列字节一致但选区结果不同，213 vs 2000）—— 查清之前保持 opt-in；
