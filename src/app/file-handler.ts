@@ -709,16 +709,18 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             // ⇒ 倍数随体积**超线性**涨（贴图/编码缓冲），所以取**最大的一档**（夹具 C），
             //   宁可把提示说得保守一点，也别让用户以为"很小很快"然后崩在中间。
             //
-            // 2026-09-19（同一会话内 A/B，见 docs/probes/export-alloc-per-type.cjs 与
-            // docs/verify/verify-viewer-stream.cjs）：查看器两条路都改成"边产出边 base64 直接
-            // 流进输出流"之后，包装层的那 2.3 GB 没了 —— 现在两条查看器路径都≈纯 SOG 编码的开销：
-            //     htmlViewer     流式 99.3 s / 瞬时 1979.1 MB (×2.85) / 单次最大 148.9 MB
-            //     htmlViewer     官方 80.4 s / 瞬时 4251.5 MB (×6.1)  / 单次最大 396.9 MB  ← 旧口径
-            //     packageViewer  流式 97.4 s / 瞬时 1881.3 MB (×2.71) / 单次最大 148.9 MB
-            //     packageViewer  官方 77.3 s / 瞬时 4251.5 MB (×6.1)  / 单次最大 396.9 MB  ← 旧口径
-            //     sog                  97.5 s / 瞬时 1881.3 MB (×2.71) / 单次最大 148.9 MB
-            // 所以把查看器的倍数从 6.1 收到 3.2/3.1（≈实测 ×1.12 的余量）；这也等于把
-            // "离谱才拒绝"的 12 GB 硬线从"数据集 1.97 GB"放宽到"数据集 3.75 GB"。
+            // 2026-09-19（同一会话内 A/B，见 docs/probes/viewer-ab-13m.cjs 与
+            // docs/verify/verify-viewer-stream.cjs / verify-viewer-large.cjs）：查看器两条路都改成
+            // "边产出边 base64 直接流进输出流"之后，包装层的那 2.3 GB 没了 —— 两条查看器路径
+            // 现在都≈纯 SOG 编码的开销（下面比值都按本函数同一个 datasetBytes 口径算）：
+            //     用例                     耗时     写出        瞬时           单次最大   分配次数  比值
+            //     htmlViewer     流式   99.3 s  184.3 MB   1979.1 MB      148.9 MB      34     ×2.70
+            //     htmlViewer     官方   80.4 s  184.3 MB   4251.5 MB      396.9 MB      91     ×5.81  ← 旧口径
+            //     packageViewer  流式   97.4 s  139.0 MB   1881.3 MB      148.9 MB      30     ×2.57
+            //     packageViewer  官方   77.3 s  139.0 MB   4251.5 MB      396.9 MB      91     ×5.81  ← 旧口径
+            //     sog                   97.5 s  136.0 MB   1881.3 MB      148.9 MB      30     ×2.57
+            // 所以查看器的倍数从 6.1 收到 3.2/3.1（对应实测 ×2.70/×2.57，留约 20% 余量）；
+            // 这也等于把"离谱才拒绝"的 12 GB 硬线从"数据集 1.97 GB"放宽到"数据集 3.75 GB"。
             const datasetBytes = splats.reduce((n, s) => {
                 const props = s.splatData.getElement('vertex').properties as any[];
                 const perRow = props.reduce((m, p) => m + (p.byteSize ?? 4), 0);
