@@ -3,7 +3,9 @@
  * Provides FileSystem abstraction for browser file operations.
  */
 
-import { MemoryFileSystem, type FileSystem, type Writer } from '@playcanvas/splat-transform';
+import { type FileSystem, type Writer } from '@playcanvas/splat-transform';
+
+import { BlobFileWriter } from './blob-file-system';
 
 /**
  * Writer implementation for FileSystemWritableFileStream (File System Access API).
@@ -45,10 +47,9 @@ class BrowserFileWriter implements Writer {
 }
 
 /**
- * Trigger a browser download for the given data.
+ * Trigger a browser download for a blob.
  */
-const triggerDownload = (data: Uint8Array, filename: string): void => {
-    const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+const triggerDownloadBlob = (blob: Blob, filename: string): void => {
     const url = window.URL.createObjectURL(blob);
 
     const lnk = document.createElement('a');
@@ -75,35 +76,33 @@ const triggerDownload = (data: Uint8Array, filename: string): void => {
  * Uses MemoryFileSystem internally for efficient buffer management.
  */
 class BrowserDownloadWriter implements Writer {
-    private memFs: MemoryFileSystem;
-    private innerWriter: Writer;
+    private writer: BlobFileWriter;
     private filename: string;
 
     constructor(filename: string) {
         this.filename = filename;
-        this.memFs = new MemoryFileSystem();
-        this.innerWriter = this.memFs.createWriter(filename);
+        // 2026-09-18（用户报的 ④）：这里原来用 MemoryFileSystem，它的 close() 会把整份输出
+        // **拼成一整块连续内存**（实测 93 万点导出 231MB 时就是一次 209.7MB 的单次分配）。
+        // 换成按块收集 + 直接拼 Blob：字节序列一样，但不再需要 O(输出) 的连续分配。
+        this.writer = new BlobFileWriter();
     }
 
     get bytesWritten(): number {
-        return this.innerWriter.bytesWritten;
+        return this.writer.bytesWritten;
     }
 
     write(data: Uint8Array): void {
-        this.innerWriter.write(data);
+        this.writer.write(data);
     }
 
     close(): void {
-        this.innerWriter.close();
-        const data = this.memFs.results.get(this.filename);
-        if (data) {
-            triggerDownload(data, this.filename);
-        }
+        this.writer.close();
+        triggerDownloadBlob(this.writer.blob, this.filename);
     }
 
     abort(): void {
         // discard buffered data without triggering a download
-        this.innerWriter.abort();
+        this.writer.abort();
     }
 }
 

@@ -12,6 +12,7 @@ import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../
 import { semanticSelect } from '../geometry/semantic-select';
 import { refineSurface, refineSurfaceLevel2, SurfaceRefineLevel2Params } from '../geometry/surface-refiner';
 import { MappedReadFileSystem } from '../io/index';
+import { BlobFileSystem } from '../io/write/blob-file-system';
 import { CropBox, CropBoxConfig } from '../scene/crop-box';
 import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
@@ -1605,21 +1606,22 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     const performSelectionFunc = async (func: 'duplicate' | 'separate') => {
         const splats = selectedSplats();
 
-        const memFs = new MemoryFileSystem();
+        // A2 尾巴 / 用户报的 ④：这里原来用 MemoryFileSystem，它的 close() 会把整份输出拼成
+        // 一整块连续内存（实测 93 万点导出 231MB ⇒ 一次 209.7MB 的单次分配，随输出线性放大）。
+        // 换成按块收集 → 直接拼 Blob：字节一样，但没有 O(输出) 的单次分配。
+        const blobFs = new BlobFileSystem();
 
         await writeSplatFile(splats, {
             maxSHBands: 3,
             selected: true
-        }, 'ply', 'output.ply', {}, memFs);
+        }, 'ply', 'output.ply', {}, blobFs);
 
-        const data = memFs.results.get('output.ply');
+        const writer = blobFs.writers.get('output.ply');
 
-        if (data) {
+        if (writer) {
             const splat = splats[0];
 
-            // wrap PLY in a blob and load it. pass the view rather than the
-            // underlying buffer, which is the writer's oversized scratch allocation
-            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+            const blob = writer.blob;
             const filename = `${removeExtension(splat.filename)}.ply`;
             const fileSystem = new MappedReadFileSystem();
             fileSystem.addFile(filename, blob);
@@ -1661,17 +1663,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         if (splats.length === 0) return;
 
         const splat = splats[0];
-        const memFs = new MemoryFileSystem();
+        const blobFs = new BlobFileSystem();
         await writeSplatFile(splats, {
             maxSHBands: 3,
             selected: true
-        }, 'ply', 'output.ply', {}, memFs);
+        }, 'ply', 'output.ply', {}, blobFs);
 
-        const data = memFs.results.get('output.ply');
-        if (data) {
-            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+        const writer = blobFs.writers.get('output.ply');
+        if (writer) {
             clipboard = {
-                blob,
+                blob: writer.blob,
                 filename: `${removeExtension(splat.filename)}_copy.ply`
             };
         }
@@ -1684,17 +1685,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
         // copy first
         const splat = splats[0];
-        const memFs = new MemoryFileSystem();
+        const blobFs = new BlobFileSystem();
         await writeSplatFile(splats, {
             maxSHBands: 3,
             selected: true
-        }, 'ply', 'output.ply', {}, memFs);
+        }, 'ply', 'output.ply', {}, blobFs);
 
-        const data = memFs.results.get('output.ply');
-        if (data) {
-            const blob = new Blob([data as BlobPart], { type: 'application/octet-stream' });
+        const writer = blobFs.writers.get('output.ply');
+        if (writer) {
             clipboard = {
-                blob,
+                blob: writer.blob,
                 filename: `${removeExtension(splat.filename)}_copy.ply`
             };
             // now delete the selection

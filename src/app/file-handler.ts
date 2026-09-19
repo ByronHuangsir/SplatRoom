@@ -675,6 +675,8 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
 
         // 预估输出体积（GB）：在 try 之外声明，这样 catch 里的"内存不够"提示也能用上
         let estimatedOutputGB = '?';
+        // 事前拦截时这个错误已经是一句完整的话，catch 里不要再往后缀 " while saving file"
+        let preflightRefused = false;
 
         try {
             // setTimeout so spinner/progress has a chance to activate
@@ -700,6 +702,19 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 sog: 8
             } as Record<string, number>)[fileType] ?? 236;
             estimatedOutputGB = Math.max(0.1, (totalRows * bytesPerRow) / 1073741824).toFixed(1);
+
+            // 事前拦截（用户报的 ④）：PLY / compressedPly / splat 是**边算边写盘**的，
+            // 而查看器、SOG、SPZ 这几条要把整包在内存里组织起来（zip / 贴图编码），
+            // 体积随点数线性放大 —— 13M 就是 700MB~1GB 量级的单次分配，直接撞上限、
+            // 跑到一半才崩。这里在动手之前就给出体积与出路，而不是让用户看到
+            // "Array buffer allocation failed while saving file"。
+            const inMemoryTypes = ['htmlViewer', 'packageViewer', 'sog', 'spz'];
+            const maxGB = typeof (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ === 'number' ?
+                (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ : 1.0;
+            if (inMemoryTypes.includes(fileType) && Number(estimatedOutputGB) > maxGB) {
+                preflightRefused = true;
+                throw new Error(i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }));
+            }
 
             // Apply the crop box to the exported data: gaussians outside the
             // crop shape are temporarily flagged as deleted (the serializers
@@ -785,9 +800,10 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 await events.invoke('showPopup', {
                     type: 'error',
                     header: i18n.t('popup.error'),
-                    message: isAllocation ?
-                        i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }) :
-                        `${message} while saving file`
+                    message: preflightRefused ? message :
+                        (isAllocation ?
+                            i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }) :
+                            `${message} while saving file`)
                 });
             }
         } finally {
