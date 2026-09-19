@@ -2707,9 +2707,12 @@ Windows 下 `@electron/asar` 的 `extractFile` / `statFile` 内部用 `p.split(p
 那 **4.25 GB 那条瞬时分配就必须真正降下来**，而不是只把话说清楚。这一轮把它做掉了。
 提交链：`714d98b`（不再一刀拒绝）→ `15311c0`（3.23.4）→ `efa3547`（第四十九轮文档）→ **`4ee98b1`（本轮）**。
 
-**本轮产物口径**：`package.json` 版本已改 **3.23.5**，但**尚未打包** —— `release\` 里最新的可执行文件
-仍是 `SplatRoom-3.23.4.exe`（本轮的复核数字都是源码 + 开发版 dev server 上量的，
-不是从 exe 里量的）。
+**本轮产物口径**：`package.json` 版本 **3.23.5**，并已打包 —— `release\SplatRoom-3.23.5.exe`
+（**122.1 MB**，portable，已签名）：asar 条目 **5295** / 唯一 PLY = `dist\test-model.ply` /
+8 个 wasm / `dist\index.js` 里同时含字面量 `3.4.0` 与 `3.23.5` / 9 语言各 **689** 键 /
+exe 属性 FileVersion=ProductVersion=**3.23.5** / 冒烟启动 4 进程（主窗口标题 SplatRoom）→ 杀净 0。
+（提交：`4ee98b1`（流式查看器）→ `2d00d69`（版本 3.23.5 + 确认文案改准）→ `b5b2c71`（补大模型判定与 A/B 台架）；
+A/B 与等价性数字都是在**源码 + dev server** 上量的，产物信息是打包后逐项复核的。）
 
 #### 那 2.3 GB 花在哪一环
 
