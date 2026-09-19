@@ -691,27 +691,43 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
 
             const splats = splatIdx === 'all' ? getSplats() : [getSplats()[splatIdx]];
 
-            // 预估输出体积（GB，一位小数）。只用于出错时给一句能照做的提示，不做任何拦截：
-            // 每行字节数按导出格式的列数取经验值（PLY 带 3 阶 SH 是 59 列 × 4B ≈ 236B）。
+            // 预估"这次导出会吃掉多少内存"（GB，一位小数）。**按实测的每行内存系数**算，
+            // 不是按输出字节数算 —— 两者差得很远（见下）。
+            //
+            // 实测（93 万点 / 48 列 SH，走流式写盘路径，给页面挂 typed-array 分配跟踪，
+            // 见 docs/V3-WebGPU-现状.md 6.50 的"④ 的后续修复"）：
+            //   类型           写出        瞬时分配总量   单次最大    每行内存(=总量MiB×1048576/行数)
+            //   ply            209.7 MB    115.0 MB      59 MB       129 B   ← 分块，有界
+            //   compressedPly   54.5 MB    110.2 MB      48 MB       124 B   ← 分块，有界
+            //   splat           28.4 MB     64.0 MB      48 MB        72 B   ← 分块，有界
+            //   spz             23.7 MB    285.8 MB     160 MB       322 B
+            //   sog             15.3 MB    383.0 MB     160 MB       431 B
+            //   htmlViewer      23.3 MB   1053.6 MB     192 MB      1186 B   ← 整包在内存里组织
+            //   packageViewer   18.2 MB   1053.6 MB     192 MB      1186 B   ← 同上
+            // 前三条是"边算边写盘"，占用有界（最大就一块）；后四条要把整包组织起来。
+            // 查看器是 1186 B/行（≈输出体积的 45 倍）：93 万点就瞬时 1.03 GiB ⇒ 已经越过 1GB 门槛，
+            // 13M 就是 ~14GB ⇒ 必然撞上限。表里是带 3 阶 SH 的系数，对没有 SH 的模型偏保守（宁可早提示）。
             const totalRows = splats.reduce((n, s) => n + s.splatData.numSplats, 0);
-            const bytesPerRow = ({
-                ply: 236,
-                compressedPly: 60,
-                splat: 32,
-                spz: 16,
-                sog: 8
-            } as Record<string, number>)[fileType] ?? 236;
-            estimatedOutputGB = Math.max(0.1, (totalRows * bytesPerRow) / 1073741824).toFixed(1);
+            const memoryBytesPerRow = ({
+                ply: 129,
+                compressedPly: 124,
+                splat: 72,
+                spz: 322,
+                sog: 431,
+                htmlViewer: 1186,
+                packageViewer: 1186
+            } as Record<string, number>)[fileType] ?? 129;
+            const estimatedGBValue = (totalRows * memoryBytesPerRow) / 1073741824;
+            estimatedOutputGB = Math.max(0.1, estimatedGBValue).toFixed(1);
 
-            // 事前拦截（用户报的 ④）：PLY / compressedPly / splat 是**边算边写盘**的，
-            // 而查看器、SOG、SPZ 这几条要把整包在内存里组织起来（zip / 贴图编码），
-            // 体积随点数线性放大 —— 13M 就是 700MB~1GB 量级的单次分配，直接撞上限、
-            // 跑到一半才崩。这里在动手之前就给出体积与出路，而不是让用户看到
-            // "Array buffer allocation failed while saving file"。
+            // 事前拦截（用户报的 ④）：只拦"整包在内存里组织"的那四条，PLY / compressedPly / splat
+            // 是分块流式的，不需要拦。
+            // 比较用**未取整**的值：`toFixed(1)` 会把 1.029 变成 "1.0"，正好卡在门槛上判不出来
+            // （93 万点的查看器导出实测就是 1.03 GiB —— 差这一点点就漏拦）。
             const inMemoryTypes = ['htmlViewer', 'packageViewer', 'sog', 'spz'];
             const maxGB = typeof (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ === 'number' ?
                 (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ : 1.0;
-            if (inMemoryTypes.includes(fileType) && Number(estimatedOutputGB) > maxGB) {
+            if (inMemoryTypes.includes(fileType) && estimatedGBValue > maxGB) {
                 preflightRefused = true;
                 throw new Error(i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }));
             }
