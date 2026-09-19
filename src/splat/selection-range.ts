@@ -242,7 +242,12 @@ export const tailFractions = (
             binsY[by]++;
         }
     }
-    if (counted < 200) {
+    // 采样数太少就不再相信直方图 —— 但阈值**不能是绝对的 200**（docs/audit/01-量级复查-bug.md 第 10 条）：
+    // 单击（7×7 的框）与小框在 13M 上 stride=32，采样后往往只剩几十个点，于是 tails=null ⇒
+    // 退回纯线性映射 ⇒ "第一次推杆一个高斯都删不掉"，表现就是「上下左右时好时坏、连拉几次没反应」。
+    // 512 桶下 20 个样本已经足够定位首次非空桶（桶里只有个位数时按"至少 1 个点"取边界），
+    // 所以门槛降到 20；真到 0~19 个点时才退回线性。
+    if (counted < 20) {
         return empty;
     }
     return { depth: tailBins(binsDepth, counted), x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
@@ -291,6 +296,8 @@ export type RangeProjectionCache = {
     distMin: number;
     /** 每个量化步长对应的世界单位： (max - min) / 65535 */
     distScale: number;
+    /** 1 / distScale（写量化值时用乘法代替除法：13M 上一次手势就是 13M 次除法） */
+    distInvScale: number;
 };
 
 /**
@@ -310,13 +317,15 @@ export const createRangeCache = (numSplats: number, distMin: number, distMax: nu
     const sx = new Int16Array(numSplats);
     sx.fill(-1);
     const span = distMax - distMin;
+    const scale = span > 0 ? span / 65535 : 0;
     return {
         sx,
         sy: new Int16Array(numSplats),
         dist: new Uint16Array(numSplats),
         distMin,
         // 退化（范围为零）时把所有点都量化到 0，反解恒等于 distMin，与线性映射一致
-        distScale: span > 0 ? span / 65535 : 0
+        distScale: scale,
+        distInvScale: scale > 0 ? 1 / scale : 0
     };
 };
 
@@ -457,7 +466,8 @@ export const selectRange = (
             // 深度按模型自身的深度范围量化到 16 位（A3），两端精确、内部误差远小于窗口步长。
             cache.sx[i] = sx;
             cache.sy[i] = sy;
-            const q = cache.distScale > 0 ? Math.round((distance - cache.distMin) / cache.distScale) : 0;
+            // 乘法而不是除法：这一趟在手势里对每个点都跑，13M 上一次就是 13M 次除法
+            const q = ((distance - cache.distMin) * cache.distInvScale + 0.5) | 0;
             cache.dist[i] = q < 0 ? 0 : (q > 65535 ? 65535 : q);
         }
 

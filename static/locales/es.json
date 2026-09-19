@@ -684,5 +684,7 @@
     "panel.surface-refine.densify": "Rellenar huecos (división por densidad)",
     "panel.surface-refine.cleanup": "Eliminar dispersión exterior",
     "panel.surface-refine.progress": "Alisando la superficie…",
-    "select-toolbar.rangeCacheTooLarge": "Este modelo es demasiado grande para recortar el rango en vivo: al ajustarlo se recalculan todas las gaussianas, así que tardará un momento."
+    "select-toolbar.rangeCacheTooLarge": "Este modelo es demasiado grande para recortar el rango en vivo: al ajustarlo se recalculan todas las gaussianas, así que tardará un momento.",
+    "panel.floater.tooLarge": "{{n}} gaussianas: una detección automática bloquearía la app unos {{sec}}s, así que está en pausa (los deslizadores siguen respondiendo). Pulsa «Solo seleccionar» o «Quitar flotantes» para calcularla al momento.",
+    "popup.exportOutOfMemory": "No hay memoria suficiente para guardar: este modelo necesita unos {{size}} GB. Exporta una selección más pequeña (selecciona primero), recorta el modelo o usa el formato PLY / Splat (escriben directamente en disco)."
 }

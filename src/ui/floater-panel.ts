@@ -391,8 +391,21 @@ class FloaterPanel extends Container {
     }
 
     // ================================================================
-    //  Detection (debounced; the counts are the expensive part)
+    // Detection (debounced; the counts are the expensive part)
     // ================================================================
+    /** 自动检测的点数上限：超过就只给提示，等用户点按钮现算（见 _runDetect 顶部）。 */
+    private static readonly AUTO_DETECT_MAX_SPLATS = 2_000_000;
+
+    /**
+     * 生效的门槛。`window.__SPLATROOM_FLOATER_AUTO_MAX_SPLATS__` 可以覆盖它 ——
+     * 真实门槛是 200 万点，而验证夹具最大只有 93 万点，不给个覆盖点就没法验证这条分支
+     * （验证套件 verify-selection-responsiveness.cjs 用它把门槛压到 1000 来断言"给提示、不冻结"）。
+     */
+    private static get autoDetectMax(): number {
+        const override = (globalThis as any).__SPLATROOM_FLOATER_AUTO_MAX_SPLATS__;
+        return typeof override === 'number' && override >= 0 ? override : FloaterPanel.AUTO_DETECT_MAX_SPLATS;
+    }
+
     private _scheduleDetect() {
         if (!this._fltEnabled) return;
         if (this._detectTimer) clearTimeout(this._detectTimer);
@@ -406,6 +419,24 @@ class FloaterPanel extends Container {
         if (!splats.length) {
             this._resultLabel.text = '--';
             this._clusterResultLabel.text = '--';
+            return;
+        }
+
+        // 自动检测的点数门槛（docs/audit/01-量级复查-bug.md 第 5 条）：
+        // 两套检测都是**同步的 O(n) 全量扫描**，而且 `splat.stateChanged` 每次都会触发它 ——
+        // 13M 的 merged-scene 实测**冻结主线程 101 秒**（计数网格 2.4e10 格、永远走 Map 回退）。
+        // 那意味着"每一次选区变化都把界面冻住一阵"，用户看到的就是「选择工具突然不跟手、
+        // 上下左右拉几次没反应」。所以超过门槛就不再自动跑：给出点数与预估耗时，
+        // 想让它在所要求时现算 —— 点『仅选中』『移除浮云』（那是用户明确要求的动作）仍然会跑。
+        const total = splats.reduce((n, s) => n + s.splatData.numSplats, 0);
+        if (total > FloaterPanel.autoDetectMax) {
+            // 8e-6 秒/点：由 13M 实测 101 秒标定，只用于给用户一个数量级
+            const sec = Math.max(1, Math.round(total * 8e-6));
+            const text = i18n.t('panel.floater.tooLarge', { n: total.toLocaleString(), sec });
+            this._resultLabel.text = '--';
+            this._resultLabel.dom.title = text;
+            this._clusterResultLabel.text = '--';
+            this._clusterResultLabel.dom.title = text;
             return;
         }
 

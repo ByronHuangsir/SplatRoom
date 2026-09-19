@@ -684,5 +684,7 @@
     "panel.surface-refine.densify": "Löcher füllen (Dichteaufteilung)",
     "panel.surface-refine.cleanup": "Äußere Streupunkte entfernen",
     "panel.surface-refine.progress": "Oberflächenglättung läuft…",
-    "select-toolbar.rangeCacheTooLarge": "Dieses Modell ist zu groß für einen sofortigen Bereichs-Zuschnitt: Beim Verstellen wird jeder Gauß neu berechnet, das dauert einen Moment."
+    "select-toolbar.rangeCacheTooLarge": "Dieses Modell ist zu groß für einen sofortigen Bereichs-Zuschnitt: Beim Verstellen wird jeder Gauß neu berechnet, das dauert einen Moment.",
+    "panel.floater.tooLarge": "{{n}} Gauß-Punkte: Eine automatische Erkennung würde die App etwa {{sec}}s blockieren und ist deshalb pausiert (Regler bleiben bedienbar). Auf „Nur auswählen\" oder „Floater entfernen\" wird sie sofort berechnet.",
+    "popup.exportOutOfMemory": "Nicht genug Speicher zum Speichern: Dieses Modell braucht etwa {{size}} GB. Exportieren Sie eine kleinere Auswahl (erst auswählen), schneiden Sie das Modell zu, oder nutzen Sie PLY / Splat (die schreiben direkt auf die Platte)."
 }

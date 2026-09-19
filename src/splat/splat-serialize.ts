@@ -627,14 +627,10 @@ class SplatRoomChunkSource implements ChunkSource {
         }
         if (idx < bound) {
             // the finiteness sweep rejected rows the cheap bound allowed: keep only what is real.
-            // Trim only when the difference is material, so the common case pays no copy.
-            if (idx < bound * 0.9) {
-                splatOf = splatOf.slice(0, idx);
-                localOf = localOf.slice(0, idx);
-            } else {
-                splatOf = splatOf.subarray(0, idx);
-                localOf = localOf.subarray(0, idx);
-            }
+            // Always a view — `slice` would allocate a second map the size of the first (up to
+            // 52MB at 13M) exactly when an export is already memory-tight.
+            splatOf = splatOf.subarray(0, idx);
+            localOf = localOf.subarray(0, idx);
         }
         const total = idx;
         this.splatOf = splatOf;

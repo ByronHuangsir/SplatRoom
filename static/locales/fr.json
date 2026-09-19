@@ -684,5 +684,7 @@
     "panel.surface-refine.densify": "Combler les trous (division par densité)",
     "panel.surface-refine.cleanup": "Supprimer la dispersion extérieure",
     "panel.surface-refine.progress": "Lissage de la surface…",
-    "select-toolbar.rangeCacheTooLarge": "Ce modèle est trop volumineux pour un recadrage de plage en direct : chaque gaussienne est recalculée, cela prend un instant."
+    "select-toolbar.rangeCacheTooLarge": "Ce modèle est trop volumineux pour un recadrage de plage en direct : chaque gaussienne est recalculée, cela prend un instant.",
+    "panel.floater.tooLarge": "{{n}} gaussiennes : une détection automatique figerait l'application environ {{sec}} s ; elle est donc en pause (les curseurs restent réactifs). Cliquez sur « Sélectionner seulement » ou « Supprimer les flottants » pour la lancer.",
+    "popup.exportOutOfMemory": "Mémoire insuffisante pour enregistrer : ce modèle nécessite environ {{size}} Go. Exportez une sélection plus petite (sélectionnez d'abord), recadrez le modèle, ou utilisez le format PLY / Splat (écriture directe sur le disque)."
 }

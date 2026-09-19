@@ -684,5 +684,7 @@
     "panel.surface-refine.densify": "穴を埋める（密度分割）",
     "panel.surface-refine.cleanup": "外側の散布を削除",
     "panel.surface-refine.progress": "表面を平滑化しています…",
-    "select-toolbar.rangeCacheTooLarge": "このモデルは大きすぎるため、範囲の再切り出しがリアルタイムに行えません。スライダーを動かすと全ガウスを再計算するので、少しお待ちください。"
+    "select-toolbar.rangeCacheTooLarge": "このモデルは大きすぎるため、範囲の再切り出しがリアルタイムに行えません。スライダーを動かすと全ガウスを再計算するので、少しお待ちください。",
+    "panel.floater.tooLarge": "{{n}} 個のガウス：自動検出は約 {{sec}} 秒フリーズするため停止しています（スライダーは快適に動きます）。「選択のみ」または「浮遊点を削除」を押すとその場で計算します。",
+    "popup.exportOutOfMemory": "メモリが足りず保存できません：このモデルには約 {{size}} GB 必要です。選択範囲を狭めてから書き出す（先に選択）、モデルを切り抜く、または PLY / Splat 形式（ディスクへ直接書き込み）をお使いください。"
 }

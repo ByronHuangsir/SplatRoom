@@ -673,6 +673,9 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             events.fire('startSpinner');
         }
 
+        // 预估输出体积（GB）：在 try 之外声明，这样 catch 里的"内存不够"提示也能用上
+        let estimatedOutputGB = '?';
+
         try {
             // setTimeout so spinner/progress has a chance to activate
             await new Promise<void>((resolve) => {
@@ -685,6 +688,18 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
             const fs = new BrowserFileSystem(filename, stream);
 
             const splats = splatIdx === 'all' ? getSplats() : [getSplats()[splatIdx]];
+
+            // 预估输出体积（GB，一位小数）。只用于出错时给一句能照做的提示，不做任何拦截：
+            // 每行字节数按导出格式的列数取经验值（PLY 带 3 阶 SH 是 59 列 × 4B ≈ 236B）。
+            const totalRows = splats.reduce((n, s) => n + s.splatData.numSplats, 0);
+            const bytesPerRow = ({
+                ply: 236,
+                compressedPly: 60,
+                splat: 32,
+                spz: 16,
+                sog: 8
+            } as Record<string, number>)[fileType] ?? 236;
+            estimatedOutputGB = Math.max(0.1, (totalRows * bytesPerRow) / 1073741824).toFixed(1);
 
             // Apply the crop box to the exported data: gaussians outside the
             // crop shape are temporarily flagged as deleted (the serializers
@@ -762,10 +777,17 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 });
             } else {
                 const message = error instanceof Error ? error.message : String(error);
+                // 分配失败时给一句能照做的话，而不是把 Chromium 的
+                // "Array buffer allocation failed while saving file" 直接甩给用户。
+                // 实测（93 万点 / 48 列 SH）：导出 231MB 时序列化器会出现**一次 209.7MB 的单次分配**
+                // （MemoryFileSystem 的 close 把整份文件拼成一块），所以体积大的导出确实可能顶到上限。
+                const isAllocation = /array buffer allocation failed|allocation failed|out of memory|oom/i.test(message);
                 await events.invoke('showPopup', {
                     type: 'error',
                     header: i18n.t('popup.error'),
-                    message: `${message} while saving file`
+                    message: isAllocation ?
+                        i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }) :
+                        `${message} while saving file`
                 });
             }
         } finally {

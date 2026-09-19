@@ -1215,7 +1215,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // applied through history so every gesture stays one undo step.
         // O1: 这批 op 的 do() 会各自 updateState(State.selected)（原本每次都跑一遍包围盒 pass），
         // 这里先声明"拖动中"，让它们并进同一次停手补算 —— 手势不走 pump，所以要自己点火。
-        deferBounds(entries.map(entry => entry.splat));
+        // 上一次手势/推杆排下的补算先取消：它只会挡在新手势前面，而新手势结束时会自己补算。
+        const gestureSplats = entries.map(entry => entry.splat);
+        cancelPendingBounds(gestureSplats);
+        deferBounds(gestureSplats);
         for (const entry of entries) {
             await editHistory.add(entry.op);
         }
@@ -1286,6 +1289,20 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         for (const splat of splats) {
             splat.boundsDeferred = true;
             deferredBoundSplats.add(splat);
+        }
+    };
+
+    // 撤销"还没点火"的补算安排。用途：用户刚推完滑块（或刚框选完）就立刻开始下一次框选时，
+    // 上一次排下的 120ms 补算会正好挤进 commandQueue，把新框选的操作挡在它后面（13M 上一次
+    // 包围盒 pass 25–75ms，而且它还要让出一帧）—— 表现就是「点一下要等一下才选中」。
+    // 新的框选本来就会重新标记并在自己结束时补算，所以这里直接取消它。
+    const cancelPendingBounds = (splats: Splat[]) => {
+        for (const splat of splats) {
+            deferredBoundSplats.delete(splat);
+        }
+        if (deferredBoundSplats.size === 0 && boundSettleTimer !== null) {
+            clearTimeout(boundSettleTimer);
+            boundSettleTimer = null;
         }
     };
 
