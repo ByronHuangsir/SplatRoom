@@ -686,5 +686,6 @@
     "panel.surface-refine.progress": "Refinando Superfície…",
     "select-toolbar.rangeCacheTooLarge": "Este modelo é grande demais para recortar o intervalo em tempo real: ao ajustar, todas as gaussianas são recalculadas, então leve um instante.",
     "panel.floater.tooLarge": "{{n}} gaussianas: uma detecção automática travaria o app por cerca de {{sec}}s, então está pausada (os controles continuam respondendo). Clique em «Somente selecionar» ou «Remover flutuantes» para calcular na hora.",
-    "popup.exportOutOfMemory": "Memória insuficiente para salvar: este modelo precisa de cerca de {{size}} GB. Exporte uma seleção menor (selecione primeiro), recorte o modelo ou use o formato PLY / Splat (gravam direto no disco)."
+    "popup.exportOutOfMemory": "Memória insuficiente para salvar: este modelo precisa de cerca de {{size}} GB. Exporte uma seleção menor (selecione primeiro), recorte o modelo ou use o formato PLY / Splat (gravam direto no disco).",
+    "popup.exportLargeConfirm": "Esta exportação precisa montar o pacote inteiro na memória: cerca de {{size}} GB de memória temporária e aproximadamente {{sec}}s. Continuar?"
 }

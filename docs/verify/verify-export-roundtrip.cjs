@@ -122,14 +122,14 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 if (dx[k] !== sx[keep[0]] || dy[k] !== sy[keep[0]]) distinctFirstRows++;
             }
 
-            // ④ 的事前拦截：把体积上限压到极低，再让查看器导出跑一次，
-            // 应当得到"内存不够…"这句人话（而不是跑到一半崩或抛原始错误）。
-            // 注意：`showPopup` 是 events.function（invoke 不会触发 on 监听），而且真弹窗会等用户点确定
-            // —— 所以这里直接把函数换成一个记录器，不弹窗、也不会挂住。
+            // ④ 的事前提示：把"问用户的门槛"压到极低，再让查看器导出跑一次 ——
+            // 应当弹一个 yes/no 确认，把预估体积与耗时说清楚；这里 stub 掉弹窗（返回 undefined，
+            // 等价于用户没有点"继续"）⇒ 导出应当**安静地取消**（不是报错、也不是硬跑）。
+            // 注意 `showPopup` 是 events.function（invoke 不触发 on 监听），真弹窗还会等用户点确定。
             const guard = await (async () => {
                 const seen = [];
                 const original = scene.events.functions.get('showPopup');
-                scene.events.functions.set('showPopup', (opts) => { seen.push(opts); });
+                scene.events.functions.set('showPopup', (opts) => { seen.push(opts); return undefined; });
                 window.__SPLATROOM_EXPORT_MAX_GB__ = 0.0001;
                 let threw = null;
                 try {
@@ -147,8 +147,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
                 }
                 scene.events.functions.set('showPopup', original);
                 window.__SPLATROOM_EXPORT_MAX_GB__ = undefined;
-                const msg = seen.length ? String(seen[seen.length - 1].message || '') : '';
-                return { popups: seen.length, message: msg.slice(0, 220), threw, refused: /内存不够|Not enough memory/.test(msg) };
+                const last = seen.length ? seen[seen.length - 1] : null;
+                const msg = last ? String(last.message || '') : '';
+                return {
+                    popups: seen.length,
+                    type: last ? last.type : null,
+                    message: msg.slice(0, 220),
+                    threw,
+                    asksForSize: /[0-9.]+ *GB/.test(msg) && /[0-9]+ *秒|秒|[0-9]+s\b/.test(msg)
+                };
             })();
 
             return {
@@ -173,8 +180,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             { name: '★ 导出的点集与源里被选中的点集完全一致（排序后逐点比 x/y/z，行序无关）', pass: result.mismatches === 0 && result.compared > 0, detail: `比对 ${result.compared} 个点，不一致 ${result.mismatches} 个` + (result.firstMismatch ? `，首个不一致 ${JSON.stringify(result.firstMismatch)}` : '') },
             { name: '★ 没有退化成"每行都是源第 0 行"（映射表尾部留 0 的旧故障形态）', pass: result.distinctFirstRows > 0, detail: `前 50 行里与源首行不同的有 ${result.distinctFirstRows} 行` },
             {
-                name: '★ 体积超过上限时，查看器导出事前给出"内存不够"的人话（而不是崩掉）',
-                pass: !!result.guard && result.guard.popups > 0 && result.guard.refused === true,
+                name: '★ 大导出会先问一句（报出预估 GB 与秒数），用户不点继续就安静取消、不报错',
+                pass: !!result.guard && result.guard.popups > 0 && result.guard.type === 'yesno' &&
+                    result.guard.asksForSize === true && result.guard.threw === null,
                 detail: JSON.stringify(result.guard)
             }
         ];

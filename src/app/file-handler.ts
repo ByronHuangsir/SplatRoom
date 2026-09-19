@@ -691,45 +691,73 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
 
             const splats = splatIdx === 'all' ? getSplats() : [getSplats()[splatIdx]];
 
-            // 预估"这次导出会吃掉多少内存"（GB，一位小数）。**按实测的每行内存系数**算，
-            // 不是按输出字节数算 —— 两者差得很远（见下）。
+            // 预估"这次导出会吃掉多少内存"。**按模型自身的数据字节数乘一个实测倍数**算，
+            // 不再用"每行固定字节数" —— 那个系数是在**带 48 列 SH** 的夹具上标的，对无 SH 的模型
+            // 会高估约 6 倍，把本来跑得动的导出也拦掉（用户报的 ④ 就是这么来的：他的 merged-scene
+            // 是 14 列无 SH）。
             //
-            // 实测（93 万点 / 48 列 SH，走流式写盘路径，给页面挂 typed-array 分配跟踪，
-            // 见 docs/V3-WebGPU-现状.md 6.50 的"④ 的后续修复"）：
-            //   类型           写出        瞬时分配总量   单次最大    每行内存(=总量MiB×1048576/行数)
-            //   ply            209.7 MB    115.0 MB      59 MB       129 B   ← 分块，有界
-            //   compressedPly   54.5 MB    110.2 MB      48 MB       124 B   ← 分块，有界
-            //   splat           28.4 MB     64.0 MB      48 MB        72 B   ← 分块，有界
-            //   spz             23.7 MB    285.8 MB     160 MB       322 B
-            //   sog             15.3 MB    383.0 MB     160 MB       431 B
-            //   htmlViewer      23.3 MB   1053.6 MB     192 MB      1186 B   ← 整包在内存里组织
-            //   packageViewer   18.2 MB   1053.6 MB     192 MB      1186 B   ← 同上
-            // 前三条是"边算边写盘"，占用有界（最大就一块）；后四条要把整包组织起来。
-            // 查看器是 1186 B/行（≈输出体积的 45 倍）：93 万点就瞬时 1.03 GiB ⇒ 已经越过 1GB 门槛，
-            // 13M 就是 ~14GB ⇒ 必然撞上限。表里是带 3 阶 SH 的系数，对没有 SH 的模型偏保守（宁可早提示）。
+            // 实测（给页面挂 typed-array 分配跟踪 + 假 stream，跑 docs/probes/export-alloc-per-type.cjs）：
+            //   夹具 A：931k 点 / 48 列 SH（scan.ply，自身数据 220 MiB）
+            //     ply 115.0 / compressedPly 110.2 / splat 64.0  ← 分块有界，不拦
+            //     spz 285.8 (×1.30) / sog 383.0 (×1.74) / htmlViewer 1053.6 (×4.8) / packageViewer 1053.6 (×4.8)
+            //   夹具 B：1.5M 点 / 17 列无 SH（nosh-test.ply，自身数据 97.3 MiB）
+            //     htmlViewer 287.7 (×2.96) / sog 93.8 (×0.96)
+            // ⇒ 倍数随"要编码多少通道"变化，所以取**保守**的那一档（宁可早提示，也别跑到一半崩）。
+            //   夹具 C：13,007,105 点 / 16 列无 SH（merged-scene，自身数据 694.7 MiB）—— 三条都**跑完了**
+            //     htmlViewer 81.3 s / 瞬时 4251.5 MB (×6.1) / 单次最大 396.9 MB
+            //     sog        98.6 s / 瞬时 1881.3 MB (×2.7) / 单次最大 148.9 MB
+            // ⇒ 倍数随体积**超线性**涨（贴图/编码缓冲），所以取**最大的一档**（夹具 C），
+            //   宁可把提示说得保守一点，也别让用户以为"很小很快"然后崩在中间。
+            const datasetBytes = splats.reduce((n, s) => {
+                const props = s.splatData.getElement('vertex').properties as any[];
+                const perRow = props.reduce((m, p) => m + (p.byteSize ?? 4), 0);
+                return n + s.splatData.numSplats * perRow;
+            }, 0);
             const totalRows = splats.reduce((n, s) => n + s.splatData.numSplats, 0);
-            const memoryBytesPerRow = ({
-                ply: 129,
-                compressedPly: 124,
-                splat: 72,
-                spz: 322,
-                sog: 431,
-                htmlViewer: 1186,
-                packageViewer: 1186
-            } as Record<string, number>)[fileType] ?? 129;
-            const estimatedGBValue = (totalRows * memoryBytesPerRow) / 1073741824;
+            const memoryMultiple = ({
+                ply: 0.6,
+                compressedPly: 0.6,
+                splat: 0.4,
+                spz: 2.8,
+                sog: 2.7,
+                htmlViewer: 6.1,
+                packageViewer: 6.1
+            } as Record<string, number>)[fileType] ?? 1.0;
+            const estimatedGBValue = (datasetBytes * memoryMultiple) / 1073741824;
             estimatedOutputGB = Math.max(0.1, estimatedGBValue).toFixed(1);
 
-            // 事前拦截（用户报的 ④）：只拦"整包在内存里组织"的那四条，PLY / compressedPly / splat
-            // 是分块流式的，不需要拦。
-            // 比较用**未取整**的值：`toFixed(1)` 会把 1.029 变成 "1.0"，正好卡在门槛上判不出来
-            // （93 万点的查看器导出实测就是 1.03 GiB —— 差这一点点就漏拦）。
+            // 事前提示（用户报的 ④）：只对"整包在内存里组织"的那四条 —— PLY / compressedPly /
+            // splat 是分块流式的，不需要提示。
+            //
+            // **不再一刀拒绝**（用户明确说查看器/SOG 是日常要用的导出）：实测这两条在他的
+            // 1300 万点模型上**真的能跑完**，只是又慢又吃内存 ——
+            //   13,007,105 点 / 16 列无 SH（merged-scene）：
+            //     查看器 81.3 秒 / 瞬时分配 4251.5 MB（单次最大 396.9 MB、91 次）
+            //     SOG    98.6 秒 / 瞬时分配 1881.3 MB（单次最大 148.9 MB、30 次）
+            // 所以改成：超过舒适线就**报出体积与预估耗时、由用户决定**；只有离谱到 12 GB
+            // 才直接拒绝（那已经不可能成功了）。
+            // 比较用**未取整**的值：`toFixed(1)` 会把 1.029 压成 "1.0"、`1.0 > 1.0` 判不出来。
             const inMemoryTypes = ['htmlViewer', 'packageViewer', 'sog', 'spz'];
-            const maxGB = typeof (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ === 'number' ?
-                (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ : 1.0;
-            if (inMemoryTypes.includes(fileType) && estimatedGBValue > maxGB) {
+            const hugeGB = typeof (globalThis as any).__SPLATROOM_EXPORT_HUGE_GB__ === 'number' ?
+                (globalThis as any).__SPLATROOM_EXPORT_HUGE_GB__ : 12;
+            const askGB = typeof (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ === 'number' ?
+                (globalThis as any).__SPLATROOM_EXPORT_MAX_GB__ : 0.8;
+            if (inMemoryTypes.includes(fileType) && estimatedGBValue > hugeGB) {
                 preflightRefused = true;
                 throw new Error(i18n.t('popup.exportOutOfMemory', { size: estimatedOutputGB }));
+            }
+            if (inMemoryTypes.includes(fileType) && estimatedGBValue > askGB) {
+                // 8e-6 秒/点：由 1300 万点的 81.3 / 98.6 秒标定，只用于给一个数量级
+                const sec = Math.max(1, Math.round(totalRows * 8e-6));
+                const answer = await events.invoke('showPopup', {
+                    type: 'yesno',
+                    header: i18n.t('popup.export'),
+                    message: i18n.t('popup.exportLargeConfirm', { size: estimatedOutputGB, sec })
+                });
+                if (!answer || answer.action !== 'yes') {
+                    // 用户选择不继续：安静地取消（不是错误）
+                    return;
+                }
             }
 
             // Apply the crop box to the exported data: gaussians outside the

@@ -686,5 +686,6 @@
     "panel.surface-refine.progress": "표면 평탄화 중…",
     "select-toolbar.rangeCacheTooLarge": "이 모델은 너무 커서 범위를 실시간으로 다시 자를 수 없습니다. 슬라이더를 움직이면 모든 가우시안을 다시 계산하므로 잠시 기다려 주세요.",
     "panel.floater.tooLarge": "{{n}}개의 가우시안: 자동 감지는 약 {{sec}}초 동안 멈추므로 일시 중지했습니다(슬라이더는 계속 반응합니다). \"선택만\" 또는 \"플로터 제거\"를 누르면 그때 계산합니다.",
-    "popup.exportOutOfMemory": "메모리가 부족해 저장하지 못했습니다: 이 모델은 약 {{size}} GB가 필요합니다. 먼저 선택해 범위를 좁히거나, 모델을 잘라내거나, PLY / Splat 형식(디스크에 직접 기록)을 사용하세요."
+    "popup.exportOutOfMemory": "메모리가 부족해 저장하지 못했습니다: 이 모델은 약 {{size}} GB가 필요합니다. 먼저 선택해 범위를 좁히거나, 모델을 잘라내거나, PLY / Splat 형식(디스크에 직접 기록)을 사용하세요.",
+    "popup.exportLargeConfirm": "이 내보내기는 전체 패키지를 메모리에서 먼저 구성합니다: 임시 메모리 약 {{size}} GB, 약 {{sec}}초. 계속할까요?"
 }

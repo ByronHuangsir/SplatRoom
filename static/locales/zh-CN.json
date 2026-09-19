@@ -686,5 +686,6 @@
     "panel.surface-refine.progress": "表面平整中…",
     "select-toolbar.rangeCacheTooLarge": "这个模型太大，范围无法实时重切：拖动滑块会逐点重算，请稍等一下。",
     "panel.floater.tooLarge": "模型有 {{n}} 个高斯：自动检测大约要卡住 {{sec}} 秒，已暂停（拖动滑块不再卡）。点「仅选中」或「移除浮云」会现场计算。",
-    "popup.exportOutOfMemory": "内存不够，保存失败：这个模型大约需要 {{size}} GB，浏览器分配不出来。可以先用框选/裁剪缩小范围再导出（选中后再导出），或改用 PLY / Splat 格式（它们是边算边写盘的，不会一次性占满内存）。"
+    "popup.exportOutOfMemory": "内存不够，保存失败：这个模型大约需要 {{size}} GB，浏览器分配不出来。可以先用框选/裁剪缩小范围再导出（选中后再导出），或改用 PLY / Splat 格式（它们是边算边写盘的，不会一次性占满内存）。",
+    "popup.exportLargeConfirm": "这个导出要先把整包在内存里组装起来：预计约 {{size}} GB 临时内存、大约 {{sec}} 秒。现在继续吗？"
 }
