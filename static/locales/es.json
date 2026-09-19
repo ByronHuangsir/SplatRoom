@@ -687,5 +687,5 @@
     "select-toolbar.rangeCacheTooLarge": "Este modelo es demasiado grande para recortar el rango en vivo: al ajustarlo se recalculan todas las gaussianas, así que tardará un momento.",
     "panel.floater.tooLarge": "{{n}} gaussianas: una detección automática bloquearía la app unos {{sec}}s, así que está en pausa (los deslizadores siguen respondiendo). Pulsa «Solo seleccionar» o «Quitar flotantes» para calcularla al momento.",
     "popup.exportOutOfMemory": "No hay memoria suficiente para guardar: este modelo necesita unos {{size}} GB. Exporta una selección más pequeña (selecciona primero), recorta el modelo o usa el formato PLY / Splat (escriben directamente en disco).",
-    "popup.exportLargeConfirm": "Esta exportación debe montar todo el paquete en memoria: unos {{size}} GB de memoria temporal y alrededor de {{sec}} s. ¿Continuar?"
+    "popup.exportLargeConfirm": "Esta exportación hace asignaciones de memoria grandes de una sola vez: unos {{size}} GB de memoria temporal y alrededor de {{sec}} s. ¿Continuar?"
 }

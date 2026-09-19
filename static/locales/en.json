@@ -687,5 +687,5 @@
     "select-toolbar.rangeCacheTooLarge": "This model is too large for a live range re-cut: adjusting the range recomputes every gaussian, so give it a moment.",
     "panel.floater.tooLarge": "{{n}} gaussians: an automatic detection pass would freeze the app for about {{sec}}s, so it is paused (moving sliders stays responsive). Press \"Select only\" or \"Remove floaters\" to compute it on demand.",
     "popup.exportOutOfMemory": "Not enough memory to save: this model needs about {{size}} GB and the browser could not allocate it. Try exporting a smaller selection (select first, then \"Export selected\"), crop the model, or use the PLY / Splat format (those stream straight to disk).",
-    "popup.exportLargeConfirm": "This export has to assemble the whole bundle in memory first: about {{size}} GB of temporary memory and roughly {{sec}}s. Continue?"
+    "popup.exportLargeConfirm": "This export makes large one-off memory allocations: about {{size}} GB of temporary memory and roughly {{sec}}s. Continue?"
 }

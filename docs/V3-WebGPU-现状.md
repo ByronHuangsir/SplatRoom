@@ -2699,6 +2699,117 @@ Windows 下 `@electron/asar` 的 `extractFile` / `statFile` 内部用 `p.split(p
 2. 13M 上去浮云检测本身还是 **101 秒**（本轮之前的门槛只是"不自动跑"，算法级修复未做）；
 3. load worker 输出不等价（列字节一致但选区结果不同，213 vs 2000）—— 查清之前保持 opt-in。
 
+---
+
+### 6.52 第五十轮：查看器 / 打包查看器改成"边产出边 base64 直接流进输出流" —— 1300 万点瞬时分配 4251.5 → 1979.1 MB
+
+上一轮（6.51）把"一刀拒绝"换成了"报清体积与耗时、由用户决定"，用户既然说查看器 / SOG 是日常要用的，
+那 **4.25 GB 那条瞬时分配就必须真正降下来**，而不是只把话说清楚。这一轮把它做掉了。
+提交链：`714d98b`（不再一刀拒绝）→ `15311c0`（3.23.4）→ `efa3547`（第四十九轮文档）→ **`4ee98b1`（本轮）**。
+
+**本轮产物口径**：`package.json` 版本已改 **3.23.5**，但**尚未打包** —— `release\` 里最新的可执行文件
+仍是 `SplatRoom-3.23.4.exe`（本轮的复核数字都是源码 + 开发版 dev server 上量的，
+不是从 exe 里量的）。
+
+#### 那 2.3 GB 花在哪一环
+
+查看器导出走的是 splat-transform 的 `html-bundle` 分支（`writeHtml` 的 `bundle: true`），
+这条链**整包在内存里组装**，逐环看是：
+
+| # | 环节 | 代价 |
+| --- | --- | --- |
+| 1 | `writeSource` 的 default 分支 → `materializeToDataTable` | 整表一份拷贝 |
+| 2 | `writeSog` 把 `.sog` 写进 `MemoryFileSystem` | 再来一份 O(输出) 常驻 |
+| 3 | `toBase64` | 先拼一个 O(输出) 的 binary 字符串，`btoa` 再出第二个 |
+| 4 | `renderViewerHtml` 把 base64 拼进 HTML | 第三个大字符串 |
+| 5 | `TextEncoder` 把 HTML 编成字节 | 第四份 |
+
+13M 点（`merged-scene`，694.7 MiB，无 SH）实测整条链：**瞬时 4251.5 MB、单次最大 396.9 MB、91 次分配**，
+比纯 SOG 编码（1881.3 MB）多出 **2.3 GB 的"包装层"** —— 与 6.50/6.51 量的"查看器是唯一 O(输出) 路径"完全吻合。
+
+#### 改法：不碰 splat-transform，只在它之上包一层
+
+全部在 `src/splat/splat-serialize.ts`（外加 `src/app/file-handler.ts` 的阈值放宽）：
+
+1. **取模板**：`buildViewerTemplate()` / `getViewerTemplate()` —— 用一个"1 个高斯点"的假
+   `DataTable`（`Column` / `DataTable` / `Transform`，14 列）调一次 `writeHtml(bundle: false)`，
+   取回 viewer 的 html / css / js。模板与数据无关，取一次就缓存（`viewerTemplateInFlight`）；
+   **取模板时把进度 renderer 临时换成 `silentRenderer`**（新增的 `setProgressRenderer` /
+   `activeProgressRenderer` 就是为它加的），失败则整体退回官方 writer。
+2. **内联文档**：`renderViewerDocument()` 按 `renderViewerHtml` 的**同一批接缝**内联
+   （`SEAM_STYLESHEET` / `SEAM_MODULE_IMPORT` / `SEAM_BOOTSTRAP`，以及上游那两条安全检查
+   `</style`、`</script|<!--|<script`）；`contentUrl` 先写占位符 `VIEWER_PLACEHOLDER`，
+   再用 `indexOfBytes` **按字节定位、原地替换** —— 于是 HTML 其余字节与旧路径逐字节相同
+   （见下面的验证）。`index.js` / `index.css` 与 `settings.json` 用的是模板里取回的**原条目名**
+   （`tpl.sogName` / `cssName` / `jsName` / `settingsName` / `htmlName`）。
+3. **流式 base64**：`.sog` 仍由 `writeSource` 的 `sog-bundle` 分支（`writeExportSog`，流式、
+   不 materialize）产出，经 **`Base64RelayWriter` + `Base64RelayFileSystem`** 边产出边 base64、
+   直接写进同一个 HTML 输出流。块大小 **`BASE64_INPUT_CHUNK = 3 * 4 * 1024 * 1024`（12 MiB）**，
+   编码走原生 `btoa` + `TextEncoder.encodeInto` 写进复用缓冲 `scratch`（不产生 O(输出) 分配），
+   收尾那 1~2 字节走手写表 `encodeBase64Manual`；`close()` **不关** sink（HTML 尾部还要接着写），
+   出错时 `writer.abort()`。
+4. **打包（zip）同样处理**：`writePackagedViewer()` —— `.sog` 直接流式写进 zip 条目，
+   不再先过一遍 `MemoryFileSystem`；viewer 的 css / js / settings / html 用模板里的原条目名写进去。
+5. **出口**：`useViewerStream()` 读 `window.__SPLATROOM_VIEWER_STREAM__`（**`= false` 退回官方
+   bundle writer**，现场排查不用重新打包）；模板接缝对不上时返回 false 自动退回并 `console.warn`。
+
+#### 同一会话 A/B 实测（13,007,105 点 / 16 列无 SH，自身数据 694.7 MiB；同一份数据、同一台机器）
+
+| 用例 | 耗时 | 写出 | ≥8MB 分配合计（"瞬时"） | 单次最大 | 分配次数 |
+| --- | --- | --- | --- | --- | --- |
+| `htmlViewer` 流式 | 99.3 s | 184.3 MB | **1979.1 MB** | **148.9 MB** | **34** |
+| `htmlViewer` 官方 | 80.4 s | 184.3 MB | 4251.5 MB | 396.9 MB | 91 |
+| `packageViewer` 流式 | 97.4 s | 139.0 MB | **1881.3 MB** | **148.9 MB** | **30** |
+| `packageViewer` 官方 | 77.3 s | 139.0 MB | 4251.5 MB | 396.9 MB | 91 |
+| `sog` | 97.5 s | 136.0 MB | 1881.3 MB | 148.9 MB | 30 |
+
+⇒ **瞬时 −53%、单次最大 −62%、分配次数 91 → 34**；两条查看器路径现在**就等于**纯 SOG 编码的开销
+（html 多出的约 98 MB 是那段 181 MB base64 的编码缓冲）。
+**代价：耗时 +19 s**（136 MB 的 base64 仍要在主线程过一遍 —— 这是"单文件自包含"这个格式的固有成本，
+不是可以绕掉的）。
+
+#### 门槛按新能力放宽（`src/app/file-handler.ts`）
+
+`memoryMultiple` 里 `htmlViewer` **6.1 → 3.2**、`packageViewer` **6.1 → 3.1**（都是实测 ×1.12 的余量），
+等于把"离谱才拒绝"的 `hugeGB = 12` 硬线从"数据集 **1.97 GB**"放宽到"数据集 **3.75 GB**"。
+其余档位不变：`ply` 0.6 / `compressedPly` 0.6 / `splat` 0.4 / `spz` 2.8 / `sog` 2.7。
+
+#### 顺带修掉一个真 bug
+
+没给 `experienceSettings` 时，官方 writer 会兜底用库里的 `defaultSettings('object')`，
+而我们的包装层原来会**漏掉 settings** —— 导出的 HTML 会去找同目录的 `settings.json`，
+单文件场景必然拿不到。现在两处都改成 `?? defaultSettings('object')`
+（从 `@playcanvas/splat-transform/viewer-settings` 引入）。
+
+#### 验证
+
+- 新增 `docs/verify/verify-viewer-stream.cjs`，**8/8 全过**：
+  ① 流式与官方 writer 的 HTML **挖掉 data URI 载荷后逐字节相同**（该套件默认夹具两边都是
+  **3,144,345 B**）；② 两份载荷长度相同；③ 载荷解码后都是合法 zip，条目名 / 长度 / 内容摘要
+  完全一致（`means_l.webp` / `means_u.webp` / `quats.webp` / `scales.webp` / `sh0.webp` /
+  `meta.json`）；④ 单文件 HTML 自身结构正确（有 bootstrap、css 内联、没有残留 `index.js` 引用与占位符）；
+  ⑤ 落盘字节数与导出字节数一致；⑥ 两份产物在浏览器里打开表现一致（viewer 起得来、canvas 存在、无报错）；
+  ⑦ 走的确实是流式那条路（没有"退回官方 writer"的 warning）；⑧ 打包（zip）产物与官方 writer 的
+  条目结构一致（`index.sog` / `index.css` / `index.js` / `settings.json` / `index.html`，
+  内层 `.sog` **递归比形状** —— 因为 zip 里带容器时间戳，不能比整包字节）。
+- 全量回归：**36 个套件 `TOTAL FAILED: 0`**；`npm run check` 退出码 **0**。
+  批量脚本里有 **2 个 UNPARSED 是既有的输出形状问题**，与本轮无关：
+  `verify-edit-grade-crop.cjs` 单独跑 **4/4 全过**（它的 `failed` 字段在批量里没被解析出来）、
+  `verify-merge-ui.cjs` 根本没有 `failed` 字段。
+
+#### 坑（值得记一笔）
+
+viewer 自己的 JS 里**就含** `data:application/octet-stream;base64,` 这个字面量，所以定位载荷
+不能只找这个前缀 —— 必须找 bootstrap 里 `contentUrl":"` 的那一处，否则会命中 viewer 代码里的字符串。
+
+#### 还剩什么
+
+1. **base64 那 +19 s 的主线程成本**（"单文件自包含"的固有代价）—— 想再快只能换容器格式或让
+   base64 走 worker；
+2. 13M 上去浮云检测本身还是 **101 秒**（门槛只是"不自动跑"，算法级修复未做）；
+3. load worker 输出不等价（列字节一致但选区结果不同，213 vs 2000）—— 查清之前保持 opt-in。
+   （6.51 的第 1 条"查看器 4.25 GB 瞬时分配"本轮已完成，见本节。）
+
 
 
 

@@ -687,5 +687,5 @@
     "select-toolbar.rangeCacheTooLarge": "Dieses Modell ist zu groß für einen sofortigen Bereichs-Zuschnitt: Beim Verstellen wird jeder Gauß neu berechnet, das dauert einen Moment.",
     "panel.floater.tooLarge": "{{n}} Gauß-Punkte: Eine automatische Erkennung würde die App etwa {{sec}}s blockieren und ist deshalb pausiert (Regler bleiben bedienbar). Auf „Nur auswählen\" oder „Floater entfernen\" wird sie sofort berechnet.",
     "popup.exportOutOfMemory": "Nicht genug Speicher zum Speichern: Dieses Modell braucht etwa {{size}} GB. Exportieren Sie eine kleinere Auswahl (erst auswählen), schneiden Sie das Modell zu, oder nutzen Sie PLY / Splat (die schreiben direkt auf die Platte).",
-    "popup.exportLargeConfirm": "Dieser Export muss das gesamte Paket zuerst im Speicher zusammensetzen: etwa {{size}} GB temporärer Speicher und rund {{sec}} s. Fortfahren?"
+    "popup.exportLargeConfirm": "Dieser Export erzeugt einmalig große Speicherzuweisungen: etwa {{size}} GB temporärer Speicher und rund {{sec}} s. Fortfahren?"
 }

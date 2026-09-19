@@ -687,5 +687,5 @@
     "select-toolbar.rangeCacheTooLarge": "Ce modèle est trop volumineux pour un recadrage de plage en direct : chaque gaussienne est recalculée, cela prend un instant.",
     "panel.floater.tooLarge": "{{n}} gaussiennes : une détection automatique figerait l'application environ {{sec}} s ; elle est donc en pause (les curseurs restent réactifs). Cliquez sur « Sélectionner seulement » ou « Supprimer les flottants » pour la lancer.",
     "popup.exportOutOfMemory": "Mémoire insuffisante pour enregistrer : ce modèle nécessite environ {{size}} Go. Exportez une sélection plus petite (sélectionnez d'abord), recadrez le modèle, ou utilisez le format PLY / Splat (écriture directe sur le disque).",
-    "popup.exportLargeConfirm": "Cet export doit d'abord assembler le paquet entier en mémoire : environ {{size}} Go de mémoire temporaire et environ {{sec}} s. Continuer ?"
+    "popup.exportLargeConfirm": "Cet export effectue de grosses allocations de mémoire ponctuelles : environ {{size}} Go de mémoire temporaire et environ {{sec}} s. Continuer ?"
 }
