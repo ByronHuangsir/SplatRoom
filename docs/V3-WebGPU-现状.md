@@ -2598,6 +2598,107 @@ exe 属性 3.23.1 / 冒烟 4 进程 → 杀净 0。
 4. **审计第 11 条（着色器窗口判定）** —— A3 把缓存上限提到 ≈3200 万之后门槛暂不成立，
    等真出现 3200 万点以上的模型，或者想把 13M 的一杆继续往下压（现值 **275.71ms**）时再看。
 
+---
+
+### 6.51 第四十九轮：查看器 / SOG 导出不再一刀拒绝 —— 按实测报体积与耗时，由用户决定
+
+用户对上一轮（6.50 的 ④）的处置给了一句明确的产品判断：
+
+> 「查看器/SOG 导出我日常时需要的。」
+
+也就是说 `62dddd2` 那道"估算超过 1.0 GB 就**直接拒绝**"是**错误的产品决定**。这一轮先量清
+"到底能不能跑"，再把"拒绝"换成"说清代价、由用户决定"。提交：`714d98b`（改动）→ `15311c0`（版本 3.23.4）。
+
+#### 为什么不能一刀拒绝
+
+6.50 量到的结论是：**查看器导出是唯一的 O(输出) 路径**（93 万点写出 23.3 MB 却瞬时分配
+**1053.6 MB**，每行约 **1186 B** ≈输出体积的 45 倍）。那条结论本身没错，错的是**推论** ——
+"内存倍数大"不等于"跑不完"。真拿用户的 1300 万点模型量一次就知道：**它跑得完，只是又慢又吃内存**。
+
+#### 1300 万点实测（`选择工具\merged-scene.ply`，695 MB，无 SH，加载后 16 列）
+
+| 导出 | 耗时 | 写出 | 瞬时峰值分配 | 单次最大分配 | ≥8MB 分配次数 |
+| --- | --- | --- | --- | --- | --- |
+| `htmlViewer` | **81.3 s** | 184.3 MB | **4251.5 MB** | 396.9 MB | 91 |
+| `sog` | **98.6 s** | 136 MB | **1881.3 MB** | 148.9 MB | 30 |
+
+**两条都跑完了**（此前被判定为"会被拒绝"，实际能跑完）。量法同 6.50：假 stream 走流式路径，
+给页面挂 typed-array 分配跟踪（探针 `docs/probes/export-alloc-per-type.cjs`）。
+
+#### 改动内容（`src/app/file-handler.ts` 的 `scene.write`）
+
+**① 估算基数换成"数据集真实字节量"**
+
+不再用"每行固定字节数"，改成 `datasetBytes` = Σ(每列 `byteSize` × 行数)（遍历
+`splatData.getElement('vertex').properties`），再乘实测系数 `memoryMultiple`：
+
+| 导出 | `ply` | `compressedPly` | `splat` | `spz` | `sog` | `htmlViewer` | `packageViewer` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `memoryMultiple` | 0.6 | 0.6 | 0.4 | 2.8 | 2.7 | 6.1 | 6.1 |
+
+系数来自**三组实测取最大值（上包络）**：
+
+| 夹具 | 自身数据 | 查看器倍数 | SOG 倍数 |
+| --- | --- | --- | --- |
+| A 93.1 万点 / 48 列带 SH（`scan.ply`） | 220 MiB | ×4.8 | ×1.74 |
+| B 150 万点 / 17 列无 SH（`nosh-test.ply`） | 97.3 MiB | ×2.96 | ×0.96 |
+| C 1300 万点 / 16 列无 SH（`merged-scene`） | 694.7 MiB | ×6.1 | ×2.7 |
+
+⇒ 取上包络：`htmlViewer` / `packageViewer` **6.1**、`sog` **2.7**、`spz` **2.8**
+（`spz` 在夹具 A 上实测 ×1.30，这里同样取更保守的那一档）。倍数随体积**超线性**涨
+（贴图 / 编码缓冲），所以宁可把提示说得保守一点。
+无 SH 大模型的夹具由新增的 `docs/probes/gen-nosh-model.cjs` 生成。
+
+**② 两级阈值，默认不再拒绝**
+
+| 常量 | 默认 | 调试覆盖 | 行为 |
+| --- | --- | --- | --- |
+| `hugeGB` | **12** | `window.__SPLATROOM_EXPORT_HUGE_GB__` | 超过就**硬拒绝**（那已经不可能成功），仍给"能照做的话" |
+| `askGB` | **0.8** | `window.__SPLATROOM_EXPORT_MAX_GB__` | 超过就弹 **yes/no 确认框**（`type: 'yesno'`），文案键 `popup.exportLargeConfirm {size, sec}` |
+
+- 确认框把**预估体积与耗时**说清楚；`sec` 按 `round(totalRows × 8e-6)` 估
+  （由 1300 万点的 81.3 / 98.6 秒标定，13M → 约 104 秒），只用于给一个数量级。
+- **用户选否就安静取消**（`return`，不弹错误、不写日志）—— 那是"我现在不想导"，不是失败。
+- 真的 OOM 时仍然映射为 `popup.exportOutOfMemory`（6.50 加的那句）。
+- 只对"整包在内存里组织"的四条生效（`inMemoryTypes = ['htmlViewer', 'packageViewer', 'sog', 'spz']`）；
+  `ply` / `compressedPly` / `splat` 是分块流式的，不提示也不拦。
+
+**③ 关键判据：比较用未取整的值**
+
+`estimatedOutputGB` 是 `toFixed(1)` 之后的字符串（给文案用），**判断必须用未取整的
+`estimatedGBValue`** —— 早期版本先取整再比较，`1.029` 会被压成 `"1.0"`、
+`1.0 > 1.0` 永不成立，正好漏掉 93 万点这个实测点（**那是个真 bug**，不是风格问题）。
+
+#### 其它改动
+
+- `static/locales/*.json`（9 个）新增键 **`popup.exportLargeConfirm`**，
+  总键数 **689**，9 个语言包键数一致（`npm run lint:locales` 通过）。
+- `docs/verify/verify-export-roundtrip.cjs`：新增对**确认框分支**的检查，
+  现为 **6/6 全过**（观测方式仍是把 `showPopup` 换成记录器 —— 真弹窗会等用户点确定、把套件挂住）。
+
+#### 验证
+
+- 全量回归：**35 个套件 `TOTAL FAILED: 0`**；`npm run check` 退出码 **0**。
+- 打包 `release\SplatRoom-3.23.4.exe`（**122.1 MB**）：asar 条目 **5295**；asar 内只有
+  `dist\test-model.ply`；wasm **8** 个；`dist/index.js` 同时含字面量 **3.4.0** 与 **3.23.4**；
+  9 个语言包键数均为 **689**；exe `FileVersion` / `ProductVersion` 均 **3.23.4**；
+  冒烟启动 **4** 个进程且主窗口标题为 `SplatRoom`，结束后归 **0**。
+
+#### 工具坑（值得记一笔）
+
+Windows 下 `@electron/asar` 的 `extractFile` / `statFile` 内部用 `p.split(path.sep)`，
+**必须传反斜杠路径**；传 `/` 分隔的路径只在**单层**目录（如 `dist/index.js`）碰巧能成，
+多层目录（如 `dist/static/locales/zh-CN.json`）一律报
+`"<path>" was not found in this archive`。这与 6.50「环境坑」里那条
+"深层路径用 `extractAll` 解到临时目录再读"是同一个根因。
+
+#### 还剩什么
+
+1. **查看器那条 4.25 GB 的瞬时分配**（13M / 91 次、单次最大 396.9 MB）仍是下一个优化目标 ——
+   让查看器 / SOG 本身走流式（要动 `serializeViewer` / SOG 编码器）已开为本会话的持续目标；
+2. 13M 上去浮云检测本身还是 **101 秒**（本轮之前的门槛只是"不自动跑"，算法级修复未做）；
+3. load worker 输出不等价（列字节一致但选区结果不同，213 vs 2000）—— 查清之前保持 opt-in。
+
 
 
 
