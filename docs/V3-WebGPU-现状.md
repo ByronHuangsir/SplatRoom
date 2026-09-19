@@ -2390,6 +2390,101 @@ A3 是"两端仍然精确"（0/100 = 整段穿透的语义不能动）。
    A1 的 dense 化救不了它，要换数据结构或改成「点『计算』才跑 + 给预估耗时」；
 3. **load worker 输出不等价**：列字节一致但选区结果不同（213 vs 2000），查清之前保持 opt-in。
 
+---
+
+### 6.50 第四十八轮：用户报的四条（选择跟手 / 小框首推 / 去浮云自动检测冻结 / 保存 OOM）
+
+用户在 3.23.0 上报了四条：
+
+> ① 「选择工具不是很跟手，点一下要等一下才能选中」
+> ② 「中途突然无法选中，单击后拖出选框但不选中」
+> ③ 「上下左右的选择范围调整时好时坏，有时候拉几次滑块都没反应，无法增加选区」
+> ④ 「保存时出现 Array buffer allocation failed while saving file」
+
+**先在真机上量，再改**：能复现的都复现了，量不到的写清楚位置。四条里有三条其实是**同一个主题** ——
+上一轮（乃至更早）加的开关/阈值**在真实量级上失效**：① 是 A3 自己引进的一次除法，③ 是审计早就点名的
+绝对阈值，② 是去浮云面板的 O(n) 检测。所以这一轮不是加功能，是**把量级补齐**。
+
+**本轮提交链**：`d767edc`（四条修复）→ `70f284a`（版本号与中文属性修正 —— 见下面的环境坑）。
+
+| # | 用户原话（要点） | 先量到什么 | 怎么改 | 实测 |
+| --- | --- | --- | --- | --- |
+| ① | 选择不跟手，点一下要等 | A3 的深度量化写成 `Math.round((distance - distMin) / distScale)`，**每次手势、每个点一次浮点除法**（13M 点上一次手势 = 13M 次除法，约 **100–150ms**） | 预存 `distInvScale`，改成乘法 + `\| 0`；另加 `cancelPendingBounds()` —— 新手势先取消上一次排下的 120ms 延迟补算（否则那一次包围盒 pass 正好挤在 `commandQueue` 前面，13M 上 25–75ms + 让出一帧） | 93 万点、同一台机同一套动作：单击 **52–74ms → 28–45ms**；框选 **41–82ms → 35–50ms** |
+| ② | 中途突然无法选中 | 去浮云面板在**每一次** `splat.stateChanged` 上同步跑 `detectFloaters` + `detectClusters`，13M 实测**冻结主线程 101 秒**（计数网格 2.4e10 格 ⇒ 永远走 `Map` 回退，见 6.48 的 A1 记录） | 按审计 bug 第 5 条加**点数门槛**：超过 **200 万点**不再自动检测，面板给出点数与预估耗时（"模型有 N 个高斯：自动检测大约要卡住 X 秒，已暂停"，新键 `panel.floater.tooLarge`）；点『仅选中』『移除浮云』仍然**现场算**。另加调试覆盖 `window.__SPLATROOM_FLOATER_AUTO_MAX_SPLATS__`（真实门槛 200 万而夹具最大 93 万，不加覆盖就没法验这条分支） | 把门槛压到 1000：提示出现、**主线程最大间隔 22ms**（不冻结）；门槛恢复后自动检测回来（**9797**）。93 万点上开面板的额外卡顿只有 55 → **157ms** —— 所以这条在小模型上本来"不致命"，是 13M 才致命 |
+| ③ | 上下左右时好时坏、拉几次没反应 | `tailFractions` 的采样门槛是**绝对的 `counted < 200`** 就放弃尾巴（审计 bug 第 10 条）：单击（7×7 的框）与小框采样后常常只剩几十个点 ⇒ `tails = null` ⇒ 退回**纯线性映射** ⇒ **第一下推杆一个高斯都删不掉** | 门槛 **200 → 20**（512 桶下 20 个样本足够定位首次非空桶） | 93 万点：大框之后六个方块首推 **6/6** 有反应；**小框之后 6/6**；**单击之后 6/6**（后两处旧行为是 `tails = null`） |
+| ④ | 保存报 `Array buffer allocation failed` | 见下面的 ④ 小节 | 去掉 A2 那次多余的 `slice()`（改 `subarray`）+ 把报错翻成人话（按导出格式与点数预估体积） | 见下 |
+
+#### ④ 保存 OOM：先找真正的原因，再把报错变成能照做的话
+
+这一条**不能只靠猜**，所以分三步量：
+
+1. **先排除"Blob 双份"那条**（审计 A2 的说法）：用 CDP 连**打包版**实测，确认它有
+   `window.showSaveFilePicker` ⇒ 保存走的是**流式写盘**（`BrowserFileWriter` 逐块 `stream.write`），
+   不是"整份压在内存里再 Blob"那条路。所以审计里"导出侧 Blob 双份 1.4GB"**对这条路径不成立**。
+2. **给页面挂 typed-array 分配跟踪，量出分配发生在序列化器内部**：93 万点导出 231MB 时，
+   序列化器**仍有一次 209.7MB 的单次分配**（`MemoryFileSystem` 的 `close` 把整份文件拼成一块），
+   同批还有 **192MB 的池分配**与 **59MB × 3 的分块** —— **18 次分配共 861.9MB 瞬时**。
+   这个模式**随输出体积线性放大**：93 万点尚且 862MB，13M 就必然顶到浏览器的分配上限 ⇒
+   正是那句 `Array buffer allocation failed`。
+3. **本轮做了两件能做、且不改变输出的**：① 把 A2 里那次多余的 `slice()`（`idx < 0.9 × bound` 时
+   复制整张映射表，13M 上 52MB）改成 `subarray`（视图、零分配）；② 把报错翻译成能照做的提示：
+   按导出格式与点数预估体积（**PLY 236 B/行、compressedPly 60、splat 32、spz 16、sog 8**），
+   命中分配失败时提示"内存不够，保存失败：这个模型大约需要 X GB……可以先框选/裁剪缩小范围，
+   或改用 PLY / Splat（边算边写盘）"，**9 语言同步**（新键 `popup.exportOutOfMemory`）。
+
+**还没做（留作下一步，见第 2 节待办）**：真正消掉那次 **O(输出) 的单次分配** ——
+`MemoryFileSystem` 换成"块列表 → 直接 `new Blob(chunks)`"，或者让 `duplicate` / `separate`
+也走流式。这需要动 `splat-transform` 的 writer 用法，不是小改。
+
+**需要用户确认的一点**：当时用的是**哪种导出**（PLY / Splat / SOG / HTML 查看器）——
+查看器与 SOG 是"整包在内存里组织"的路径，最容易顶到上限；PLY 走流式，理论上最安全。
+
+#### 新增验证资产
+
+`docs/verify/verify-selection-responsiveness.cjs`（**8 项**）—— 同一台机、93 万点真扫描：
+
+```powershell
+copy D:\DeepSeek\SplatRoomV2\_tmp\scan.ply dist\scan.ply   # 先放夹具
+node docs/verify/verify-selection-responsiveness.cjs "http://localhost:3621/?gpu=webgpu"
+Remove-Item dist\scan.ply                                   # 跑完立刻删（否则会进 asar）
+```
+
+它固化的八件事：同一个框连做 6 次**选中数完全一致**、单击选中**非空**、
+**大框 / 小框 / 单击之后六个方块首推都是 6/6 有反应**（③ 的回归）、
+去浮云门槛给出提示且**不冻结（22ms）**、门槛恢复后自动检测**回来**（9797）。
+
+**为什么不进批量**：它默认喂 `scan.ply`，需要 `dist\scan.ply` 这个 T1 夹具
+（与 `verify-load-worker.cjs`、`verify-large-model-backend.cjs` 同一个理由）。
+所以**批量排除列表现在多一条 `verify-selection-responsiveness.cjs`**。
+另外 `verify-selection-range.cjs` 里那条"第一小步必须真的删掉高斯"的用例现在同时覆盖 ③。
+
+**其余验证**：全量 **35 套**（webgpu）**TOTAL FAILED: 0**；`npm run check` 干净；
+语言键 9 语言 **688**（本轮 +2：`panel.floater.tooLarge`、`popup.exportOutOfMemory`）；
+打包 `release\SplatRoom-3.23.1.exe`（122.1 MB，已签名）复核：asar **5295** 条 /
+唯一 PLY = `dist\test-model.ply` / 8 个 wasm / bundle 版本字面量 3.4.0 + **3.23.1** /
+exe 属性 3.23.1 / 冒烟 4 进程 → 杀净 0。
+
+#### 环境坑（本轮又踩到两次，写死在这里）
+
+**`Set-Content -Encoding utf8` 会写 BOM**：`package.json` 被加上 BOM 之后 electron-builder
+**直接 JSON.parse 失败**（表现为 build 读不到版本号）；而用 `Get-Content -Raw | Set-Content`
+往返**会把 `package.json` 的中文（`author` / `description`）烧成乱码**，还把 `_tmp` 里一个 `.cjs`
+探针的 CJK 字符串写坏到**语法错误**（同 6.48 记过的那条坑，这是第二、三次）。
+⇒ **改仓库里的文件一律用 read / write / edit 工具**；万不得已要用 PowerShell，必须
+`[System.IO.File]::WriteAllText($p, $t, [System.Text.UTF8Encoding]::new($false))`（无 BOM）。
+本轮末尾用 `70f284a` 把版本号与中文属性修回来。
+
+#### 还剩什么
+
+1. **④ 那次 O(输出) 的单次分配**（`MemoryFileSystem.close` 拼整块）—— 要动 `splat-transform`
+   的 writer 用法（块列表 → `new Blob(chunks)`，或 `duplicate`/`separate` 也走流式）；
+   **并且需要用户先确认当时用的是哪种导出**（查看器 / SOG 最容易顶上限）；
+2. **13M 上去浮云检测本身还是 101 秒** —— 本轮只是**加了门槛不自动跑**（并给提示），
+   算法级修复（换开放寻址哈希网格 / 复用一次排序过的键，或"点『计算』才跑 + 预估耗时"）还没做；
+3. **load worker 输出不等价**（列字节一致但选区结果不同，213 vs 2000）—— 查清之前保持 opt-in；
+4. **审计第 11 条（着色器窗口判定）** —— A3 把缓存上限提到 ≈3200 万之后门槛暂不成立，
+   等真出现 3200 万点以上的模型，或者想把 13M 的一杆继续往下压（现值 **275.71ms**）时再看。
+
 
 
 
