@@ -177,6 +177,16 @@ class BoundDimensionsOverlay {
                 const oy = perpY * offsetPx * sign;
 
                 const thetaDeg = theta * 180 / Math.PI;
+
+                // 2026-09-20（用户 2000 万点实测，WebGPU）：投影退化时这里会把 NaN 写进 SVG，
+                // 控制台每次刷 `<g> attribute transform: Expected number, "translate(NaN, NaN)"`。
+                // 边界本身可能不可用（包围盒 pass 还没跑完 / 该轴退化），屏幕上本来也没东西可标，
+                // 那就把标签藏起来，别往里写 NaN。
+                if (!Number.isFinite(mx) || !Number.isFinite(my) || !Number.isFinite(thetaDeg) || !Number.isFinite(length)) {
+                    text.setAttribute('visibility', 'hidden');
+                    continue;
+                }
+
                 text.setAttribute('transform', `translate(${(mx + ox).toFixed(1)}, ${(my + oy).toFixed(1)}) rotate(${thetaDeg.toFixed(1)})`);
                 text.textContent = length.toFixed(2);
             }
