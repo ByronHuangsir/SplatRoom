@@ -1061,6 +1061,62 @@ class Splat extends Element {
         return Math.max(radius * (worldScale.x + worldScale.y + worldScale.z) / 3, 0.001);
     }
 
+    /**
+     * 取景半径：给相机"把模型框进画面"用。
+     *
+     * 为什么不是 `worldBound.halfExtents.length()`（AABB 半对角线）：扫描件里常有一小撮
+     * 离得很远的噪声点，AABB 会被它们撑爆。用户 2000 万点实测（2026-09-20）：
+     *   AABB 半径 8297，而真正看得见的那一坨只有 153 —— 相机因此停在 8~16 km 外，
+     *   屏幕上只剩一个点（用户原话："框显所选应该显示完整模型，现在只显示一小块"）。
+     *
+     * 这里用**裁剪包围盒**：按轴各取 1%~99% 分位，去掉两端极值，再取半对角线。
+     * 为什么不是 `denseRadius()`（不透明度×尺度的加权 3σ）：那个量是"密度重心"的统计半径，
+     * 对薄墙 / 稀疏结构会明显偏小（实测会让既有取景语义变化：两套回归套件直接失败），
+     * 而裁剪分位数只丢极值、不做加权，对正常模型与 AABB 同量级。
+     */
+    framingRadius(): number {
+        const data = this.splatData;
+        const x = data?.getProp('x') as Float32Array;
+        const y = data?.getProp('y') as Float32Array;
+        const z = data?.getProp('z') as Float32Array;
+        if (!data || !x || !y || !z) {
+            return this.worldBound.halfExtents.length();
+        }
+
+        const numSplats = data.numSplats;
+        // 抽样上限 20 万：取分位数只要趋势，13M 上一次全扫要 ~500ms，抽样后 ~10ms
+        const stride = Math.max(1, Math.ceil(numSplats / 200000));
+        const count = Math.ceil(numSplats / stride);
+        const sx = new Float32Array(count);
+        const sy = new Float32Array(count);
+        const sz = new Float32Array(count);
+        let k = 0;
+        for (let i = 0; i < numSplats; i += stride) {
+            sx[k] = x[i];
+            sy[k] = y[i];
+            sz[k] = z[i];
+            k++;
+        }
+        sx.sort();
+        sy.sort();
+        sz.sort();
+
+        // 1% / 99% 分位（两端各丢 1% 的极值）
+        const lo = Math.floor(count * 0.01);
+        const hi = Math.min(count - 1, Math.ceil(count * 0.99));
+        const half = (arr: Float32Array) => Math.max((arr[hi] - arr[lo]) * 0.5, 0);
+
+        // 世界尺度（与 denseRadius 同一套近似：三轴平均缩放）
+        const worldScale = this.entity.getWorldTransform().getScale();
+        const s = (worldScale.x + worldScale.y + worldScale.z) / 3;
+        const trimmed = Math.sqrt(half(sx) ** 2 + half(sy) ** 2 + half(sz) ** 2) * s;
+
+        // 取景半径不该比"实心几何"更小：模型整体只有几十个点时上面的分位数会退化成 0
+        const bound = this.worldBound.halfExtents.length();
+        const radius = Math.max(trimmed * 1.1, Math.min(bound, 1e-3));
+        return Math.max(radius, 1e-6);
+    }
+
     move(position?: Vec3, rotation?: Quat, scale?: Vec3) {
         const entity = this.entity;
         if (position) {

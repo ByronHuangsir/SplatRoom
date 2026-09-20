@@ -6,8 +6,10 @@ import {
     SEMANTIC_POSITION,
     drawQuadWithShader,
     BlendState,
+    Color,
     GraphicsDevice,
     Mat4,
+    RenderPass,
     RenderTarget,
     ScopeSpace,
     Shader,
@@ -30,6 +32,9 @@ import { Splat } from '../splat/splat';
 
 const identity = new Mat4();
 const zeroVec3 = new Vec3();
+// bins (and the min/max textures) start at all-zero: the bin pass only adds to
+// them, and 0 is also the "nothing contributed" sentinel the reduction relies on
+const clearClr = new Color(0, 0, 0, 0);
 
 // number of SH coefficients per RGB band, indexed by GSplatResource.shBands.
 const SH_NUM_COEFFS: { [k: number]: number } = { 0: 0, 1: 3, 2: 8, 3: 15 };
@@ -75,6 +80,11 @@ class CalcHistogram {
     private minMaxRT: RenderTarget = null;
     private binTex: Texture = null;
     private binRT: RenderTarget = null;
+
+    // WebGPU only: the render pass used to clear a render target (that backend
+    // clears through a pass, see clearRT). Reused across runs, always re-initialised
+    // with the target being cleared.
+    private clearPass: RenderPass = null;
 
     private minMaxData = new Float32Array(4);
     private binData = new Float32Array(NUM_BINS * 4);
@@ -161,6 +171,15 @@ class CalcHistogram {
         if (!shader) {
             const defines = new Map<string, string>();
             defines.set('SH_BANDS', `${shBands}`);
+            // WebGPU has no point size, and a vertex shader that assigns gl_PointSize
+            // loses its entry point when it is transpiled to WGSL (see the NOTE in
+            // splat-overlay-shader.ts): an invalid pipeline. The bin pass therefore
+            // draws one instanced quad per splat on that backend instead of one
+            // 1-pixel point (see GSPLAT_BIN_QUADS in histogram-shaders.ts and the
+            // instanced draw in draw-points.ts).
+            if (this.device.isWebGPU) {
+                defines.set('GSPLAT_BIN_QUADS', '');
+            }
             shader = ShaderUtils.createShader(this.device, {
                 uniqueName: `histBin_SH${shBands}`,
                 attributes: { vertex_position: SEMANTIC_POSITION },
@@ -240,6 +259,26 @@ class CalcHistogram {
 
     private clearRT(rt: RenderTarget) {
         const d = this.device as any;
+
+        // updateBegin/updateEnd exist on the WebGL device only: it binds the
+        // framebuffer in updateBegin (setRenderTarget just records the target) and
+        // resolves/rebinds in updateEnd, so the clear only lands between the two.
+        // The WebGPU device has neither, and its clear() is implemented as a
+        // full-screen quad draw, which WebGPU rejects outside a render pass - so
+        // that backend clears through the engine's cross-backend RenderPass, whose
+        // colour-clear op is issued with the pass. Measured on ?gpu=webgpu with a
+        // 20M splat model: calling updateBegin() threw "e.updateBegin is not a
+        // function" and the pass aborted, leaving every bin at zero (empty panel).
+        if (typeof d.updateBegin !== 'function') {
+            const oldRt = this.device.renderTarget;
+            const pass = this.clearPass ?? (this.clearPass = new RenderPass(this.device));
+            pass.init(rt);
+            pass.setClearColor(clearClr);
+            pass.render();
+            this.device.setRenderTarget(oldRt);
+            return;
+        }
+
         const oldRt = d.renderTarget;
         const oldVx = d.vx, oldVy = d.vy, oldVw = d.vw, oldVh = d.vh;
         const oldSx = d.sx, oldSy = d.sy, oldSw = d.sw, oldSh = d.sh;

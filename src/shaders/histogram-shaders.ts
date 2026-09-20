@@ -67,26 +67,57 @@ const finalReduceFS = /* glsl */ `
     }
 `;
 
-// pass 3: bin counting (point rendering, additive blending)
+// pass 3: bin counting (one splat per primitive, additive blending).
+//
+// WebGL2 draws one 1-pixel POINT per splat (gl_PointSize = 1.0). WGSL has no point
+// size, and a vertex shader that assigns gl_PointSize loses its entry point when it
+// is transpiled to WGSL, which produced an invalid pipeline on the WebGPU backend
+// (see the NOTE in splat-overlay-shader.ts). The WebGPU variant is therefore
+// compiled with GSPLAT_BIN_QUADS (set by CalcHistogram.getBinShader) and expands
+// each splat into a screen-space quad that covers exactly the same single pixel:
+// the host draws one instance of the engine's unit quad per splat, `vertex_position`
+// carries that quad's corner (-1,-1)..(1,1) and uHistViewportSize is the size of the
+// bin render target in pixels.
 const binVS = /* glsl */ `
     ${computeSplatValueGLSL}
 
     uniform sampler2D minMax;
     uniform int numBins;
 
+    #ifdef GSPLAT_BIN_QUADS
+    // size of the bin render target in pixels (numBins x 1), used to convert the
+    // half-pixel corner offset below from pixels to clip space
+    uniform vec2 uHistViewportSize;
+    // corner of the instanced unit quad, supplied by the engine's shared quad
+    // vertex buffer: (-1,-1) (1,-1) (-1,1) (1,1), two triangles over indices
+    // 0,1,2 / 2,1,3 that share their vertex positions.
+    attribute vec2 vertex_position;
+    #endif
+
     varying float v_flag;
 
     void main(void) {
+        #ifdef GSPLAT_BIN_QUADS
+        // one instance per splat; the quad mesh supplies four vertices per instance
+        int splatIndex = gl_InstanceID;
+        #else
+        int splatIndex = gl_VertexID;
+        #endif
+
         float val;
         bool sel;
         bool vis;
-        bool valid = computeSplatValue(gl_VertexID, val, sel, vis);
+        bool valid = computeSplatValue(splatIndex, val, sel, vis);
         bool include = valid && vis;
         v_flag = include ? (sel ? 2.0 : 1.0) : 0.0;
 
         if (!include) {
+            // all four quad corners (or the single point) land outside the viewport,
+            // so nothing is rasterized
             gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+            #ifndef GSPLAT_BIN_QUADS
             gl_PointSize = 0.0;
+            #endif
             return;
         }
 
@@ -98,7 +129,14 @@ const binVS = /* glsl */ `
 
         float xNDC = (float(bin) + 0.5) / float(numBins) * 2.0 - 1.0;
         gl_Position = vec4(xNDC, 0.0, 0.0, 1.0);
+        #ifdef GSPLAT_BIN_QUADS
+        // half a pixel in clip space is 1 / viewportSize (the whole NDC range of 2
+        // spans the viewport), so the corner sign gives a quad of exactly one pixel
+        // around the bin centre - the coverage gl_PointSize = 1.0 has on WebGL2.
+        gl_Position.xy += vertex_position / uHistViewportSize;
+        #else
         gl_PointSize = 1.0;
+        #endif
     }
 `;
 

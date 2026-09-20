@@ -959,9 +959,12 @@ class Camera extends Element {
                     const fp = splat.focalPoint?.();
                     if (fp) {
                         // Focal point = density-weighted center (dense region).
-                        // Radius = full bounding box so the entire model is visible.
-                        const boundR = splat.worldBound.halfExtents.length();
-                        return { focalPoint: fp, radius: boundR };
+                        // Radius = 密集区半径（见 Splat.framingRadius 的注释）。
+                        // 2026-09-20 用户 2000 万点实测：以前用 AABB 半对角线（16115，被远处
+                        // 噪声点撑爆，密集区其实只有 153）取景，相机会停在 8~16 km 外，
+                        // 屏幕上什么都看不清（"只显示一小块"）。
+                        const radius = splat.framingRadius?.() ?? splat.worldBound.halfExtents.length();
+                        return { focalPoint: fp, radius };
                     }
                 }
             }

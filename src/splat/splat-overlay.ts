@@ -244,17 +244,23 @@ class SplatOverlay extends Element {
         this.onSorterUpdated = () => {
             // WebGL2 draws the sorter's visible prefix of its (sorted) order texture. The
             // WebGPU identity texture maps draw index to splat index, so the sorter's count
-            // would describe a different set of indices there — draw every splat instead
-            // (off-screen ones are clipped).
+            // would describe a different set of indices there — draw **every row** instead
+            // and let the shader drop locked/deleted ones (off-screen ones are clipped).
+            // 注意必须是 `splatData.numSplats`（全部行数），不是 `splat.numSplats`
+            // （= 行数 − 已删除数）：用后者会只画前 N 行，既漏画可见的、又把删掉的画出来
+            // （用户 2000 万点实测 ①）。
             if (!isWebGPU) {
                 this.setDrawCount(instance.sorter.pendingSorted?.count ?? this.drawPoints);
+            } else if (this.splat) {
+                this.setDrawCount(this.splat.splatData.numSplats);
             }
         };
         this.sorter = instance.sorter;
         this.sorter.on('updated', this.onSorterUpdated);
 
-        // initialize count - numSplats is the current visible count (excluding deleted)
-        this.setDrawCount(splat.numSplats);
+        // initial count: WebGL2 asks the sorter for its visible prefix, WebGPU draws every
+        // row (the shader filters locked/deleted)
+        this.setDrawCount(isWebGPU ? splat.splatData.numSplats : splat.numSplats);
 
         splat.entity.addChild(this.entity);
         this.splat = splat;
@@ -311,6 +317,9 @@ class SplatOverlay extends Element {
             material.setParameter('unselectedClr', [unselectedClr.r, unselectedClr.g, unselectedClr.b, unselectedClr.a]);
             material.setParameter('useGaussianColor', useGaussianColor);
             material.setParameter('transformPalette', this.splat.transformPalette.texture);
+            // 用户 2000 万点实测 ①：覆盖层必须自己判删除位（WebGPU 下没有"排序后的可见集合"
+            // 可用，见 splat-overlay-shader.ts 里的注释）；这里把开关透给着色器。
+            material.setParameter('overlayShowDeleted', this.splat.showDeleted ? 1 : 0);
 
             // pass camera position for SH evaluation
             const camPos = scene.camera.mainCamera.getPosition();

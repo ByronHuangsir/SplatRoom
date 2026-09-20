@@ -556,11 +556,12 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             return;
         }
 
-        // Focal point = density-weighted center, radius = full bounding box.
-        const boundR = splat.worldBound.halfExtents.length();
+        // Focal point = density-weighted center, radius = 密集区半径。
+        // 2026-09-20 用户 2000 万点实测 ④：原来用 AABB 半对角线，被远处噪声点撑到 16115，
+        // 而密集区只有 153 —— 相机落到 8 km 外，"框显所选"看到的不是完整模型而是一个点。
         scene.camera.focus({
             focalPoint: splat.focalPoint(),
-            radius: boundR,
+            radius: splat.framingRadius(),
             speed: 1
         });
     });
@@ -579,11 +580,27 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             camera.setAzimElev(pose.azim, pose.elev, 1);
             camera.setDistance(pose.distance, 1);
         } else {
-            // Orbit mode (or no snapshot yet): reset to front-facing view
-            const { initialZoom } = scene.config.controls;
-            camera.setFocalPoint(new Vec3(0, 0, 0), 1);
-            camera.setAzimElev(0, 0, 1);
-            camera.setDistance(initialZoom, 1);
+            // Orbit mode (or no snapshot yet).
+            // 2026-09-20 用户 2000 万点实测 ⑤：重置相机应当回到"模型密集区域斜上方 15°"，
+            // 而不是固定的"原点 + 初始缩放" —— 对一张跨度 18 km（被噪声点撑开）的扫描件，
+            // 那个视角什么都看不到（实测相机停在离模型 13629 处，密集区半径只有 153）。
+            // 取景用与 camera.focus() 同一套（密集中心 + 密集半径），仰角 -15°：
+            // calcForwardVec 的 y = sin(-elev) > 0 ⇒ 相机在焦点上方 15°、俯视模型。
+            const splats = scene.getElementsByType(ElementType.splat) as Splat[];
+            const splat = splats[0];
+            if (splat) {
+                scene.camera.focus({
+                    focalPoint: splat.focalPoint(),
+                    radius: splat.framingRadius(),
+                    speed: 1
+                });
+                scene.camera.setAzimElev(0, -15, 1);
+            } else {
+                const { initialZoom } = scene.config.controls;
+                camera.setFocalPoint(new Vec3(0, 0, 0), 1);
+                camera.setAzimElev(0, 0, 1);
+                camera.setDistance(initialZoom, 1);
+            }
         }
     });
 

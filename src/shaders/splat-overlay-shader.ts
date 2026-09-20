@@ -29,6 +29,9 @@ const vertexShader = /* glsl */ `
     uniform highp usampler2D splatOrder;            // order texture mapping render order to splat ID
     uniform uint splatTextureSize;                  // width of order texture
 
+    // 1 = 也画已删除的高斯（与 splat 材质的 showDeleted 同源；默认 0）
+    uniform float overlayShowDeleted;
+
     uniform sampler2D splatState;
     uniform highp usampler2D splatPosition;
     uniform highp usampler2D splatTransform;        // per-splat index into transform palette
@@ -130,16 +133,24 @@ const vertexShader = /* glsl */ `
         // upload per sort (measured: 180 MB/s while orbiting a 5M splat model) for a
         // diagnostic overlay. Holding the identity mapping means drawing every splat in
         // storage order, which for center dots is visually equivalent (off-screen splats are
-        // clipped, deleted ones are skipped by the state check below).
+        // clipped).
         ivec2 orderUV = ivec2(int(splatIndex % splatTextureSize), int(splatIndex / splatTextureSize));
         uint splatId = texelFetch(splatOrder, orderUV, 0).r;
 
         ivec2 splatUV = calcSplatUV(splatId, texParams.x);
         uint splatState = uint(texelFetch(splatState, splatUV, 0).r * 255.0);
 
-        // check for locked splats (deleted splats are already excluded from order texture)
-        if ((splatState & 2u) != 0u) {
-            // locked
+        // 跳过"锁定"和"删除"的点。
+        // 2026-09-20（用户 2000 万点实测 ①）：这里原来只判 bit 2（锁定），注释写着
+        // "deleted splats are already excluded from order texture" —— 那只在 WebGL2 成立
+        // （引擎的 order texture 是排序后的可见集合）。WebGPU 走的是恒等映射 + 画满
+        // splatData.numSplats 行，删除位根本没人管，于是"显示/隐藏 Splats"一按下去，
+        // 之前删掉的点全部又画出来了。所以删除位必须在这里自己判，两个后端一致。
+        // overlayShowDeleted 与 splat 材质的 showDeleted 同源：打开"显示已删除"时
+        // 覆盖层也不该瞒着用户。
+        bool skipDeleted = overlayShowDeleted < 0.5 && (splatState & 4u) != 0u;
+        if ((splatState & 2u) != 0u || skipDeleted) {
+            // locked / deleted
             gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
             #ifndef GSPLAT_QUAD_SPRITES
                 gl_PointSize = 0.0;
