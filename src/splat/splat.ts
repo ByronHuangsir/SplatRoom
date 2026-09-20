@@ -104,6 +104,11 @@ class Splat extends Element {
     // splat re-dispatched a sort every frame once any camera moved)
     private _sortLastPos = new Vec3();
     private _sortLastDir = new Vec3();
+    // P0-2（2026-09-20，用户 2000 万点实测 ⑥）：交互期排序的"最小间隔 + 停手补一帧"状态。
+    // 见 onPreRender 里那段的注释：每帧派发全量排序会让 worker 100% 饱和（实测轨道旋转
+    // max 帧 462.8 ms、3 秒内 5 帧 >33 ms），而上游 SuperSplat 3.3.0 在运动帧**根本不排序**。
+    private _sortLastDispatch = 0;
+    private _sortSettleAt = 0;
 
     selectionAlpha = 1;
 
@@ -692,6 +697,40 @@ class Splat extends Element {
         writeGpuCameraUniforms(instance, this.scene.camera as unknown as GpuCameraSource);
     }
 
+    /**
+     * 直接给排序 worker 派一次全量排序（绕开引擎 1e-3 的 epsilon 门限）。
+     *
+     * 引擎的 `GSplatInstance.sort()` 对相机方向用 `equalsApprox(..., 1e-3)`：缓慢旋转时
+     * 每帧方向变化约 1e-4，远小于门限 ⇒ 引擎把请求丢掉、worker 一直用旧顺序（画面"翻转/穿插"）。
+     * 所以这里自己按 splat 局部坐标的相机位姿直接 `postMessage`，并带 `forceUpdate: true`。
+     * `_sortInFlight` 的合并逻辑（gsplat-sorter.js 的补丁）保证同一时刻只有一个排序在飞，
+     * 飞行期间只记一个"待办位姿"——所以这里派发多少次都不会堆队列。
+     */
+    private dispatchSort(localPos: Vec3, localDir: Vec3) {
+        try {
+            const inst = this.entity?.gsplat?.instance;
+            const ws = inst?.sorter as any;
+            if (!ws || !ws.worker) {
+                return;
+            }
+            if (ws._sortInFlight) {
+                ws._pendingCamera = {
+                    pos: { x: localPos.x, y: localPos.y, z: localPos.z },
+                    dir: { x: localDir.x, y: localDir.y, z: localDir.z }
+                };
+            } else {
+                ws._sortInFlight = true;
+                ws.worker.postMessage({
+                    cameraPosition: { x: localPos.x, y: localPos.y, z: localPos.z },
+                    cameraDirection: { x: localDir.x, y: localDir.y, z: localDir.z },
+                    forceUpdate: true
+                });
+            }
+        } catch (e) {
+            // best-effort：排序失败不该影响渲染
+        }
+    }
+
     onPreRender() {
         // SurfaceRefine / replaceData 閻ㄥ嫬鑻熼崣鎴濇簚閺咁垯绗呴敍灞炬煀 entity 閻?gsplat instance
         // 閸欘垵鍏樻潻妯绘弓鐏忚京鍗庨敍宀冪儲鏉╁洦婀扮敮褍鑻熼崷銊﹀付閸掕泛褰存潏鎾冲毉娑撯偓濞嗏剝鈧嗙槚閺傤厺淇婇幁顖樷偓?
@@ -746,18 +785,23 @@ class Splat extends Element {
             // (many frames later).
             //
             // We mirror the engine's math exactly (world cam pos/dir 閳?
-            // splat-local via invModelMat) but use a much tighter epsilon so
-            // every rotation frame dispatches a fresh sort request. Sorter's
+            // splat-local via invModelMat) but use a much tighter detection
+            // threshold (1e-12) so tiny camera motion is noticed at all. Sorter's
             // _sortInFlight coalesce patch (gsplat-sorter.js L129) absorbs the
             // request spike without queueing unlimited worker tasks.
             //
             // FIX (2026-08-12): removed the 3-frame throttle. The throttle was
             // introduced for performance (order-texture upload cost) but caused
             // visible "鏉╂垵鐨潻婊冦亣" when the engine culler skips camera population.
-            // The sorter's _sortInFlight coalesce already prevents worker queue
-            // flooding; the per-frame epsilon (1e-12) keeps the dispatch idle
-            // when the camera is truly stationary. Throttle-free ensures every
-            // perceptible camera movement gets a fresh sort.
+            //
+            // P0-2 FIX (2026-09-20，用户 2000 万点实测 ⑥)：把"检测阈值"和"派发频率"拆开。
+            // 之前是"阈值 1e-12 ⇒ 只要动就每帧派"，20M 上一次全量排序 0.3~0.5 s，加上引擎在
+            // 排序完成时要做的 80 MB 主线程上传，实测轨道旋转期间 worker 100% 饱和、
+            // max 帧 462.8 ms、3 秒内 5 帧 >33 ms（同一台机器 idle 时 median 16.7 ms）。
+            // 上游 SuperSplat 3.3.0 更激进：运动帧**完全不排序**，静止帧才 GPU 排序。
+            // 这里取中间：检测仍然灵敏（1e-12），但派发最快每 SORT_MIN_INTERVAL_MS 一次，
+            // 且停手满 SORT_SETTLE_MS 后**补一帧**，保证静止画面用的仍是最终位姿的顺序。
+            // 语义不变：排序还是 worker 做、顺序还是最新位姿，只是不再每帧打断它。
             const camWorld = mainCamNode.getWorldTransform();
             camWorld.getTranslation(_fallbackCamPos);
             camWorld.getZ(_fallbackCamDir);
@@ -771,34 +815,39 @@ class Splat extends Element {
             const ddx = _fallbackLocalDir.x - this._sortLastDir.x;
             const ddy = _fallbackLocalDir.y - this._sortLastDir.y;
             const ddz = _fallbackLocalDir.z - this._sortLastDir.z;
-            if (dx * dx + dy * dy + dz * dz > 1e-12 ||
-                ddx * ddx + ddy * ddy + ddz * ddz > 1e-12) {
+            const moved = dx * dx + dy * dy + dz * dz > 1e-12 ||
+                ddx * ddx + ddy * ddy + ddz * ddz > 1e-12;
+
+            // ---- P0-2（2026-09-20，用户 2000 万点实测 ⑥）：交互期别再"每帧派一次全量排序" ----
+            // 原来只要相机动了（epsilon 1e-12，等于"任何移动"）就派一次 worker 全量排序，
+            // 20M 上一次排序 0.3~0.5 s，叠加引擎"排序完成要 80 MB 主线程 memcpy"的上传，
+            // 实测轨道旋转期间 worker 100% 饱和、max 帧 462.8 ms、3 秒内 5 帧 >33 ms。
+            // 上游 SuperSplat 3.3.0 的做法更激进：运动帧完全不排序，静止帧才 GPU 排序。
+            // 这里取中间：运动期间最快每 SORT_MIN_INTERVAL_MS 派一次（≈10 次/秒，60fps 下等于
+            // 每 6 帧一次），**停手后 150 ms 再补一帧干净的排序**，保证最终画面与静止帧一致。
+            // 语义不变：排序仍然由 worker 做，顺序仍然是"最新的相机位姿"，只是不再每帧打断。
+            const SORT_MIN_INTERVAL_MS = 100;
+            const SORT_SETTLE_MS = 150;
+            const now = performance.now();
+            if (moved) {
                 this._sortLastPos.copy(_fallbackLocalPos);
                 this._sortLastDir.copy(_fallbackLocalDir);
-                // Direct worker dispatch with forceUpdate=true. Engine's
-                // sorter.setCamera() doesn't accept forceUpdate, and the
-                // engine's worker epsilon (1e-3) is LARGER than our 1e-6
-                // detection threshold 閳?so any setCamera call we make
-                // during slow rotation gets short-circuited by the worker.
-                // Bypass sorter.setCamera and post ourselves with
-                // forceUpdate=true so the worker actually re-sorts.
-                // _sortInFlight coalesce saves ONE pending pose 閳?no queue.
-                try {
-                    const ws = inst.sorter as any;
-                    if (ws._sortInFlight) {
-                        ws._pendingCamera = {
-                            pos: { x: _fallbackLocalPos.x, y: _fallbackLocalPos.y, z: _fallbackLocalPos.z },
-                            dir: { x: _fallbackLocalDir.x, y: _fallbackLocalDir.y, z: _fallbackLocalDir.z }
-                        };
-                    } else {
-                        ws._sortInFlight = true;
-                        ws.worker.postMessage({
-                            cameraPosition: { x: _fallbackLocalPos.x, y: _fallbackLocalPos.y, z: _fallbackLocalPos.z },
-                            cameraDirection: { x: _fallbackLocalDir.x, y: _fallbackLocalDir.y, z: _fallbackLocalDir.z },
-                            forceUpdate: true
-                        });
-                    }
-                } catch (e) { /* best-effort */ }
+                if (now - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
+                    // 间隔到了：这一帧用的就是最新位姿，不需要再补帧
+                    this._sortLastDispatch = now;
+                    this._sortSettleAt = 0;
+                    this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir);
+                } else if (this._sortSettleAt === 0) {
+                    // 被最小间隔挡下了：安排"停手后补一帧干净排序"
+                    this._sortSettleAt = now + SORT_SETTLE_MS;
+                }
+            } else if (this._sortSettleAt !== 0 && now >= this._sortSettleAt) {
+                // 相机真的停了（连续 SORT_SETTLE_MS 没有位移）→ 补最后一帧。
+                // 注意这里**不能**在"还没到点"时把 deadline 往后推：空闲帧会一直推，
+                // 补帧就永远不会发生（第一版就是这么写的）。
+                this._sortSettleAt = 0;
+                this._sortLastDispatch = now;
+                this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir);
             }
         }
 
