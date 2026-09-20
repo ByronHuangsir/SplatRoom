@@ -18,7 +18,7 @@ import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
 import { selectDepthBand } from '../splat/selection-band';
 import type { SelectionRegionSpec } from '../splat/selection-core';
-import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, regionFromSpec, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { DepthTravel, RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, regionFromSpec, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
 import { prepareSlot, prewarmSplats, workerAnalyze, workerSelect } from '../splat/selection-worker-client';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
@@ -983,9 +983,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         // per-gaussian screen position + depth, captured in the gesture's own pass: a slider push then
         // only re-tests the windows instead of re-projecting 13M points (see RangeProjectionCache)
         cache: RangeProjectionCache | null;
-        // where the gaussians actually are along that axis (see tailFractions): the empty tails
-        // at both ends get compressed so the first push of 最近 / 最远 already changes the selection
-        tails: { near: number, far: number } | null;
+        // where the gaussians actually are along that axis: the deep axis keeps the **hit-set depth
+        // quantile table** (DepthTravel) that turns the slider travel into equal shares of the
+        // selected mass, the two screen axes keep their compressed content edges (see tailFractions)
+        tails: DepthTravel | null;
         // the same for 左右 / 上下: the gesture box's sparse margins get compressed too
         screenTails: { x: { near: number, far: number } | null, y: { near: number, far: number } | null } | null;
         // 环模式（rings）下这次手势的**拾取掩码**（V2 的语义：去重的可见 id 就是选中集合）。

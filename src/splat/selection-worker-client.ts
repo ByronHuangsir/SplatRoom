@@ -9,12 +9,16 @@
  *   • **state 每次手势传一份**（20M 点 = 20MB），用完由 worker 转移回来复用缓冲，避免每次重新分配。
  *   • 关掉它：`window.__SPLATROOM_SELECT_WORKER__ = false`（A/B 量测与排障用）。
  */
-import type { RangeProjectionCache, SelectionRangeView, SelectionRegionSpec } from './selection-core';
+import type { DepthTravel, RangeProjectionCache, SelectionRangeView, SelectionRegionSpec } from './selection-core';
 import { Splat } from './splat';
 
-/** worker 里算出来的 tails（`tailFractionsCore` 的返回） */
+/**
+ * worker 里算出来的尾巴（`tailFractionsCore` 的返回）。
+ * 深度轴是**命中点深度分布的分位数表**（`DepthTravel`，65536 桶的累积占比 ≈ 256KB，
+ * 结构化克隆一次不到 1ms —— 它必须回到主线程，因为「百分比 → 深度」是在主线程拿着滑块值算的）。
+ */
 export type WorkerTails = {
-    depth: { near: number, far: number } | null;
+    depth: DepthTravel | null;
     x: { near: number, far: number } | null;
     y: { near: number, far: number } | null;
 };

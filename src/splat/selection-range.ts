@@ -32,7 +32,7 @@ export {
     screenWindow,
     viewExtentFromBound
 } from './selection-core';
-export type { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, SelectionRegionSpec, SplatColumns } from './selection-core';
+export type { DepthTravel, RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, SelectionRegionSpec, SplatColumns } from './selection-core';
 
 /** `splat.splatData` 里投影循环要的那几列（worker 用的是自己那份常驻副本，见 selection-worker.ts）。 */
 export const splatColumns = (splat: Splat): SplatColumns => {
@@ -47,10 +47,10 @@ export const splatColumns = (splat: Splat): SplatColumns => {
 };
 
 /**
- * 三条轴的两条"稀疏尾巴"，**一次采样扫描算完**（深度 + 左右 + 上下）。
+ * 三条轴的两个"稀疏尾巴"，**一次采样扫描算完**（深度 + 左右 + 上下）。
  *
  * 采样：13M 点的模型上一次全扫要 ~500ms，而分布只要趋势 —— 按 stride 抽 ≤40 万点（实测这一步
- * 从 1.5s 降到 ~30ms）。
+ * 从 1.5s 降到 ~30ms）。深度轴返回的是**分位数表**（`DepthTravel`），左右/上下返回的还是两个边界。
  */
 export const tailFractions = (
     splat: Splat,

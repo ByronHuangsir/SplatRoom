@@ -123,17 +123,88 @@ export interface SplatColumns {
 }
 
 /**
- * 深度轴的两条"空尾巴"。模型沿视轴的前后两端常常是**稀疏的**（远处的离群高斯、扫描噪声），而包围盒是
+ * 三条轴的两条"空尾巴"。模型沿视轴的前后两端常常是**稀疏的**（远处的离群高斯、扫描噪声），而包围盒是
  * 按最外沿算的，于是滑块有一段行程什么都没发生。
  *
  * 做法：按框内高斯的实际分布，把两端各占 `TAIL_SHARE` 的那一段压进滑块行程的 `TAIL_PERCENT` 里；
  * 0/100 仍然对应两端 → **没有东西够不着**，"默认整段穿透"的语义不变。
+ *
+ * 左右/上下两个轴的中段仍然线性（就是本文件下面的 `tailMap`）；深度轴的**中段**换成了按命中点深度
+ * 分布的分位数等分（见 `DepthTravel` / `depthTravel`），因为这条轴的线性中段在噪声撑爆 AABB 的
+ * 扫描件上完全没有行程 —— 那是用户报的 ③。
  */
 export const TAIL_PERCENT = 0.5;
 export const TAIL_SHARE = 0.02;
 
+/** 左右 / 上下两个轴的尾巴直方图分辨率（见 tailBins）。 */
+const TAIL_BINS = 512;
+
 /**
- * 0-100 的行程 -> [0,1] 的实际比例，尾巴压紧、中间线性。
+ * 深度轴的直方图分辨率。
+ *
+ * 为什么与左右 / 上下不一样：深度轴的行程映射要按命中点的深度分布做**分位数插值**（见 depthTravel），
+ * 桶宽直接决定这张映射能分辨多细的结构。实测（20M 夹具：AABB 半径 8297、真正看得见的密集区只有 153）：
+ * 512 桶下桶宽是 32 个世界单位，整块密集区只能落在 5 个桶里 —— 分位数映射会把 20% 的质量挤在一步上，
+ * "一根针"原样保留。65536 桶下桶宽 0.25 个世界单位（密集区 ≈ 604 桶），一次 0.1 的推杆
+ * （0.1% 的质量 ≈ 19k 点）跨 0.8 个桶 —— 已经细过数据自身的密度。
+ * 代价实测可以忽略：同一趟采样扫描 + 40 万次桶写入，512 桶 1.07ms / 16384 桶 1.07ms / 65536 桶 1.12ms
+ * （耗时被采样上限锁在投影那几个乘法上，与桶数无关）。
+ */
+const DEPTH_BINS = 65536;
+
+/**
+ * 深度轴的「滑块百分比 → 深度」映射表：**命中点（框内 + 落在选择区域里 + 未删除/未锁定）深度分布的分位数**。
+ *
+ * 为什么换掉"沿 AABB 范围线性 + 两端压紧"（用户报的 ③「选择范围调整，无法扩展，只能收缩」，
+ * 2000 万点 / WebGPU 实测，全屏框选 19,282,378 = 100%）：
+ *
+ *   | 深度范围 | 选中点数 | 占比 |
+ *   |---|---|---|
+ *   | 0–100   | 19,282,378 | 100% |
+ *   | 10–90   | 17,956,371 | 93.1% |
+ *   | 25–75   | 16,468,657 | 85.4% |
+ *   | 40–60   | 13,930,757 | 72.2% |
+ *   | 48–52   |  2,644,133 | 13.7% |
+ *   | 49–51   |  1,332,551 |  6.9% |
+ *   | 50–50.5 |    358,006 |  1.9% |
+ *
+ * 拖 0→40 只掉 28%，而 48→50 一步掉 264 万：这张扫描件的 AABB 被远处噪声撑到半径 8297，真正看得见的
+ * 密集区只有 153（×54），而 0-100 是**沿 AABB 线性铺开**的 ⇒ 密集区挤在深度 ≈50 的一根针尖上，
+ * 滑块绝大部分行程"拉了没反应"、靠近针尖一步几百万点。体感就是"无法扩展、只能收缩"。
+ *
+ * 换成命中点深度分布的分位数之后，**中段每一单位行程切掉的质量是等分的（≈1%）**：密集区（质量占大头）
+ * 拿到与它质量相称的行程，稀疏的噪声段拿到很少的行程，且每一步的能量在所有位置一致 ——
+ * 既没有"拉了没反应"的死区，也没有"一步几百万点"的针尖。改前/改后两张实测表见
+ * `docs/probes/selection-range-20m.cjs`（同一夹具、同一命令）。
+ *
+ * 与 `tailMap` 的关系（**替换中段，两端一条不改**，不是两套并列的机制）：
+ *   0%           → u = 0        （AABB 近端 = 整段穿透，含噪声尾巴，"没有东西够不着"）
+ *   0..0.5%      → 线性升到 u = `nearEdge`（尾巴桶上沿 ⇒ 第一次推杆就切掉近端 ~2% 的质量，3.14.0 的约定）
+ *   0.5%..99.5%  → **按命中点深度分位数等分**（本表，就是这里换掉的那一段）
+ *   99.5%..100%  → 线性升到 u = 1（AABB 远端）
+ *   −50 / 150    → 两端按同样的斜率线性外推（扩边要能扩出去，绝不夹取）
+ * 采样太少（<20 个命中点）或分布退化（近端尾巴越过远端尾巴）时 `depthTravelFromBins` 返回 null，
+ * `rangeDistances` 退回与旧实现**逐位相同**的纯线性映射。左右 / 上下两个轴继续用 `tailMap`。
+ *
+ * **已知下限（量化格，不是映射的锅）**：推杆用的是 `RangeProjectionCache`，它的深度是 16 位量化的
+ * （A3，6 B/点），格宽 = 模型深度跨度 / 65535。这块夹具的深度跨度是 11466 个世界单位 ⇒ 格宽 0.175，
+ * 而等分映射在密集区里 0.5 个百分点的窗口只有 0.06 个世界单位宽 —— **比一格还窄的窗口会被量化吃掉**：
+ * 实测 `50–50.5` 选中 0（若把缓存改成 float32 则是 95,684 = 0.496%；`48–52` 这种 4 个百分点的窗口
+ * 两边都给 3.888%，不受影响）。这里选择保留 16 位，是为了让"**同一个 depth window → 同一批点**"
+ * 与改动前逐位相同（只剩映射层变了）—— 想要更细的窗口就得动缓存，那是另一笔取舍。
+ */
+export type DepthTravel = {
+    /** 累积占比：`cdf[b]` = 深度落在桶 0..b 里的命中点占全部命中点的比例（单调不减，末项 = 1） */
+    cdf: Float32Array;
+    /** 近端尾巴的边界：**累积刚过 TAIL_SHARE** 那一桶的上沿（0..1 的深度比例） */
+    nearEdge: number;
+    /** 远端尾巴的边界：**反向累积刚过 TAIL_SHARE** 那一桶的下沿（0..1 的深度比例） */
+    farEdge: number;
+};
+
+/**
+ * 0-100 的行程 -> [0,1] 的实际比例，尾巴压紧、中间线性。**左右 / 上下两个轴用的就是它**
+ * （它们的行程本来就按窗口内的实际分布压紧）。
  * `tails` 是内容区在 [0,1] 里的位置（不给就纯线性）。
  * **不做 0..100 的夹取**：扩边会把百分比推到 -50 / 150，那一段按同样的斜率线性外推
  * （夹掉的话外柄就再也扩不出去了）。
@@ -188,6 +259,109 @@ const tailBins = (bins: Uint32Array, counted: number) => {
 };
 
 /**
+ * 命中点深度直方图 → 分位数表（`DepthTravel`）。**落在同一条采样扫描里**，不额外扫一遍。
+ *
+ * 尾巴边界与 `tailBins` 同一套约定（近端取"累积刚过 TAIL_SHARE"那一桶的**上沿**、远端取对应桶的**下沿**），
+ * 只是分辨率更高（`DEPTH_BINS`）—— 好让中段的等分细过数据自身的密度。
+ *
+ * 分母用的是**桶内总数**而不是 `counted`：深度理论上必然落在 [extent.min, extent.max] 里，
+ * 但正好落在远端那个点上的高斯会算出 `bd === BINS`（被丢弃），用桶内总数才能让 `cdf` 以精确的 1 收尾。
+ */
+const depthTravelFromBins = (bins: Uint32Array): DepthTravel | null => {
+    const BINS = bins.length;
+    let total = 0;
+    for (let b = 0; b < BINS; b++) {
+        total += bins[b];
+    }
+    if (!total) {
+        return null;
+    }
+    const target = total * TAIL_SHARE;
+    let cumulative = 0;
+    let nearBin = 0;
+    for (let b = 0; b < BINS; b++) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            nearBin = b;
+            break;
+        }
+    }
+    cumulative = 0;
+    let farBin = BINS - 1;
+    for (let b = BINS - 1; b >= 0; b--) {
+        cumulative += bins[b];
+        if (cumulative >= target) {
+            farBin = b;
+            break;
+        }
+    }
+    const nearEdge = (nearBin + 1) / BINS;
+    const farEdge = farBin / BINS;
+    // 与 tailBins 同一条护栏：分布退化成一个点时不压（外层退回线性）
+    if (!(nearEdge < farEdge)) {
+        return null;
+    }
+    const cdf = new Float32Array(BINS);
+    // 用 double 累加、只把结果存成 float32：65536 桶下单个样本的增量（≈2.5e-6）在 float32 里
+    // 接近 1 时会被吃掉，累加必须在 double 里做
+    let acc = 0;
+    for (let b = 0; b < BINS; b++) {
+        acc += bins[b];
+        cdf[b] = acc / total;
+    }
+    return { cdf, nearEdge, farEdge };
+};
+
+/** 分位数表取反：质量占比 `s`（0..1）→ 沿视轴的深度比例；桶内按"质量在桶内均匀分布"线性插值。 */
+const quantileFromCdf = (cdf: Float32Array, s: number) => {
+    const BINS = cdf.length;
+    let lo = 0;
+    let hi = BINS - 1;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (cdf[mid] >= s) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    const before = lo > 0 ? cdf[lo - 1] : 0;
+    const inBin = cdf[lo] - before;
+    const t = inBin > 0 ? (s - before) / inBin : 0;
+    return (lo + (t < 0 ? 0 : (t > 1 ? 1 : t))) / BINS;
+};
+
+/**
+ * 深度轴：滑块百分比 → 沿视轴的深度比例 u ∈ [0,1]（结构见 `DepthTravel` 的注释）。
+ *
+ * 两端与 `tailMap` 逐位相同；只有 [TAIL_PERCENT, 100 - TAIL_PERCENT] 这一段从中段线性换成了
+ * 命中点深度分位数等分。外推（扩边 -50 / 150）与 `tailMap` 一样按端点斜率线性走，不夹取。
+ */
+const depthTravel = (pct: number, travel?: DepthTravel | null) => {
+    const t = pct * 0.01;
+    if (!travel) {
+        // 采样太少 / 分布退化：退回与旧实现逐位相同的纯线性映射
+        return t;
+    }
+    const edge = TAIL_PERCENT * 0.01;
+    const { cdf, nearEdge, farEdge } = travel;
+    // 近端尾巴 + 0 以下的外推（同一斜率：夹了外柄就再也扩不出去）
+    if (t <= edge) {
+        return (t / edge) * nearEdge;
+    }
+    // 远端尾巴 + 100 以上的外推
+    if (t >= 1 - edge) {
+        return farEdge + ((t - (1 - edge)) / edge) * (1 - farEdge);
+    }
+    // 中段：质量占比从 TAIL_SHARE 线性走到 1 - TAIL_SHARE，深度由分位数表给出
+    const s = TAIL_SHARE + ((t - edge) / (1 - 2 * edge)) * (1 - 2 * TAIL_SHARE);
+    const u = quantileFromCdf(cdf, s);
+    // 夹在两条尾巴边界之间：尾巴桶可能比 TAIL_SHARE 厚得多（一整面墙落在一个桶里就会），
+    // 不夹的话 t 一越过 edge 边界就**往回跳**（拖进去反而选得更多），也不再单调
+    return u < nearEdge ? nearEdge : (u > farEdge ? farEdge : u);
+};
+
+/**
  * 三条轴的两条"稀疏尾巴"，**一次采样扫描算完**（深度 + 左右 + 上下）。
  *
  * 采样：13M 点的模型上一次全扫要 ~500ms，而分布只要趋势 —— 按 stride 抽 ≤40 万点（实测这一步
@@ -207,12 +381,12 @@ export const tailFractionsCore = (
     bounds: { x0: number, y0: number, x1: number, y1: number },
     region: SelectionRangeRegion
 ): {
-    depth: { near: number, far: number } | null;
+    depth: DepthTravel | null;
     x: { near: number, far: number } | null;
     y: { near: number, far: number } | null;
 } => {
     const empty: {
-        depth: { near: number, far: number } | null;
+        depth: DepthTravel | null;
         x: { near: number, far: number } | null;
         y: { near: number, far: number } | null;
     } = { depth: null, x: null, y: null };
@@ -240,8 +414,8 @@ export const tailFractionsCore = (
         return empty;
     }
 
-    const BINS = 512;
-    const binsDepth = new Uint32Array(BINS);
+    const BINS = TAIL_BINS;
+    const binsDepth = new Uint32Array(DEPTH_BINS);
     const binsX = new Uint32Array(BINS);
     const binsY = new Uint32Array(BINS);
     const contains = region.contains;
@@ -271,10 +445,11 @@ export const tailFractionsCore = (
             continue;
         }
         counted++;
-        const bd = Math.floor((((wx - cameraPosition.x) * viewDir.x + (wy - cameraPosition.y) * viewDir.y + (wz - cameraPosition.z) * viewDir.z) - extent.min) / span * BINS);
+        // 深度直方图用 DEPTH_BINS（行程映射的分辨率，见 DEPTH_BINS），左右/上下用 TAIL_BINS
+        const bd = Math.floor((((wx - cameraPosition.x) * viewDir.x + (wy - cameraPosition.y) * viewDir.y + (wz - cameraPosition.z) * viewDir.z) - extent.min) / span * DEPTH_BINS);
         const bx = Math.floor(((sx - x0) / (x1 - x0)) * BINS);
         const by = Math.floor(((sy - y0) / (y1 - y0)) * BINS);
-        if (bd >= 0 && bd < BINS) {
+        if (bd >= 0 && bd < DEPTH_BINS) {
             binsDepth[bd]++;
         }
         if (bx >= 0 && bx < BINS) {
@@ -288,29 +463,36 @@ export const tailFractionsCore = (
     // 单击（7×7 的框）与小框在 13M 上 stride=32，采样后往往只剩几十个点，于是 tails=null ⇒
     // 退回纯线性映射 ⇒ "第一次推杆一个高斯都删不掉"，表现就是「上下左右时好时坏、连拉几次没反应」。
     // 512 桶下 20 个样本已经足够定位首次非空桶（桶里只有个位数时按"至少 1 个点"取边界），
-    // 所以门槛降到 20；真到 0~19 个点时才退回线性。
+    // 所以门槛降到 20；真到 0~19 个点时才退回线性。深度轴的门槛一样（它的分位数表同样是在这条
+    // 扫描里用同一批样本建的）。
     if (counted < 20) {
         return empty;
     }
-    return { depth: tailBins(binsDepth, counted), x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
+    return { depth: depthTravelFromBins(binsDepth), x: tailBins(binsX, counted), y: tailBins(binsY, counted) };
 };
 
 /**
  * 把 0-100% 映射到沿视轴的范围 [min, max]。
- * `tails` 给的是内容区在 [0,1] 里的比例：0%→最近端、`TAIL_PERCENT`%→内容区近端、
- * `100-TAIL_PERCENT`%→内容区远端、100%→最远端（尾巴压紧、其余线性）。不给就还是纯线性。
+ *
+ * `travel` 是**命中点深度分布的分位数表**（见 `DepthTravel` / `depthTravel`）：
+ * 0%→最近端、`TAIL_PERCENT`%→近端尾巴边界、`100-TAIL_PERCENT`%→远端尾巴边界、100%→最远端，
+ * 中间按分位数等分。不给（采样太少 / 分布退化）就退回纯线性 —— 与旧实现逐位相同。
+ *
+ * **判定逻辑一个字都没动**：同一个数值区间选出的集合仍然逐位相同，变的只有
+ * 「滑块百分比 → 区间」这一层（`selectRangeCore` / `selectRangeFromCacheCore` 里那两个
+ * `distance < minDistance || distance > maxDistance` 的比较）。
  */
 export const rangeDistances = (
     min: number,
     max: number,
     nearPct: number,
     farPct: number,
-    tails?: { near: number, far: number } | null
+    travel?: DepthTravel | null
 ) => {
     const span = max - min;
     return {
-        minDistance: min + span * tailMap(nearPct, tails),
-        maxDistance: min + span * tailMap(farPct, tails)
+        minDistance: min + span * depthTravel(nearPct, travel),
+        maxDistance: min + span * depthTravel(farPct, travel)
     };
 };
 
@@ -330,6 +512,10 @@ export type RangeProjectionCache = {
      * 反解：`distance = distMin + dist[i] * distScale`。
      * 量化区间用**模型沿视轴的深度范围**（包围盒在该轴上的投影，见 viewExtentFromBound），
      * 所有高斯都在这个区间里，所以两端（0/100 = 整段穿透）仍然精确落在 0 与 65535 上。
+     *
+     * ③ 改深度行程映射时**故意没动它**：判定逻辑（这一层比较）必须与改动前逐位相同，
+     * 而"同一个 depth window → 同一批点"这条只有在这块量化保持原样时才严格成立。
+     * 代价见 depthTravel 的注释（比一格还窄的窗口会被量化吃掉）。
      */
     dist: Uint16Array;
     /** 量化区间下限（世界单位） */
