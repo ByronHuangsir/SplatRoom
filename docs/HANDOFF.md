@@ -1,8 +1,8 @@
 # SplatRoom V3 —— 新会话交接说明（HANDOFF）
 
 > 这份文档是给**一个全新会话**（换 API KEY 后，没有本次对话记忆）看的：读完它 + `docs/进度存档.md`
-> + `docs/V3-WebGPU-现状.md` 第 6.36–6.47 节，就能无缝接着做。
-> 最后更新：3.16.0（第四十四轮）。
+> + `docs/V3-WebGPU-现状.md` 第 6.48–6.53 节，就能无缝接着做。
+> 最后更新：3.23.6（第五十一轮）。
 
 ---
 
@@ -11,13 +11,18 @@
 | 项 | 值 |
 | --- | --- |
 | 代码库 | `D:\DeepSeek\SplatRoomV2\SplatRoomV3-0` |
-| 当前版本 | **3.21.0** |
-| 产物 | `release\SplatRoom-3.21.0.exe`（122 MB，portable，已签名） |
-| 最新提交 | `f6aec70`（环模式按 V2 逻辑）；工作树干净 |
-| 技术栈 | PlayCanvas 2.21.3 / PCUI 6.1.4 / TS 6.0.3 / Rollup / Electron 43.4.0 / electron-builder 26.15.3 / i18next（9 语言，**685 个扁平键**） |
-| 一直在改的东西 | 「选区范围」面板（最近/最远、左/右、上/下，六个方块）+ 环模式的选取语义 |
-| 最近一轮做了什么 | ①环模式改回 **V2 2.5.34 的 id 拾取逻辑**（`pickPrep`+`pickRect`，去重的 id 就是选中集合；我之前多加的"与解析掩码取交"和"拾取为空回退深度带"正是用户报的"有时空/有时只剩几个"）②导出朝向修复被用户确认 ✓ |
-| 下一步建议 | 等用户在自己的 merged-scene（1300 万点）上确认环模式；若仍不对，读 V2 的上层（`SelectOp`/`edit.add` 链 + V2 rect 坐标是归一化还是像素）。详见 `docs/进度存档.md` 第 0 节 |
+| 当前版本 | **3.23.6** |
+| 产物 | `release\SplatRoom-3.23.6.exe`（122.1 MB，portable，已签名） |
+| 最新提交 | `51a1a9b`（环模式护栏套件）；工作树里另有 P0-1 续做的 8 个文件**未提交**（见下） |
+| 技术栈 | PlayCanvas 2.21.3 / PCUI 6.1.4 / TS 6.0.3 / Rollup / Electron 43.4.0 / electron-builder 26.15.3 / i18next（9 语言，**689 个扁平键**） |
+| 一直在改的东西 | 「选区范围」面板（最近/最远、左/右、上/下，六个方块）+ 环模式的选取语义；第五十~五十一轮转向**导出内存**与**2000 万点交互性能** |
+| 最近两轮做了什么 | ①**查看器/SOG 导出**从"整包在内存里组装"改成流式（1300 万点瞬时分配 4251.5 → 1979.1 MB，输出逐字节不变，`verify-viewer-stream` 8/8）②**用户的 2000 万点 / WebGPU 六项问题**：①②④⑤ 已修并实测（覆盖层不判删除位、直方图 WebGL 专用 API、取景半径被噪声撑爆、重置相机改密集区斜上方 15°），③ 根因量化完成（深度滑块有用行程是针尖；**环模式下范围滑块本就不参与**），⑥ 的 P0-2 已在 WebGPU 实测见效（排序消息 45.1→4.2 次/秒、最差帧 489.6→343.7 ms） |
+| 下一步建议 | ①收 P0-1 续做（`_tmp\p0-1-continuation-brief.md` 是给它的完整简报；补丁备份在 `_tmp\p0-1-worker\`）②落 ③ 的修法（**先问用户当时是 rings 还是 centers**）③做 P0-3（交互期降级）。详见 `docs/进度存档.md` 第 0 节与 `docs/perf/2000万点六项问题-排查发现.md` |
+
+**本轮新增的两份关键材料**（比这一页更细）：
+- `docs/perf/2000万点六项问题-排查发现.md`：六项问题的逐条根因 + 实测数字 + 待办
+- `docs/perf/supersplat-3.3.0-对比调研.md`：浏览器版 SuperSplat 3.3.0 的性能实现对比（含上游源码出处、P0/P1/P2 差异清单、量测口径与阈值）
+
 
 **用户是谁**：一个 3D 高斯泼溅（splat）摄影师/开发者，用中文沟通。他自己有测试模型，会反复推敲界面
 手感，要求"严格照设计稿"并给出可量化的验证。**他是唯一的验收人**。
@@ -107,11 +112,13 @@ src/ui/scss/select-toolbar.scss 面板样式（方块、轨道、选中带、面
 src/core/selection-flags.ts     三轴的四值状态 + localStorage + MIN_THICKNESS + normalize/merge 链式约束
 src/splat/selection-range.ts    选区几何：深度范围、屏幕窗口、尾巴分析、投影缓存、selectRange 掩码
 src/app/editor.ts               手势（rect/lasso/polygon/brush/flood）→ 选区；范围实时重切（pump）；投影缓存接线
-docs/verify/*.cjs               验证套件（36 个，其中 32 个进批量）
+docs/verify/*.cjs               验证套件（38 个，其中 37 个进批量；`verify-large-model-ui.cjs` /
+                                `verify-selection-responsiveness.cjs` / `verify-load-worker.cjs` 需要大夹具，不进批量）
 docs/probes/*.cjs               我这轮用的探针（测量方法都写在文件头注释里，见第 8 节）
-docs/V3-WebGPU-现状.md          每一轮一节（最新 6.47），"为什么这么改 + 实测数字"
+docs/perf/*.md                  2000 万点六项问题的排查发现 + 与浏览器版 SuperSplat 3.3.0 的性能对比调研
+docs/V3-WebGPU-现状.md          每一轮一节（最新 6.53），"为什么这么改 + 实测数字"
 docs/进度存档.md                交接页：当前产物 / 这一轮做了什么 / 待办 / 常用命令
-static/locales/*.json           9 语言，685 个扁平键（改文案要 9 个一起改，跑 npm run lint:locales）
+static/locales/*.json           9 语言，689 个扁平键（改文案要 9 个一起改，跑 npm run lint:locales）
 ```
 
 ---
