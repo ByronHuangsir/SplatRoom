@@ -40,6 +40,35 @@
 
 它强制 `deviceTypes: ['webgpu']`（`ss330\src\main.ts:129`），所有自定义着色器都是 WGSL（`SHADERLANGUAGE_WGSL`），**全仓没有任何 WebGL2 回退**。而本 fork 明确支持双后端（验证套件就是两边各跑一遍）⇒ 路线 B 要么**只在 WebGPU 下启用**（WebGL2 保留现有路径），要么得写一套平行 GLSL 实现。这是选择路线 B 时必须先回答的问题。
 
+### 1.3 重要更正：引擎的 unified 管线在 2.21.3 里**已经是默认**，是本 fork **主动关掉的**
+
+本轮把 2.21.3 与 2.22.1 逐文件 `git diff --no-index` 对了 433 个文件，结论推翻了我原先"引擎落后"的印象：
+
+| 事实 | 依据 |
+| --- | --- |
+| compute 投影 / 紧凑化 / `ComputeRadixSort` / indirect draw / 视锥剔除 **2.21.3 全都有** | `scene\gsplat-unified\gsplat-projector.js`（451 行）、`gsplat-interval-compaction.js`、`gsplat-hybrid-renderer.js:138-140`（`new ComputeRadixSort(device, { indirect: true })` + `new GSplatProjector` + `new GSplatIntervalCompaction`） |
+| **`unified` 在 2.21.3 里默认就是 `true`** | `framework\components\gsplat\component.js:28 _unified = true;`，注释原文：*"now defaults to true … explicitly set unified=false … note that **non-unified mode will be removed in a future release**"* |
+| WebGPU 下 **GPU 排序默认就开** | `gsplat-unified\gsplat-params.js:78,82`（`GSPLAT_RENDERER_AUTO` → WebGPU 返回 `RASTER_GPU_SORT`）；`gsplat-manager.js:171-173` → `new GSplatHybridRenderer(...)` |
+| 2.22.1 的**真增量只是 LOD/预算调度** | 新增唯一文件 `gsplat-lod-table.js`（177 行）；`gsplat-budget-balancer.js` +138/−72；`splatBudget` 默认从 `0`（不限）变 `1e6`；`lodBaseDistance`/`lodMultiplier` 被掏空成返回 0 |
+| **2.22.1 修了 2.21.3 的一个排序 bug** | `compute-radix-sort-{multipass,onesweep}.js` 的乒乓缓冲交换写错（OLD 用局部临时变量），NEW 改成按 `_values0/_values1` 判定 ⇒ **若我们在 2.21.3 上直接用 `ComputeRadixSort`，长序列/多趟排序有出错风险** |
+
+**本 fork 是在 4 处显式退出 unified 的**：`src/splat/splat.ts:292`、`src/splat/group-renderer.ts:511`、`src/merge/merge-model.ts:51`、`src/compare/compare-scene.ts:228`。而且我们从不碰 `scene.gsplat`（`grep` 零命中）。
+
+**unified 通路能容纳多少我们的自定义？**（逐项核对引擎源码）
+
+| 我们的东西 | unified 下 | 依据 |
+| --- | --- | --- |
+| 自定义**片元**着色器 | ✅ 能：覆盖 `gsplatPS` 即可，`copyMaterialSettings` 会把应用材质的 chunk 整份 copy 进去 | `gsplat-hybrid-renderer.js:51,461-467` |
+| 自定义 **MRT**（我们已有 `output.color1` 选择底色） | ✅ 能：WGSL 的 `FragmentOutput` 结构体是**扫描片元源码里的 `.colorN =` 赋值**生成第二个 attachment | `platform\graphics\webgpu\webgpu-shader-processor-wgsl.js:592-601` |
+| 自定义**顶点**着色器 | ❌ **不能原样平移**：几何已被 compute 投影器算完，hybrid VS 只读 `sortedIndices`/`projCache`/`numSplatsStorage`。可用 hook 只有 **`gsplatModifyVS`**（在投影器 compute 里**每 splat 跑一次**）；我们覆盖的 `gsplatCenterVS` / `gsplatCornerVS` **会被静默忽略** | `gsplat-projector.js:249-255,283-297`（只取 `gsplatModifyVS` / `gsplatUserVaryingsCS` / `gsplatUserCacheWriteCS`）、`:220,223`（用引擎固定源） |
+| **自带 `splatState` R8 选择状态纹理** | ⛔ **真正的卡点**：投影器 compute 的绑定组是固定的（`compactedSplatIds`/`sortKeys`/`projCache`/`work buffer`/`uniforms`），**材质参数里的纹理绑不进投影器**。要走 `GSplatFormat.addExtraStreams()` 把它变成 work buffer 的一条流才行——**我们目前 0 处使用 extra stream** | `gsplat-projector.js:202-215,221`；`scene\gsplat\gsplat-format.js:84,146` |
+| `SH_BANDS` define | ⚠️ 陷阱：hybrid 渲染器强制 `SH_BANDS="0"`，但 `copyMaterialSettings` **无条件** copy 源材质 defines ⇒ 我们 `splat.ts:202` 的值会**盖掉内部 "0"**，而 unified 的栅格阶段根本没有 SH 数据（SH 在投影器里算） | `gsplat-hybrid-renderer.js:112,452-453` |
+| `sorter.setMapping` / `instance.sorter` | ✅ 安全：`scene\gsplat\gsplat-sorter.js`、`gsplat-instance.js` 在两版之间**逐字节相同**（但切 unified 后 GPU 排序语义变化） | `git diff --no-index` 零输出 |
+
+**另外发现一个"零引擎改动、低风险"的候选**：`GSplatProcessor`（`index.js:426` 已导出，`framework\gsplat\gsplat-processor.js`）支持 `processGLSL/processWGSL` 用户钩子 + `colorBuffers`（MRT）+ 任意 `setParameter`（可传我们的选择状态纹理），是**离屏 work-buffer→work-buffer 的全屏 pass**，**不要求改 unified**。我们目前 0 处使用（`grep GSplatProcessor src/` 无命中）。
+
+**升级引擎的代价（若有人提议顺手升级）**：全树 **433 个文件**有差异（含 `deprecated\deprecated.js` −214 行、三套 build 变体 `playcanvas` / `.dbg` / `.prf`），且必须**同步重新校准 6 个被我们覆盖的 gsplat chunk**（否则丢阴影、丢 `SCENE_TEXTURE_DEPTH` 深度写入、丢 Firefox/D3D12 workaround）。**为了本轮的目的一点都不划算。**
+
 ## 2. 它的"快"具体由哪几件事构成（全部带出处）
 
 | # | 机制 | 出处 | 关键参数 / 上游实测数字 |
@@ -129,7 +158,23 @@
 2. **第二步**：路线 A 落地并按第 4 节的护栏验证（`verify-*` 双后端 + `perf-probe.cjs` 前后对照）。
 3. **第三步（可选）**：把路线 B 拆成"先只做**紧凑化 + indirect draw**（不改着色器语义）"的增量，用 `ComputeRadixSort` 替掉 worker 排序，再逐步加剔除。
 
-## 7. 待确认（已派子代理深挖，结论回来补进本文件）
+## 7. 三条路线的取舍（按"能不能量出收益"排序）
 
-- **引擎 unified 管线（`unified: true`）能否容纳自定义顶点/片元着色器与 MRT** —— 这是"自己写（照 SuperSplat）"与"打开引擎现成 unified 实现"之间的唯一分叉点。**待引擎差异子代理回报。**
-- 2.21.3 → 2.22.1 的**破坏性改动**清单（只有在想顺带升级引擎时才需要）。
+| | 路线 A：策略层 | 路线 A′：打开引擎 unified | 路线 B：自研渲染器（照 SuperSplat） |
+| --- | --- | --- | --- |
+| 内容 | 运动期降级（SH 波段 / `minPixelSize` / 降分辨率）+ 不排序 + 站定补一帧 + GPU 计时反馈 | 去掉 4 处 `unified: false`，用引擎**已经存在**的 compute 投影 + 紧凑化 + GPU 排序 + indirect draw | 自己写 projector + 紧凑化 + indirect（排序用引擎 `ComputeRadixSort`） |
+| 改动量 | **小**（几百行，纯策略 + 少量着色器） | **中**（但语义风险大：自定义 VS 必须重写成 `gsplatModifyVS`；`splatState` 必须改成 extra stream；overlay/pick/MRT 全部要重验） | **大**（上游 1198 行 + 约 40 KB WGSL，且是我们自己维护） |
+| 前置阻塞 | 无 | ① 4 处开关 ② `splatState` → extra stream ③ `gsplatCenterVS/CornerVS` 失效 ④ `SH_BANDS` 陷阱 | ① WebGPU-only（WebGL2 无回退）② 2.21.3 的 radix sort 乒乓 bug（2.22.1 才修）→ 需要自己绕或打补丁 |
+| 预期收益 | 卡顿变少/更稳；量级取决于瓶颈在哪 | 最大（上游同架构：贡献剔除 −26%、遮挡 8px 块 −41% 量级） | 同左，但完全自主可控 |
+| 建议 | **先做**（并且顺带把 GPU 计时接上，作为选路的依据） | 若量到是 GPU 瓶颈，**先做这个 spike**（比路线 B 省一个数量级的代码） | 只有当 A′ 被"状态纹理/自定义 VS"卡死、且必须 WebGPU 时，才考虑 |
+
+**关键判断顺序**（建议）：
+1. 接上 GPU 计时（照搬 `scene.ts:283-295` 的 monkey-patch），量真实扫描件的**普通帧 GPU span**：> 60 ms 才值得上重武器。
+2. 若确实 GPU-bound ⇒ 先用 **路线 A′** 做 spike：拿一个最简 splat（不带选择状态）打开 `unified`，量帧时间差；同时把"选择状态改 extra stream"的改动量估出来。
+3. 若 A′ 因状态纹理/自定义 VS 而不可行 ⇒ 再决定是自研（路线 B）还是只做 A。
+
+## 8. 待确认 / 已知技术债
+
+- **`unified: false` 是已知技术债**：引擎注释已宣告 non-unified 模式"会在未来版本移除"（`component.js:9`）。中长期要么迁 unified，要么准备自己接管渲染。
+- 2.21.3 的 `ComputeRadixSort` 乒乓交换 bug（2.22.1 修）——若走路线 B 必须先验证或打补丁。
+- SuperSplat stochastic 的分辨率/还原细节（`quadResolve`、`resolveMode`）未逐行抄录，实现时再回看 `ss330\src\blit-shader.ts:42-73`。
