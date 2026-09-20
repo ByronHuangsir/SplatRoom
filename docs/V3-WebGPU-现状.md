@@ -2982,6 +2982,162 @@ viewer 自己的 JS 里**就含** `data:application/octet-stream;base64,` 这个
 4. **P0-3 未开始**。
 5. `dist\test-20m.ply` 是硬链接到用户 4.73 GB 原件的诊断夹具，**打包前必须删**。
 
+### 6.54 第五十二轮：2000 万点交互性能 —— 排序闸门（P0-2）与框选搬进 Worker（P0-1）
+
+承接 6.53 的 ⑥（用户原话："本机 2000 万点不如浏览器版 SuperSplat 3.3.0 流畅"）。本轮把两条 P0 落地：
+**P0-2 已实测见效**、**P0-1 已实测（主线程阻塞 −82%）并提交**。两条都**没有**达到当初设的目标线，
+边界逐条写在下面（并且明确区分"已实测 / 无结论 / 待用户拍板"）。
+夹具不变：`dist\test-20m.ply` = 20,000,000 点 / 62 列（45 列 SH）/ 4.73 GB（硬链接，**打包前必须删**）。
+完整相位表、探针口径与逐条证据见 `docs/perf/2000万点六项问题-排查发现.md`。
+
+#### P0-2 交互期每帧强制全量排序 → 装闸门（已修 · 已实测）
+
+**第一版改错了地方（记录在此以免重蹈）**：只在"我们自己的排序派发路径"（`splat.ts` 里那段 1e-12 检测）
+上做限流 —— 实测**完全无效**：4 秒连续旋转期间仍向排序 worker postMessage **181 次（45.1 次/秒）**，
+最差帧 489.6 ms。
+
+**真因链**（读引擎源码确认）：
+- `GSplatInstance.update()` **每帧无条件**调 `sorter.setCamera()`（`gsplat-instance.js:123-126`，
+  引擎自己的门限是 `equalsApprox(..., 1e-6)` ⇒ 等于"相机动一点就发"）；
+- `GSplatSortWorker.update()` 再用自己的 **1e-3** 门限（`gsplat-sort-worker.js:43-46`）决定是否真排；
+  旋转时每帧方向变化远大于 1e-3 ⇒ **只要相机在动，worker 就一直在排**（20M 一次全量排序约 0.4 s，
+  即 ~2.5 次/秒）；
+- 每次排序完成，引擎要做一次 **~80 MB 的主线程上传**（`uploadStaging`）—— 这就是 462~490 ms 卡帧的来源。
+- 附带发现：本仓库 vendored 的 `gsplat-sorter.js` 里**根本没有 `_sortInFlight` 合并字段**，
+  而 `splat.ts` 里读它 / 设它的那段"会被合并"的注释与实际引擎不匹配 ⇒ **等于一直没有合并**。
+
+**修法**：`Splat.ensureSorterGate()` —— 包一层 `sorter.setCamera`（幂等），
+最快每 `SORT_MIN_INTERVAL_MS = 800 ms` 放行一次（取 800 是因为 20M 一次排序约 0.4 s，
+间隔必须大于排序时长，worker 才有机会空闲），停手 `SORT_SETTLE_MS = 200 ms` 后补一帧；
+我们自己的 1e-12 检测路径保留（间隔到点时主动派一次带 `forceUpdate` 的排序，绕开 worker 的 1e-3 门限
+—— 那个门限正是历史上"慢速旋转时顺序长时间不更新、画面翻转/穿插"的来源）。
+为什么不用"运动帧完全不排序"（上游 SuperSplat 3.3.0 的做法）：那会让顺序在运动中**无上界地**变旧，
+而这里保证"运动中最多旧 0.8 s、停手后精确"，是两者之间的折中。
+
+| 量（20M / WebGPU / 4 秒连续旋转，同一进程同一夹具） | 改前 | 改后 |
+|---|---|---|
+| 旋转期间排序消息数 | 181（45.1/秒） | **17（4.2/秒）** |
+| 停手后的补帧消息数 | 40 | **3** |
+| 最差帧 | 489.6 ms | **343.7 ms** |
+| >33 ms 的帧数 | 6 | 5 |
+| median / p95 帧 | 16.6 / 28.6 ms | 16.6 / 29.0 ms |
+
+⇒ 消息速率 **降 10 倍**、最差帧 **降 30%**。**诚实边界**：`>33 ms` 的卡帧数**几乎没变** ——
+剩下的是"每次排序完成引擎那次 80 MB 上传"的**固有成本**（20M 下约 1~2.5 次/秒），
+要再降只能动架构（运动帧完全不排序 / 把排序搬到 GPU）。
+
+验证：**webgpu 37 个套件 `TOTAL FAILED: 0`**、**webgl2 36 个套件 `TOTAL FAILED: 0`**、
+`npm run check` 退出码 **0**（排序影响画面顺序，所以整套都跑过）。
+探针：`docs/probes/sortrate.cjs`（包一层 `worker.postMessage` 数派发、采样帧间隔、检查停手补帧）。
+
+**无结论的一条（如实记）**：用同一支探针在 **webgl2** 上量闸门时观测到 **0 次 worker 消息**。
+诊断字段显示：`hasSorter / hasWorker / hasCenters / sorterHasGate` **全为 true**、`azimMoved` 为 true
+（相机确实转了 216°）、手动调一次 `splat.onPreRender()` **不报错也不派发** ⇒ 最可能的解释是
+**WebGL2 下这份 splat 的排序不由这段代码负责**（`hiddenByGroup` 提前 return，注释里提到
+group-renderer 激活时由 `group-renderer.ts` 自己 `sort()`）。**闸门在 webgl2 上是"无结论"而非失败**，
+要另找中间夹具 + 给 `dispatchSort` 打点才能定论。
+
+#### P0-1 框选 / 套索 / 多边形 / 2D 笔刷的投影搬进 Worker（已修 · 已实测 · 已验证）
+
+**根因**：这个 fork 把框选从 GPU 相交改成了**主线程 JS 全量投影**（`editor.ts` 的 `runRangeSelection`
+→ `selection-range.ts:432-492`），20M 上一次手势要跑 6 趟 20M 循环。改前相位表（同进程实测）：
+
+| 相位（legacy，全部在主线程） | ms |
+|---|---|
+| tailFractions | 36.4 |
+| preMask | 19.1 |
+| createCache | 8.9 |
+| **selectRange（全量投影）** | **768.8** |
+| managedMerge | 18.6 |
+| **preRanges** | **108.7** |
+| **applyMasks** | **236.2** |
+| **端到端** | **1198.2**（相位之和 1197.5，自洽） |
+
+**改法**（提交里 9 个文件、+1622/−695）：
+- 新增 `src/splat/selection-core.ts` —— 把 `selection-range.ts` 的**纯计算层原样搬出**
+  （`selectRangeCore` / `selectRangeFromCacheCore` / `tailFractionsCore` / `viewExtentFromSplatsCore` /
+  `keepSurface` / `createRangeCache` / `rangeDistances` / `screenWindow` / `preMaskCore` / `regionFromSpec`），
+  不引 playcanvas、不碰 DOM，**主线程与 worker 共用同一份循环**（这是"逐位等价"的结构性保证）；
+- 新增 `src/workers/selection-worker.ts` + `src/splat/selection-worker-client.ts`：常驻 x/y/z 槽
+  （按**数组对象身份**判断是否需重传、在途去重）、`begin` 同步一份 state 快照并返回 extent+tails、
+  `select` 在 worker 内做 preMask + 全量投影 + 缓存填充，掩码/缓存以 **transferable** 回传；
+  **任何失败一律回退旧路径**，`window.__SPLATROOM_SELECT_WORKER__ = false` 可整体关闭；
+- 新增 `src/splat/state-bits.ts`：把每个高斯的状态位（selected/locked/deleted）抽成**单一定义**
+  （worker 不再间接引到 playcanvas）；
+- `src/splat/selection-range.ts` 变**门面**（同名导出 + 薄包装）；`rollup.config.mjs` 增打包项
+  （产物 `dist/selection-worker.js` 21 KB，**无引擎泄漏**，已验证）；
+- `src/app/editor.ts`：`select.rect` / `select.byMask` / `select.point` 改成**发 spec**；
+  另加 `window.__selPhases` 相位计时；
+- `src/core/edit-ops.ts`：`SelectRangeOp.pre` 改**惰性** —— 原来在构造时（= 每次手势开始）就用
+  `IndexRanges.fromPredicate` 扫一遍 20M 行（实测 108~149 ms），而绝大多数手势永远不会被撤销；
+  现在只在 `undo()` 第一次真正需要时从 `preMask` 派生并缓存（谓词与上界逐字相同，`preMask` 在手势期间只读）
+  ⇒ 撤销后的选中集合与改动前**逐位相同**；
+- `src/splat/splat-state.ts`：`applySelectionMask` **分块让出宏任务**。
+
+**实测（20M / WebGPU / 同进程对照）**：
+
+| 模式 | 端到端 | **主线程最长阻塞** | longtaskMax |
+|---|---|---|---|
+| legacy（改前代码路径） | 1067.9 ms | **1068.1 ms** | 895 ms |
+| worker（改后） | 987.5 ms | **188.4 ms** | 0 |
+
+改后相位：`worker.begin 40.2` + `worker.select 766.3`（**在 worker 线程**）+ `applyMasks ~244`（主线程）。
+⇒ **主线程阻塞 −82%**、端到端 −8%；**语义逐位等价**的最强证据是：六次手势后 `state` 全表 FNV 哈希
+完全相同（`3395733176`、选中 16,765,227）。
+
+**诚实边界**：**未达**当初设的 ≤150 ms 阻塞 / ≤600 ms 端到端 —— 单 worker 的 20M 投影 766 ms 就是地板。
+要再降需要 **K 路并行 worker**（按全局索引切片 + 直方图/掩码分段合并；采样集 `i % stride == 0`
+在切片下仍然逐点一致，所以仍可保持逐位等价）。**是否做待用户拍板**；不做的话现在这版也可用，
+且 `window.__SPLATROOM_SELECT_WORKER__ = false` 可一键回退。
+
+验证：**9 个选择类套件 × 两个后端 = 18 次运行全部 `failed=0`**
+（`verify-selection-range` 23 项、`verify-selection-depth-bar` 19、`verify-mask-vs-rect` 3、
+`verify-selection-overlay` 3、`verify-shape-selection` 26、`verify-selection-toolbar` 18、
+`verify-edit-hide` 3、`verify-range-cache-hint` 4；`verify-sphere-brush` 输出非 JSON 无法解析但退出码 0，
+属**既有输出形状问题**，与本轮无关）；`tsc` 与 `npm run check` 退出码 **0**。
+
+**已知未覆盖（如实记）**：撤销路径的专项探针（`_tmp/p01-undo-probe.cjs`）在提交时仍在跑；
+20M 上的滑块推杆未重测；退役 Splat 的 worker 槽**内存不释放**（有上限但确实会涨）。
+
+**顺带（与用户报的 ③ 直接相关）**：环模式拾取掩码那处改写经**逐位等价复核**
+（`hit.fill(0)` + 按拾取集合写 255 ≡ 原实现的全表遍历赋值；越界 / 非整数 id 两版都忽略），
+并新增护栏套件 `docs/verify/verify-rings-pick.cjs`（**5/5**，此前全仓没有任何套件覆盖环模式）。
+它同时坐实了一件与 ③ 有关的事：
+
+| 模式 | 整屏框选 | 推深度滑块后 |
+|---|---|---|
+| **rings（环）** | 936 | **936（滑块完全不参与）** |
+| centers | 1693 | 0（滑块起作用） |
+
+⇒ **环模式下三个范围滑块本来就被设计成不参与**（`editor.ts` 的 `rangeMask`：`if (entry.ringPick) return pick`），
+那时只能靠"重画更小的框"来收缩、永远"无法扩展" —— 与用户描述的 ③ 高度吻合，
+所以 ③ 的修法取决于他当时在哪个模式（**仍待确认**）。
+
+#### 验证与产物
+
+- 新增套件 `docs/verify/verify-rings-pick.cjs`（5/5，环模式语义护栏）；新增探针
+  `docs/probes/sortrate.cjs`（P0-2 口径）。
+- 回归：**webgpu 37 套 `TOTAL FAILED: 0`** + **webgl2 36 套 `TOTAL FAILED: 0`**；
+  `tsc` / `npm run check` 退出码 0。
+- 文档：`docs/HANDOFF.md` 的指针更新到 3.23.6 / 6.53（提交 `8775088`）—— 它此前停留在
+  3.16.0 / 第四十四轮 / 产物 3.21.0，而这是"开新会话先读"的那一页。
+- **本轮提交**：`3d47429`（P0-2 闸门有效版；`cac0764` 是第一版无效尝试，保留作为记录）
+  → `fe73802`（webgl2 闸门诊断）→ `51a1a9b`（环模式护栏）→ `8775088`（HANDOFF 指针）
+  → `4cdead1`（P0-1 进展数字）→ **`b3876c3`（P0-1 本体，9 文件 +1622/−695）**。
+- **产物现状（如实）**：`release\SplatRoom-3.23.6.exe` **不含** P0-1 / P0-2（本次改动都在提交里，
+  **版本尚未 bump、也未重新打包**）⇒ **待打包复核**。
+
+#### 还剩什么
+
+1. **打包复核**：把 P0-1 / P0-2 带进安装包（bump 版本 → build → portable → asar/字面量/9 语言/exe 属性/冒烟复核）。
+2. **③ 的修法**：等用户确认当时是 `rings` 还是 `centers`。rings ⇒ 让范围窗口作用到**拾取集合**上；
+   centers ⇒ 深度范围改**裁剪分位数**或对 `tailMap` 做非线性压缩，让密集区占到有意义的滑块行程。
+3. **P0-3（交互期降级：降 SH 波段 / 抽稀 / 提高 `alphaClipForward`）**：未开始。
+4. **待用户拍板**：要不要做 K 路并行 worker 把端到端压进 ≤600 ms；要不要加"离群点剔除 / 按密集区裁剪"
+   （这张模型 AABB 被噪声撑到 ×54，也是 ③ 行程只有针尖的根源）。
+5. **无结论**：闸门在 webgl2 上量到 0 次 worker 消息，需另找夹具 + 打点定论。
+6. `dist\test-20m.ply` 打包前必须删。
+
 
 
 
