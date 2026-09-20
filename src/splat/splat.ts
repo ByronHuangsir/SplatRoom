@@ -965,7 +965,13 @@ class Splat extends Element {
         let sumX = 0, sumY = 0, sumZ = 0;
         let totalWeight = 0;
 
-        for (let i = 0; i < numSplats; i++) {
+        // 2026-09-20（用户 2000 万点实测 ⑥）：这里原来对**每个点**跑一次加权求和，
+        // 每点两次 Math.exp ⇒ 20M 就是 4000 万次 exp（实测秒级），而"框显所选"、
+        // 导入取景、camera.reset 每次都会调它。同一个文件里的 denseRadius() 对 >50 万点
+        // 早就改成抽样了，这里照做：抽样只影响重心的小数位，不影响取景观感。
+        const stride = numSplats > 500000 ? Math.ceil(numSplats / 200000) : 1;
+
+        for (let i = 0; i < numSplats; i += stride) {
             // opacity is stored in raw (pre-sigmoid) log space, apply sigmoid
             // to get [0,1] range. scale is in log space, exp() gives linear size.
             const op = 1 / (1 + Math.exp(-opacity[i]));
