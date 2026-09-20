@@ -83,8 +83,12 @@ class SphereShape extends Element {
         this.pivot.getWorldTransform().getTranslation(v);
         this.material.setParameter('sphere', [v.x, v.y, v.z, this.radius]);
 
+        // 必须与 box-shape.ts 用同一个尺寸：片元着色器用 `gl_FragCoord / targetSize` 还原世界射线，
+        // 所以这里是**实际光栅化目标**的像素尺寸（camera.targetSize 含交互期降级的 override），
+        // 不是画布尺寸。写错会让球体的网格画成错位的重影（同 box-shape.ts 的长注释）。
         const device = this.scene.graphicsDevice;
-        device.scope.resolve('targetSize').setValue([device.width, device.height]);
+        const size = this.scene.camera?.targetSize ?? { width: device.width, height: device.height };
+        device.scope.resolve('targetSize').setValue([size.width, size.height]);
     }
 
     moved() {

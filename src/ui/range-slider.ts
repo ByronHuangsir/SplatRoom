@@ -202,8 +202,10 @@ class RangeSlider {
                 return;
             }
             const dx = e.clientX - this.dragGrabX;
-            // 值按非线性手感走（越远越快）；滑块本身 1:1 跟手，但停在轨道里不会跑出去
-            this.setHandle(this.dragging, this.dragGrabValue + nudge(dx));
+            // 值按非线性手感走（越远越快）；滑块本身 1:1 跟手，但停在轨道里不会跑出去。
+            // 方向决定语义：背离抓取点（近端向左 / 远端向右）= 向外扩边，朝抓取点 = 向内收芯。
+            const expand = this.dragging === 'low' ? dx < 0 : dx > 0;
+            this.setHandle(this.dragging, this.dragGrabValue + nudge(dx), expand);
             const home = this.dragging === 'low' ? HOME_LOW : HOME_HIGH;
             this.dragFraction = clamp(home + dx / rect.width, 0, 1);
             this.render();
@@ -287,9 +289,20 @@ class RangeSlider {
 
     /**
      * 移动一个边界，维持 `outerLow ≤ low ≤ high ≤ outerHigh`。芯不许薄过一个步长：顶到对面就推着走。
-     * 扩边（outerLow / outerHigh）不在面板上，但内边移动时保持原来的扩边量不变。
+     *
+     * **2026-09-21：加了"向外 = 扩边、向内 = 收芯"的双语义**（用户报"范围滑块只能收缩、不能扩展"，
+     * 并同意按这个方案修）。为什么必须是两个值分别动：
+     * 判定规则（`selection-core.ts`：外窗之外直接丢；**core 与 outer 之间的带**不看形状直接选；
+     * core 之内才由画出的形状决定）意味着"选中框外的东西"**只可能来自那条带**。面板只有两个方块，
+     * 原来它们同时带动 core 与 outer（margin 恒为 0）⇒ 带永远为空 ⇒ 向框外扩展在结构上不可能
+     * （实测：屏幕轴向外推 −40/140，选中数 8506 → 8506 不变；向内推 40/60 → 174 有效）。
+     * 现在：
+     *   • **向外**（`expand = true`）：只动 outer，core 钉在框上 ⇒ 带长出来 ⇒ 框外那圈按矩形被选中，
+     *     框内仍然由画出的形状决定（套索/多边形/笔刷的形状语义不变）；
+     *   • **向内**：沿用原来的行为（core 与 outer 一起收，margin 保持）⇒ 收缩语义、含"首个小平移
+     *     就能看到变化"的手感完全不变。
      */
-    private setHandle(name: HandleName, rawValue: number) {
+    private setHandle(name: HandleName, rawValue: number, expand = false) {
         const limitMin = Math.min(this.min, this.max);
         const limitMax = Math.max(this.min, this.max);
         const value = clamp(snap(rawValue), limitMin, limitMax);
@@ -298,12 +311,20 @@ class RangeSlider {
         const marginHigh = next.outerHigh - next.high;
 
         if (name === 'low') {
-            next.low = value;
-            if (next.low > next.high - MIN_THICKNESS) {
-                next.high = Math.min(limitMax, next.low + MIN_THICKNESS);
+            if (expand) {
+                // 向外：只扩 outer（core 不动）
+                next.outerLow = Math.max(limitMin, Math.min(value, next.low));
+            } else {
+                next.low = value;
+                if (next.low > next.high - MIN_THICKNESS) {
+                    next.high = Math.min(limitMax, next.low + MIN_THICKNESS);
+                }
+                next.outerLow = Math.max(limitMin, next.low - marginLow);
+                next.outerHigh = Math.max(next.outerHigh, next.high);
             }
-            next.outerLow = Math.max(limitMin, next.low - marginLow);
-            next.outerHigh = Math.max(next.outerHigh, next.high);
+        } else if (expand) {
+            // 向外：只扩 outer（core 不动）
+            next.outerHigh = Math.min(limitMax, Math.max(value, next.high));
         } else {
             next.high = value;
             if (next.high < next.low + MIN_THICKNESS) {
@@ -361,14 +382,16 @@ class RangeSlider {
             this.computeView();
         }
 
-        const { low, high } = this._value;
+        // 选中带按 **outer** 画：向外扩边时带要跟着长出来（否则用户看不到"扩展"这件事发生了），
+        // 收芯时 outer 跟着 core 一起收，看起来与以前完全一致。
+        const { outerLow, outerHigh } = this._value;
         const width = this.trackWidth();
         const blockWidth = this.blockWidth();
         const half = blockWidth / 2;
 
         // 停靠位置：没拖动时两个滑块钉在 HOME；拖动时被拖的那个跟着指针（夹在轨道里）
-        let lowFraction = this.fractionOf(low);
-        let highFraction = this.fractionOf(high);
+        let lowFraction = this.fractionOf(outerLow);
+        let highFraction = this.fractionOf(outerHigh);
         if (this.dragging === 'low' && this.dragFraction !== null) {
             lowFraction = this.dragFraction;
         }

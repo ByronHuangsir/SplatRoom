@@ -141,6 +141,8 @@ class Scene {
     private _wasMoving = false;
     // 停手补帧的武装时刻（0 = 没有欠着的补帧）；用于在补帧落地前持续出帧，并给它一个上限
     private _settleSortArmedAt = 0;
+    // "手势静默后再要一帧"的一次性定时器句柄（见 onPreRenderInner 里的说明）
+    private _settleFrameTimer: any = 0;
 
     dataProcessor: DataProcessor;
     assetLoader: AssetLoader;
@@ -791,6 +793,26 @@ class Scene {
             performance.now()
         );
 
+        // ---- "停手"这一帧必须真的到来（2026-09-21 第六轮）------------------------------------
+        // 本应用按需渲染，而"相机停了"只能由**下一帧**观察到（cameraMotion.moving 是时间戳判定）。
+        // 用户松手后不再有指针事件 ⇒ 没有自然帧 ⇒ `_wasMoving && !moving` 那段永远不执行：
+        // 既不补"停手后的干净排序"，也没有帧去消费已完成排序的结果。
+        // 大模型上这条被"降级期间一直出帧到恢复"掩盖了，不降级（小模型/快机器）时才暴露：
+        // 实测 2000 点夹具在 2.2 s 快转结束后 1.2 s 内 `worker.postMessage` = **0** 次。
+        // 这里给手势挂一个一次性定时器：落在静默点之后要一帧；若那一帧发现还在动，就再挂一次
+        // （程序化旋转期间 ≈4 fps 的兜底帧，代价可忽略；真拖拽本来每帧都有指针事件）。
+        if (this.cameraMotion.moving) {
+            if (this._settleFrameTimer === 0) {
+                this._settleFrameTimer = setTimeout(() => {
+                    this._settleFrameTimer = 0;
+                    this.forceRender = true;
+                }, 260);
+            }
+        } else if (this._settleFrameTimer !== 0) {
+            clearTimeout(this._settleFrameTimer);
+            this._settleFrameTimer = 0;
+        }
+
         // 交互期降级：需要 GPU 每帧耗时来判断"值不值得降"，所以策略开着时就把 profiler 打开。
         // 实测代价可忽略（20M 上开/关的帧 p50 都是 ~69.6ms）；排障可整体关掉：
         //   window.__SPLATROOM_MOTION_QUALITY__ = false
@@ -854,7 +876,21 @@ class Scene {
         // 相机停手后不再有自然帧，若就此停住，画面会一直停在低分辨率（实测：不加这一条时
         // verify-motion-quality 的"停手恢复"一项失败，override 一直挂在 896x537）。
         // 恢复施加完（engaged=false 且缩放回到 1）就不再强制渲染，不会白烧电。
-        if (settleSortPending || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
+        //
+        // 2026-09-21 第六轮补上"排序在飞也要出帧"：排序结果是**异步**回来的，本应用按需渲染，
+        // 若最后一次派发之后不再出帧，那份排序永远不会被 applyPendingSorted 消费
+        // （小模型上实测：停手后 0 次派发、顺序停在旧值）。在飞标记有 3 s 超时兜底，不会无限出帧。
+        let sortInFlight = false;
+        {
+            const splats = this.getElementsByType(ElementType.splat) as Splat[];
+            for (let i = 0; i < splats.length; i++) {
+                if (splats[i].visible && splats[i].sortInFlight) {
+                    sortInFlight = true;
+                    break;
+                }
+            }
+        }
+        if (settleSortPending || sortInFlight || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
             this.forceRender = true;
         }
 

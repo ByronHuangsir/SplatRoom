@@ -92,8 +92,18 @@ class BoxShape extends Element {
         this.material.setParameter('boxInvMat', invMat.data);
         this.material.setParameter('boxLen', [this._lenX * 0.5, this._lenY * 0.5, this._lenZ  * 0.5]);
 
+        // `targetSize` 是给片元着色器把 `gl_FragCoord` 还原成世界射线用的（`clip = fragCoord /
+        // targetSize`，见 box-shape-shader.ts），所以它必须是**这个 pass 真正光栅化进去的那个
+        // render target 的像素尺寸**。
+        //
+        // 2026-09-21 修：原来写的是 `device.width/height`（画布尺寸）。在没有缩放渲染目标时两者
+        // 相等，所以一直没暴露；交互期降级会把主 render target 缩到 camera.targetSizeOverride
+        // ⇒ 射线是按错误的像素位置还原的，方块的网格/棱线会画成一份**错位的重影**
+        // （用户报"选区在移动/旋转视角时会在右上方形成一个虚影"）。用 camera.targetSize 读取即可
+        // ——它已经包含 override（camera.ts 的 get targetSize），无 override 时与原值一致。
         const device = this.scene.graphicsDevice;
-        device.scope.resolve('targetSize').setValue([device.width, device.height]);
+        const size = this.scene.camera?.targetSize ?? { width: device.width, height: device.height };
+        device.scope.resolve('targetSize').setValue([size.width, size.height]);
     }
 
     moved() {

@@ -695,11 +695,33 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     实测（3 秒快转）：`dispatchSort` 调用 **2** 次 / `worker.postMessage` **0** 次 / 完成事件 **0** 次。
     现在改用自家在飞标记（`_sortPendingSince` + `sorter.on('updated')` 清零 + 3 s 超时）与自家待办位姿。
     **教训**：凡是从"引擎某个 patch 字段"推出来的行为，先 `grep` 确认字段真的存在。
-26. **范围滑块"只能收缩、不能扩展"是结构性的，不是映射问题**（同上）：面板每轴只有两个方块，
-    它们**同时**带动 core 与 outer 两个窗口（margin 恒为 0），而"选中框外的东西"只能由 core 与 outer
-    之间的**带**产生（`selection-core.ts`：外窗之外直接丢掉；带内不看形状；core 内由形状判定）
-    ⇒ 带永远为空 ⇒ 向框外扩展不可能。实测：屏幕轴向外推 −40/140 选中数 8506 → **8506（不变）**，
-    向内推 40/60 → **174**（有效）。要支持扩展就得恢复"向外 = 扩 outer、向内 = 收 core"的双语义。
+26. **范围滑块"只能收缩、不能扩展"曾是结构性的**（2026-09-21 已修）：面板每轴两个方块原来**同时**带动
+    core 与 outer 两个窗口（margin 恒为 0），而"选中框外的东西"只能由 core 与 outer 之间的**带**产生
+    （`selection-core.ts`：外窗之外直接丢；带内不看形状；core 内由形状判定）⇒ 带永远为空 ⇒ 向框外扩展
+    在结构上不可能（实测：屏幕轴向外推 −40/140 → 8506 不变；向内推 40/60 → 174）。
+    现在按拖动方向分语义：**背离抓取点 = 只扩 outer**（框外那圈按矩形选中），**朝抓取点 = 收 core + outer**
+    （原手感不变）。护栏 `docs/verify/verify-range-expand.cjs`（8 项、真鼠标拖动）：向外 115 → **128**，
+    首个向内 20 px 128 → **126**。
+27. **排序是"快照"，20M 上快照本身要 ~0.15~0.4 s**（同上，用户报"快速旋转依然错位、短暂停留就消失"）：
+    派发频率已经能到 **54–172 ms** 一次，但单次 worker 排序 + 完成时那次 ~80 MB 主线程上传**改不了**
+    ⇒ 快速旋转时顺序必然落后。**第六轮**已按"落地时刻外推"补偿（`SORT_PREDICT_*`，见本文 5.x /
+    `docs/perf/交互期降级-实现与实测.md` §6.9）：正常拖拽 125°/s 的顺序误差 **0.123 → 0.035（−71.5%）**，
+    猛甩 375°/s **0.284 → 0.156（−45.1%）**；猛甩下的残留要靠"运动期不依赖顺序的渲染"或 GPU 排序才能解决。
+28. **`sorter.centers` 在主线程是 detached 的**（2026-09-21 新增，代价：一整轮错误结论）：
+    `GSplatSorter.init()` 把 centers 的 buffer **transfer** 给了 worker ⇒ 主线程那份 `length === 0`，
+    拿它算深度全 NaN。任何"顺序对不对"的度量都必须走 `splat.splatData` 的 x/y/z + 排序表里的**值**
+    （值就是 splatData 的原始下标）。踩坑表现：停手（顺序确定正确）也读到 0.19~0.33 的"错误率"。
+29. **闸门类逻辑绝不能建立在"对方一定会回包"之上**（2026-09-21 新增，第二次踩同一个坑）：
+    引擎的 `sorter.setCamera` **不带 `forceUpdate`**，worker 按自己的 1e-3 门限判定"没动够"就
+    `return`（`gsplat-sort-worker.js:44`）—— **不回包**。我们把"有排序在飞"标在这些请求上 ⇒
+    完成事件永不到来 ⇒ **3 s 超时之前一次都派发不出去**（实测小夹具快转 1.5 s：post 0 次）。
+    现在两条派发路都走自家 `postSort`（同一个 worker 消息 + `forceUpdate: true`）。修完 20M 上实测 λ
+    从 372 ms 回到 **155 ms**。**规则**：凡是要等回调/事件的状态机，都要确认"发送方保证会回"。
+30. **按需渲染的应用里"停手"这件事需要有人要一帧**（2026-09-21 新增）：`cameraMotion.moving` 是时间戳
+    判定，"停了"只能由**下一帧**观察到；用户松手后没有指针事件、没有自然帧 ⇒ `_wasMoving && !moving`
+    那段永远不执行（不补停手排序、也没帧消费排序结果）。大模型上被"降级期间出帧到恢复"掩盖，
+    **小模型/不降级时暴露**（实测 2000 点：快转结束后 1.2 s 内 post **0** 次）。
+    现在：手势期间挂一次性定时器（静默点后要一帧）+ `sortInFlight` 也强制出帧。
 
 ---
 
@@ -738,6 +760,9 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `histogram-20m.cjs` | 20M 夹具上的直方图专项：`infoMin/infoMax`、有柱的列数、consoleErrors（口径：`node docs/probes/histogram-20m.cjs "http://localhost:3621/?gpu=webgpu" test-20m.ply`） |
 | `selection-range-20m.cjs` | **③ 的台架**：逐档深度范围/左右轴在 20M 上的选中数（改前改后对照） |
 | `sortrate.cjs` | **P0-2 的口径**：包一层 `worker.postMessage` 数派发、采样帧间隔、检查停手补帧（`… test-20m.ply 4` 表示转 4 秒） |
+| `sort-lag.cjs` | **顺序延迟补偿的口径（第六轮）**：`disp` = "生效排序表里的次序"与"按当前相机算出的真实深度次序"的归一化平均秩差（0 = 正确，0.333 = 随机）。`SORT_LAG_DEG_PER_FRAME=6`（猛甩 375°/s，默认）/ `2`（正常拖拽 125°/s）；`SORT_LAG_MODE=baseline\|predict\|both`。**必须先看 `settledDisp` ≈ 0**，否则说明度量本身坏了（例：读 `sorter.centers` 会得到恒 0.19~0.33） |
+| `shape-ghost.cjs` | **降级期"选区虚影"的像素级口径（第六轮）**：同一相机位姿下全分辨率 vs 降级各抓一张画布像素，按 16×16 瓦片比较，并与"无形状"对照相减（`boxOverControlWorst`） |
+| `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |
 | `depthpass-probe.cjs` / `pickpass-probe.cjs` | 深度 pass / 拾取 pass 的专项 |

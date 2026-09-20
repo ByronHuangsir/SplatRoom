@@ -40,6 +40,9 @@ const _fallbackCamDir = new Vec3();
 const _fallbackLocalPos = new Vec3();
 const _fallbackLocalDir = new Vec3();
 const _fallbackInvModel = new Mat4();
+// 顺序外推的暂存（派发时写给 worker 的"落地时刻位姿"）
+const _predictPos = new Vec3();
+const _predictDir = new Vec3();
 
 // P0-2（2026-09-20，用户 2000 万点实测 ⑥）：排序派发/相机闸门的节流参数。
 //
@@ -59,6 +62,27 @@ const SORT_SETTLE_MS = 200;
 const SORT_MOVE_DEG = 2.5;
 // 派发后等不到完成事件时，多久之后认为 worker 空闲（异常兜底，避免闸门永久锁死）
 const SORT_INFLIGHT_TIMEOUT_MS = 3000;
+
+// ---- 顺序延迟补偿（2026-09-21，用户第三次报"快速旋转时依然排序错位、短暂停留后消失"）----------
+//
+// 前一轮把死掉的派发路径修活之后，顺序**确实在刷新**了，但用户看到的错位只是变短、没有消失。
+// 原因换了一层：闸门保证"顺序在动"，却没保证"顺序对应的位姿是渲染那一刻的位姿"。
+// 一次全量排序从 `postMessage` 到落到贴图要 λ 毫秒（20M 实测 150~250 ms：worker 分箱排序 +
+// 回到主线程的 ~80 MB 上传），这段延迟里相机又转过了 ω·λ —— 快速旋转（≈300°/s）就是 **45~75°**，
+// 正是"背面的内容跑到前面"。停手后错位消失，也是因为停手后补的那一帧用的是静止位姿。
+//
+// 修法（VR 姿态预测那套）：派发时**不报当下位姿，报"落地时刻"的位姿** —— 沿当前角速度/线速度
+// 外推 λ（实测延迟的滑动平均）毫秒。恒速旋转下顺序与落地时的相机对齐，错位角趋近 0；
+// 突然换向/急停时速度估计会在 ~60 ms 内衰减，最坏也只是回到"没有补偿"的老样子（不会更差）。
+// 停手补帧那条路天然免疫：速度≈0 ⇒ 外推量≈0，用的就是静止位姿。
+const SORT_PREDICT_MAX_MS = 600;        // 外推上限（延迟测量异常时不至于把位姿抛到天上去）
+const SORT_LATENCY_DEFAULT_MS = 200;    // 首帧还不知道延迟时的初值
+const SORT_LATENCY_ALPHA = 0.4;         // 延迟滑动平均权重（排序耗时抖动大，取偏保守）
+const SORT_MOTION_WINDOW_MS = 120;      // 速度估计的时间窗：窗口内位姿差 / 时间差
+const SORT_MOTION_SAMPLES = 16;         // 位姿环形缓冲长度（120 ms 窗口在 60 fps 下需要 ~8 个）
+const SORT_MOTION_BLEND = 0.5;          // 窗口估计之间的混合权重（只做轻度平滑）
+const SORT_PREDICT_MIN_DEG = 0.5;       // 外推角小于这个值就不改位姿（静止时保持逐字节一致）
+const SORT_PREDICT_MIN_RADIUS = 0.002;  // 外推位移小于模型半径的这个比例也不改（同上）
 
 const boundingPoints =
     [-1, 1].map((x) => {
@@ -137,6 +161,23 @@ class Splat extends Element {
     private readonly _sortPendingDir = new Vec3(1, 0, 0);
     private _sortHasPending = false;
     private _sortSettleAt = 0;
+
+    // ---- 顺序延迟补偿的状态（见 SORT_PREDICT_* 那段的说明）----------------------------------
+    // 位姿环形缓冲（速度估计的时间窗就是它的跨度）
+    private readonly _sortHistT = new Float64Array(SORT_MOTION_SAMPLES);
+    private readonly _sortHistDir: Vec3[] = Array.from({ length: SORT_MOTION_SAMPLES }, () => new Vec3(1, 0, 0));
+    private readonly _sortHistPos: Vec3[] = Array.from({ length: SORT_MOTION_SAMPLES }, () => new Vec3());
+    private _sortHistHead = 0;
+    private _sortHistCount = 0;
+    /** 连续"窗口内没转动"的帧数（诊断用） */
+    private _sortMotionStill = 0;
+    /** 旋转矢量速度（轴×角速度，rad/ms）。单向转时是常量；来回蹭会互相抵消 ⇒ 自动不补偿 */
+    private readonly _sortRotRate = new Vec3();
+    /** 线速度（局部单位/ms） */
+    private readonly _sortLinRate = new Vec3();
+    /** 一次排序从派发到落地的实测延迟（滑动平均，ms） */
+    private _sortLatencyMs = SORT_LATENCY_DEFAULT_MS;
+    private _sortLatencySamples = 0;
 
     selectionAlpha = 1;
 
@@ -754,15 +795,19 @@ class Splat extends Element {
         if (!sorter || sorter.__splatRoomGate) {
             return;
         }
-        const orig = sorter.setCamera.bind(sorter);
+        // 不再转发给引擎的 `setCamera`：它在 2.21.3 里只做一件事 —— 把相机 postMessage 给 worker，
+        // 而且**不带 `forceUpdate`**。这很要命：worker 收到没有 forceUpdate 的相机后会按自己的
+        // 1e-3 门限判断，若认为"没动够"就 `return`（gsplat-sort-worker.js:44）—— **不回包**，
+        // 于是完成事件永远不来，我们这道闸门会在 3 s 超时之前一直认为"有排序在飞"，
+        // **整段手势期间一次排序都派发不出去**（2026-09-21 第六轮实测：快转 1.5 s、post 0 次）。
+        // 这正是 §6.7 那类"闸门把自己锁死"的同一个坑，只是触发条件更隐蔽。
+        // 现在两条路都走 `postSort`（同一个 worker 消息 + `forceUpdate: true`），保证每次派发都有回包。
         sorter.setCamera = (pos: any, dir: any) => {
             const now = performance.now();
             if (this._sortAdmit(now, pos, dir)) {
                 this._noteSortDispatched(now, pos, dir);
-                // 引擎自己会按它的 1e-3 门限决定是否真排；这里同样标"在飞"，让自家派发等它结束
-                // （完成事件或 3 s 超时都会清掉，不会永久锁死）
-                this._sortPendingSince = now;
-                orig(pos, dir);
+                // postSort 内部会做顺序延迟补偿（把位姿外推到落地时刻）并发 `forceUpdate: true`
+                this.postSort(pos, dir);
             } else if (this._sortSettleAt === 0) {
                 // 挡下了：安排"停手后补一帧"。补帧在 onPreRender 里做（它拿到的是同一帧的相机位姿）。
                 this._sortSettleAt = now + SORT_SETTLE_MS;
@@ -798,6 +843,15 @@ class Splat extends Element {
     }
 
     /**
+     * 是否已经有一次排序在飞（含 3 s 超时兜底）。Scene 用它决定要不要继续出帧：
+     * 排序结果是异步回来的，本应用按需渲染 —— 最后一次派发之后若不再出帧，那份结果永远不会被
+     * `applyPendingSorted()` 消费，画面就停在旧顺序上（小模型/不降级场景实测如此）。
+     */
+    get sortInFlight() {
+        return this._sortInFlight(performance.now());
+    }
+
+    /**
      * 上一次派发之后相机转过的角度（度）。用**自上次派发**的位姿而不是上一帧：闸门的准入条件要回答的是
      * "顺序相对于相机已经过期多少"，而不是"这一帧动没动"。
      */
@@ -810,6 +864,141 @@ class Splat extends Element {
     /** 是否已经有一次排序在飞（完成事件见 `_onSortUpdated`） */
     private _sortInFlight(now: number) {
         return this._sortPendingSince !== 0 && now - this._sortPendingSince < SORT_INFLIGHT_TIMEOUT_MS;
+    }
+
+    /**
+     * 每帧采样一次相机位姿，估计角速度与线速度（供 `_predictSortPose` 外推用）。
+     *
+     * 速度用**固定时间窗**（SORT_MOTION_WINDOW_MS）内的位姿差来算，而不是"上一帧 → 这一帧"：
+     * 外推的跨度 λ 有几百毫秒，用一帧的差分去乘 λ 会把帧抖动直接放大成几十度的角度误差
+     * （实测 20M 上一个 6°/帧 的旋转，单帧差分估出来的速度抖 ±30%，外推 370 ms 就是 ±30°）。
+     * 窗口取 ~120 ms：拖拽的速度变化远慢于这个尺度，而比一帧稳得多。
+     *
+     * 角速度存成**旋转矢量**（轴 × 角速度）而不是"轴 + 标量"：来回蹭（方向反转）时两个相反的
+     * 旋转矢量会在 EMA 里互相抵消 → 速度估计趋近 0 → 自动退回不补偿。这比"轴也做 EMA"稳：
+     * 轴做 EMA 在换向时会出现长度趋 0 的退化向量，归一化就是 NaN。
+     */
+    private _sampleSortMotion(now: number, pos: Vec3, dir: Vec3) {
+        // 记样本（环形，够覆盖一个窗口即可）
+        const dirs = this._sortHistDir;
+        const poss = this._sortHistPos;
+        const times = this._sortHistT;
+        dirs[this._sortHistHead].copy(dir);
+        poss[this._sortHistHead].copy(pos);
+        times[this._sortHistHead] = now;
+        this._sortHistHead = (this._sortHistHead + 1) % SORT_MOTION_SAMPLES;
+        if (this._sortHistCount < SORT_MOTION_SAMPLES) {
+            this._sortHistCount++;
+        }
+
+        // 找窗口外最近的样本（要有一个 ≥ 窗口 的时间跨度）：从最新往老扫，
+        // 第一个"至少窗口这么老"的样本就是窗口端点。
+        const target = now - SORT_MOTION_WINDOW_MS;
+        let best = -1;
+        for (let age = 0; age < this._sortHistCount; age++) {
+            const idx = (this._sortHistHead - 1 - age + SORT_MOTION_SAMPLES * 2) % SORT_MOTION_SAMPLES;
+            const t = times[idx];
+            if (t <= 0 || t > target) {
+                continue;                   // 空槽 / 比窗口更新的样本：继续往前找
+            }
+            best = idx;
+            break;
+        }
+        if (best < 0) {
+            // 样本还不够长（刚开始动）：这一帧没有可信速度，保持上一次估计（衰减交给下面的窗口）
+            return;
+        }
+
+        const oldDir = dirs[best];
+        const oldPos = poss[best];
+        const dt = now - times[best];
+        if (!(dt > 1)) {
+            return;
+        }
+
+        const dot = Math.min(1, Math.max(-1, oldDir.x * dir.x + oldDir.y * dir.y + oldDir.z * dir.z));
+        const angle = Math.acos(dot);                       // rad
+        const ax = oldDir.y * dir.z - oldDir.z * dir.y;
+        const ay = oldDir.z * dir.x - oldDir.x * dir.z;
+        const az = oldDir.x * dir.y - oldDir.y * dir.x;
+        const alen = Math.sqrt(ax * ax + ay * ay + az * az);
+
+        if (alen > 1e-6) {
+            const k = angle / dt / alen;                    // 单位轴 × rad/ms
+            this._sortRotRate.set(
+                this._sortRotRate.x + (ax * k - this._sortRotRate.x) * SORT_MOTION_BLEND,
+                this._sortRotRate.y + (ay * k - this._sortRotRate.y) * SORT_MOTION_BLEND,
+                this._sortRotRate.z + (az * k - this._sortRotRate.z) * SORT_MOTION_BLEND
+            );
+            this._sortMotionStill = 0;
+        } else {
+            // 窗口内基本没转：视为静止（速度清零，别让旧速度继续外推）
+            this._sortRotRate.mulScalar(1 - SORT_MOTION_BLEND);
+            this._sortLinRate.mulScalar(1 - SORT_MOTION_BLEND);
+            this._sortMotionStill++;
+            return;
+        }
+
+        const lx = (pos.x - oldPos.x) / dt;
+        const ly = (pos.y - oldPos.y) / dt;
+        const lz = (pos.z - oldPos.z) / dt;
+        this._sortLinRate.set(
+            this._sortLinRate.x + (lx - this._sortLinRate.x) * SORT_MOTION_BLEND,
+            this._sortLinRate.y + (ly - this._sortLinRate.y) * SORT_MOTION_BLEND,
+            this._sortLinRate.z + (lz - this._sortLinRate.z) * SORT_MOTION_BLEND
+        );
+    }
+
+    /**
+     * 把位姿外推到"排序落地时刻"（`progress` 毫秒之后），结果写进 `_predictPos/_predictDir`。
+     *
+     * 方向用 Rodrigues 旋转（轴 = 旋转矢量归一化，角 = |旋转矢量| · progress，保长度）；
+     * 位置沿当前线速度直线外推。外推量小于阈值时**原样返回当前位姿**：静止/微动时送出去的
+     * 仍然是逐字节一致的位姿，行为与没有补偿时完全相同（回归面最小）。
+     *
+     * 逃生开关：`window.__SPLATROOM_SORT_PREDICT__ = false` 关掉（探针 A/B 用）。
+     */
+    private _predictSortPose(pos: Vec3, dir: Vec3, progress: number) {
+        _predictPos.copy(pos);
+        _predictDir.copy(dir);
+
+        if ((globalThis as any).__SPLATROOM_SORT_PREDICT__ === false) {
+            return;
+        }
+
+        const rx = this._sortRotRate.x;
+        const ry = this._sortRotRate.y;
+        const rz = this._sortRotRate.z;
+        const rlen = Math.sqrt(rx * rx + ry * ry + rz * rz);
+        const angle = rlen * progress;                       // rad
+        if (angle > (SORT_PREDICT_MIN_DEG * Math.PI) / 180) {
+            const nx = rx / rlen;
+            const ny = ry / rlen;
+            const nz = rz / rlen;
+            const c = Math.cos(angle);
+            const s = Math.sin(angle);
+            const d = nx * dir.x + ny * dir.y + nz * dir.z;
+            // Rodrigues: v·c + (n×v)·s + n·(n·v)·(1−c)
+            _predictDir.set(
+                dir.x * c + (ny * dir.z - nz * dir.y) * s + nx * d * (1 - c),
+                dir.y * c + (nz * dir.x - nx * dir.z) * s + ny * d * (1 - c),
+                dir.z * c + (nx * dir.y - ny * dir.x) * s + nz * d * (1 - c)
+            ).normalize();
+        }
+
+        const radius = this.worldBound ? this.worldBound.halfExtents.length() : 1;
+        const px = this._sortLinRate.x * progress;
+        const py = this._sortLinRate.y * progress;
+        const pz = this._sortLinRate.z * progress;
+        const minStep = radius * SORT_PREDICT_MIN_RADIUS;
+        if (px * px + py * py + pz * pz > minStep * minStep) {
+            _predictPos.set(pos.x + px, pos.y + py, pos.z + pz);
+        }
+    }
+
+    /** 当前该外推多少毫秒（实测延迟的滑动平均，夹在 [0, SORT_PREDICT_MAX_MS]） */
+    private _sortPredictHorizon() {
+        return Math.min(SORT_PREDICT_MAX_MS, Math.max(0, this._sortLatencyMs));
     }
 
     /**
@@ -855,6 +1044,17 @@ class Splat extends Element {
 
     /** 排序结果到达（引擎的 sorter 在收到 worker 回包时 fire 'updated'）⇒ 不再有排序在飞 */
     private _onSortUpdated() {
+        const now = performance.now();
+        if (this._sortPendingSince !== 0) {
+            // 实测延迟 = 派发 → 落地。这是外推的"进度"依据：λ 越准，顺序越对齐落地时刻。
+            const latency = now - this._sortPendingSince;
+            if (latency > 0 && latency < SORT_INFLIGHT_TIMEOUT_MS) {
+                this._sortLatencySamples++;
+                this._sortLatencyMs = this._sortLatencySamples === 1 ?
+                    latency :
+                    this._sortLatencyMs + (latency - this._sortLatencyMs) * SORT_LATENCY_ALPHA;
+            }
+        }
         this._sortPendingSince = 0;
         // 在飞期间攒下的最新位姿在这里补发（这就是 `_sortInFlight` 那个不存在的字段本想做的事）。
         // 仍然尊重最小间隔：否则在"排序很快、相机一直在动"的场景下会变成完成即发的自旋。
@@ -881,7 +1081,7 @@ class Splat extends Element {
      * 现在改成**自己的**在飞标记（`_sortPendingSince`，由完成事件 `_onSortUpdated` 清零，带 3 s 超时兜底）
      * 与**自己的**待办位姿（`_sortPendingPos/_sortPendingDir`）：在飞时只记最新位姿，完成时立刻补发一次。
      */
-    private dispatchSort(localPos: Vec3, localDir: Vec3) {
+    private dispatchSort(localPos: Vec3, localDir: Vec3, predict = true) {
         // 记录"顺序以这个位姿为准"的簿记（无论这次是真发还是排队，都会成为最新一次请求）
         this._noteSortDispatched(performance.now(), localPos, localDir);
 
@@ -892,19 +1092,27 @@ class Splat extends Element {
             this._sortHasPending = true;
             return;
         }
-        this.postSort(localPos, localDir);
+        this.postSort(localPos, localDir, predict);
     }
 
-    /** 真正把一次排序请求发给 worker（并标上"在飞"时刻） */
-    private postSort(localPos: Vec3, localDir: Vec3) {
+    /**
+     * 真正把一次排序请求发给 worker（并标上"在飞"时刻）。
+     *
+     * `predict`：是否做顺序延迟补偿（外推到落地时刻）。**停手补帧必须传 false** ——
+     * 那帧是用户静止时看到的"最终画面"，速度估计还没衰减干净（τ=60 ms，停手 200 ms 后仍有 ~3.6%），
+     * 外推会把静止帧的顺序故意推偏几度。静止帧要的是逐字节精确。
+     */
+    private postSort(localPos: Vec3, localDir: Vec3, predict = true) {
         try {
             const ws = this.entity?.gsplat?.instance?.sorter as any;
             if (!ws || !ws.worker) {
                 return;
             }
+            // 与 `ensureSorterGate` 里那条路一致：送"落地时刻"的位姿（顺序延迟补偿）
+            this._predictSortPose(localPos, localDir, predict ? this._sortPredictHorizon() : 0);
             ws.worker.postMessage({
-                cameraPosition: { x: localPos.x, y: localPos.y, z: localPos.z },
-                cameraDirection: { x: localDir.x, y: localDir.y, z: localDir.z },
+                cameraPosition: { x: _predictPos.x, y: _predictPos.y, z: _predictPos.z },
+                cameraDirection: { x: _predictDir.x, y: _predictDir.y, z: _predictDir.z },
                 forceUpdate: true
             });
             this._sortPendingSince = performance.now();
@@ -1007,6 +1215,8 @@ class Splat extends Element {
             // 限到 SORT_MIN_INTERVAL_MS 一次，**停手后 SORT_SETTLE_MS 再补一帧**，
             // 保证最终画面与静止帧一致。
             const now = performance.now();
+            // 顺序延迟补偿的速度估计（每帧采样；不管这一帧派不派发都要采，否则外推用的是陈旧速度）
+            this._sampleSortMotion(now, _fallbackLocalPos, _fallbackLocalDir);
             if (moved) {
                 this._sortLastPos.copy(_fallbackLocalPos);
                 this._sortLastDir.copy(_fallbackLocalDir);
@@ -1022,8 +1232,9 @@ class Splat extends Element {
                 // 相机真的停了（连续 SORT_SETTLE_MS 没有位移）→ 补最后一帧。
                 // 注意这里**不能**在"还没到点"时把 deadline 往后推：空闲帧会一直推，
                 // 补帧就永远不会发生（第一版就是这么写的）。
+                // `predict = false`：静止帧要的是精确顺序，不做延迟补偿（见 postSort 的说明）。
                 this._noteSortDispatched(now, _fallbackLocalPos, _fallbackLocalDir);
-                this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir);
+                this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir, false);
             }
         }
 
