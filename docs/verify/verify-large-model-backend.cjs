@@ -9,7 +9,7 @@
 //
 // usage: node docs/verify/verify-large-model-backend.cjs <modelPathUnderDist> [backend] [url]
 //   node docs/verify/verify-large-model-backend.cjs big-model.ply webgpu http://localhost:3621/
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { analysePng } = require('./lib/png.cjs');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

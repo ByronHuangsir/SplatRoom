@@ -1,7 +1,7 @@
 // Why do 左右/上下 feel dead? Pushes each x/y block with a real mouse and counts what changes,
 // then dumps where the content sits inside the gesture box (the same analysis that fixed 最近/最远).
 // usage: node xy-probe.cjs [model] [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'big-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

@@ -17,7 +17,7 @@
 // 一个都没有时**跳过**（failed=0，skipped=true），不假装通过。
 //
 // usage: node docs/verify/verify-viewer-large.cjs [url] [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const TARGET = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

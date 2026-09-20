@@ -1,5 +1,5 @@
 // 时间线/数据面板高度调整验证：上沿 handle 存在 + 拖拽改高度
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {

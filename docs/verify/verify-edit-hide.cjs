@@ -1,6 +1,6 @@
 // Verify a core editing feature on a chosen backend: hide-all must empty the viewport.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
-const { decodePng } = require('D:/DeepSeek/SplatRoomV2/SplatRoomV3-0/docs/verify/lib/png.cjs');
+const puppeteer = require('puppeteer-core');
+const { decodePng } = require('./lib/png.cjs');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

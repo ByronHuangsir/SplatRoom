@@ -14,7 +14,7 @@
 //      viewer 起得来、控制台没有报错。
 //
 // usage: node docs/verify/verify-viewer-stream.cjs [url] [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const path = require('path');

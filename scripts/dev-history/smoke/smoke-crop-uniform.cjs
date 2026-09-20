@@ -2,7 +2,7 @@
 // 1. cylinder 有 4 个 shape 手柄、sphere 有 2 个
 // 2. uniformScale=true：box → extent 三轴相等；cylinder → x==z；sphere → 三轴相等
 // 3. 三种形状 × 等比开 → 渲染稳定、shader 零错误
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

@@ -19,7 +19,7 @@
 //      NOT be selected)
 //
 // usage: node docs/verify/verify-floater-biggrid.cjs [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const path = require('path');
 const { execFileSync } = require('child_process');
 

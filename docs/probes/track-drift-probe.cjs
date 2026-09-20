@@ -1,5 +1,5 @@
 // Does the dragged block stay under the pointer today? Logs pointerX vs the block centre every step.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';

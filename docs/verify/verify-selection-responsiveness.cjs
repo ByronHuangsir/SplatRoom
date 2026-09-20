@@ -26,7 +26,7 @@
 // usage: node docs/verify/verify-selection-responsiveness.cjs [url] [model]
 //   model defaults to scan.ply (the T1 fixture, needs dist\scan.ply, so it is NOT part of the
 //   batch); test-model.ply also works.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

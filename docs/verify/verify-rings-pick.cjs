@@ -11,7 +11,7 @@
 //      见 editor.ts 的 rangeMask：`if (entry.ringPick) return pick`）；切回 centers 后滑块**会**改变。
 //
 // usage: node docs/verify/verify-rings-pick.cjs [url] [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const TARGET = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

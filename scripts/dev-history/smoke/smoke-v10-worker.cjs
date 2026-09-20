@@ -2,7 +2,7 @@
 // 1. 应用启动无 page error
 // 2. _ensureSortWorker() 创建 Worker 成功
 // 3. Worker 排序结果与同步 _cpuDepthSort 参考实现完全一致
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

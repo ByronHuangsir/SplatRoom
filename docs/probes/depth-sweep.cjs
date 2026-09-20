@@ -1,7 +1,7 @@
 // How much of the depth axis's 0..100 actually contains splats? Sweeps the far/near bound on the
 // real 931k scan and counts what each step removes — i.e. "does the first slide show a change?".
 // usage: node depth-sweep.cjs [model] [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'big-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

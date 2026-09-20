@@ -1,6 +1,6 @@
 /* SplatRoom 探索存档 HTML → PDF 生成脚本（puppeteer-core + Edge） */
 const path = require('path');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const DOCS = __dirname;
 const HTML = path.join(DOCS, 'merge-tool-exploration-archive.html');

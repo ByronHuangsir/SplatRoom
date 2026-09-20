@@ -8,7 +8,7 @@
 // usage: node export-flip.cjs [model] [url]
 const path = require('path');
 const fs = require('fs');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { decodePng } = require(path.join(__dirname, '..', '..', 'docs', 'verify', 'lib', 'png.cjs'));
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'floater-scale-test.ply';
@@ -113,7 +113,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
         return btoa(s);
     }, [W, H]);
     const png = Buffer.from(exported, 'base64');
-    const outFile = 'D:/DeepSeek/SplatRoomV2/_tmp/export-' + expect.backend + '.png';
+    const outFile = path.join(__dirname, '..', '..', '..', '_tmp', 'export-' + expect.backend + '.png');
     fs.writeFileSync(outFile, png);
     console.log(`exported ${png.length} bytes -> ${outFile}`);
 

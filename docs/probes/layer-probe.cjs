@@ -1,5 +1,5 @@
 // Which element sits under the pointer across the low block, at the default (zero expansion) state?
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';

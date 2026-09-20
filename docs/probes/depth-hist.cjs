@@ -1,7 +1,7 @@
 // Where is the selected content along the view axis? Dumps the depth histogram of the splats a
 // through-pass gesture selects, so the "empty tail" can be defined by density instead of quantiles.
 // usage: node depth-hist.cjs [model] [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'big-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

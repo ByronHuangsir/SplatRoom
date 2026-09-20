@@ -20,7 +20,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 // puppeteer-core lives in the managed workspace node_modules (not in this project).
 const PUPPETEER_CANDIDATES = [
-    'C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core',
+    'puppeteer-core',
     'puppeteer-core'
 ];
 let puppeteer;

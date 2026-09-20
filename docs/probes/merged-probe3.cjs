@@ -4,9 +4,9 @@
 //  - if not, along which axis is the cut?
 const fs = require('fs');
 const http = require('http');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const PLY = process.argv[2] || 'D:/DeepSeek/SplatRoomV2/选择工具/merged-scene.ply';
+const PLY = process.argv[2] || require('path').join(__dirname, '..', '..', 'dist', 'merged-scene.ply');
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const PORT = 3998;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

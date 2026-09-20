@@ -1,7 +1,7 @@
 // 3.11.0: how does the drag feel when the thickness is already very thin?
 // Sets the x core to a given span, then drags the low block 22px at a time (real mouse) and
 // records the value + the on-screen gap, so we can quote "how many px for one 0.1 step".
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';

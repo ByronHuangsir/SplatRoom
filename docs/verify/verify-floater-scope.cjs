@@ -13,7 +13,7 @@
 //
 // usage: node docs/verify/verify-floater-scope.cjs "<url>" [model]
 const path = require('path');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

@@ -2,7 +2,7 @@
 // view sorter + splatOrder texture even when the PiP render throws mid-phase.
 // NOTE: material.getParameter('splatOrder') returns a Uniform object; the
 // texture is at `.data` (see material.js getParameter → parameters[name]).
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

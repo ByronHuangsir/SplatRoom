@@ -2,7 +2,7 @@
 // 量 ≥8MB 分配合计、单次最大分配与耗时（本会话用它标定 src/app/file-handler.ts 里的 memoryMultiple）。
 // 需要 dist\merged-scene.ply（或 scan.ply）在站点目录里；导入偶发挂住时页内自动重试。
 // 用法：node docs/probes/viewer-ab-13m.cjs <url> [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'merged-scene.ply';

@@ -1,6 +1,6 @@
 // Clean A/B: render main view WITHOUT PiP, then WITH PiP active,
 // comparing exact object references of sorter / orderTexture / splatOrder param.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

@@ -1,5 +1,5 @@
 // 修复验证：1) 球体手柄切换回来后重新挂载（reattach）；2) 渲染菜单子面板已 append。
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {

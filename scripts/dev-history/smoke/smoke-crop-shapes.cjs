@@ -2,7 +2,7 @@
 // 1. 模型 + crop 工具激活
 // 2. 依次切换 cylinder / sphere，改 radius / height → 渲染多帧
 // 3. shader 无编译错误、无 page error、截图非空
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const path = require('path');
 const fs = require('fs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

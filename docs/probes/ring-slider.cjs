@@ -2,7 +2,7 @@
 // The bug (audit selection.md #1): rangePost used to recompute the analytic through-pass mask on every
 // push, silently replacing the picked surface. After the fix the entry keeps its ringPick mask.
 // usage: node ring-slider.cjs [model] [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'big-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

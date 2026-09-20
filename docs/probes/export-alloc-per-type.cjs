@@ -1,6 +1,6 @@
 // 诊断 ④ 的真正归属：逐个导出类型量分配（用"假 stream"走流式路径，隔离序列化器自身）。
 // 用法：node export-alloc-per-type.cjs <url> [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'scan.ply';

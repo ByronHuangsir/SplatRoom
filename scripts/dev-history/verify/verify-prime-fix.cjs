@@ -1,5 +1,5 @@
 // Verify: Prime removed → model renders correctly (no "near small / far big")
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

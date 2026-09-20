@@ -16,7 +16,7 @@
 // usage: node docs/verify/verify-load-worker.cjs [url] [model]
 //   the model must exist under dist/ — for the T1 fixture copy _tmp\scan.ply to dist\scan.ply
 //   and DELETE it afterwards (otherwise it ends up inside the packaged asar).
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 

@@ -16,13 +16,13 @@
 //
 // usage: node docs/verify/verify-pip-camera.cjs "<url>" [model]
 const fs = require('fs');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { decodePng } = require('./lib/png.cjs');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
-const OUT = 'D:/DeepSeek/SplatRoomV2/_tmp';
+const OUT = require('path').join(__dirname, '..', '..', '..', '_tmp');
 const GW = 48;
 const GH = 27;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

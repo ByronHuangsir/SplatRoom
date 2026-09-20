@@ -2,7 +2,7 @@
 // 1. shape 手柄是 capsule（type: 'capsule'）
 // 2. uniform OFF：拖 cylinder X+ 缘手柄 → 只改 extent.x（x != z 椭圆）
 // 3. uniform ON：拖 X+ 缘 → setState enforce → x == z（正圆）
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

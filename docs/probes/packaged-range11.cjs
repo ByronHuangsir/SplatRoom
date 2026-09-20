@@ -1,12 +1,13 @@
 // 3.14.0 packaged end-to-end on the real 931k scan: a REAL mouse push of 最远 / 最近 must change the
 // selection on the very first small move (the user's "首次滑动就能看到选区范围的变化").
+const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { spawn } = require('child_process');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
-const EXE = process.argv[2] || 'D:/DeepSeek/SplatRoomV2/SplatRoomV3-0/release/win-unpacked/SplatRoom.exe';
-const SCAN = 'D:/DeepSeek/SplatRoomV2/_tmp/scan.ply';
+const EXE = process.argv[2] || path.join(__dirname, '..', '..', 'release', 'win-unpacked', 'SplatRoom.exe');
+const SCAN = path.join(__dirname, '..', '..', '..', '_tmp', 'scan.ply');
 const PORT = 3999;
 const DEBUG_PORT = 9222;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

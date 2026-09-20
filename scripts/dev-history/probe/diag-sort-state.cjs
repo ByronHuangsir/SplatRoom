@@ -1,6 +1,6 @@
 // Diagnose: is the sorter's applyPendingSorted ever returning a real count?
 // Sample instancingCount / numSplats / cameras[] over 10 seconds at startup.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

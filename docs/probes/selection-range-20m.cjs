@@ -4,7 +4,7 @@
 // 实测结论（test-20m.ply）：0–100→19,282,378；40–60→13,930,757；48–52→2,644,133；
 // 50–50.5→358,006 ⇒ 有用行程是一根针（密集区挤在深度 ≈50），这是"拉了没反应"的根因。
 // 用法：node docs/probes/selection-range-20m.cjs <url> [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';

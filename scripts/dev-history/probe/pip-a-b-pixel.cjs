@@ -1,7 +1,7 @@
 // A/B: 4k model. Compare MAIN VIEW pixels BEFORE vs AFTER PiP activation.
 // Hooks the culler to record whether instance.cameras gets populated during
 // an actual render frame (which triggers the engine's update() → sort()).
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

@@ -9,7 +9,7 @@
 // (select in the front view, orbit to the side, drag the two sliders).
 //
 // usage: node docs/verify/verify-selection-range.cjs "<url>" [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

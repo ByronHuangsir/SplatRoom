@@ -2,7 +2,7 @@
 // The rings-mode surface band only kept 100 of 104,707 splats, and selectDepthBand skips every splat
 // whose pixel came back null — so this measures the readback itself.
 // usage: node depthpass-probe.cjs [model] [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'test-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

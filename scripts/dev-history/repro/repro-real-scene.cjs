@@ -1,6 +1,6 @@
 // Reproduce "near small / far big" with the USER'S REAL model (668MB, 14M gaussians).
 // Load, wait for sort, screenshot, sample sort state over time.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

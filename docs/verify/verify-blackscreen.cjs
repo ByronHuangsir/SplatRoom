@@ -1,4 +1,4 @@
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'https://59c60cb96be04e9c8494bfb8ab3639d4.bj10.agentos-app.net/?mode=merge';
 

@@ -90,6 +90,7 @@
         "eslint-import-resolver-typescript": "4.4.5",
         "globals": "17.7.0",
         "postcss": "^8.5.26",
+        "puppeteer-core": "^25.11.0",
         "rollup": "4.62.2",
         "rollup-plugin-scss": "4.0.1",
         "sass": "1.101.0",

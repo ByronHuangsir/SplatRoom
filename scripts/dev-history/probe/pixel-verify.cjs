@@ -1,7 +1,7 @@
 // Pixel-level verification with the USER'S REAL 14M model.
 // Load → wait for sort → capture pixel stats (color variance = blotch detection)
 // → activate PiP (timeline + camera keyframes) → capture again → compare.
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

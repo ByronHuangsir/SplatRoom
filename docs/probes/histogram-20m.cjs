@@ -1,7 +1,7 @@
 // 直方图在带 SH 的大夹具上的验证：WebGPU 的 bin pass（GSPLAT_BIN_QUADS）与 SH_BANDS 正交，
 // DC-only 夹具测不到 SH 变体 —— 本探针补这一条：打开数据面板，数直方图柱子与非黑列，并盯 console error。
 // 用法：node docs/probes/histogram-20m.cjs <url> [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';

@@ -13,7 +13,7 @@
 // 行数照样对、内容全错。逐行比值才能抓住这种静默错误。
 //
 // usage: node docs/verify/verify-export-roundtrip.cjs [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';

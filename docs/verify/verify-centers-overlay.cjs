@@ -3,7 +3,7 @@
 // visible splat. Turning it on must visibly change the frame.
 //
 // usage: node docs/verify/verify-centers-overlay.cjs "<url>" [model]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { decodePng } = require('./lib/png.cjs');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

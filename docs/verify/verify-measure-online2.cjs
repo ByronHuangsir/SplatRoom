@@ -1,4 +1,4 @@
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = 'https://f569b13a56304425a2bfc4913482fb60.app.codebuddy.work';
 

@@ -1,4 +1,4 @@
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 (async () => {
   const browser = await puppeteer.launch({

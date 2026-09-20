@@ -1,5 +1,5 @@
 // 手柄模式冒烟测试：验证按钮→事件→active 态，以及浏览模式 class 应用/恢复
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

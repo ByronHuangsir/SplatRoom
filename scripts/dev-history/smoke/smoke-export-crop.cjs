@@ -1,6 +1,6 @@
 // 导出裁剪冒烟测试：裁切盒裁剪后导出 PLY，应只含盒内高斯（< 原始 4000），
 // 且导出后 state 恢复（盒外高斯不再标记 deleted）。
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

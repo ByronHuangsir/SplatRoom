@@ -1,6 +1,7 @@
-﻿const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
+const path = require('path');
 const fs = require('fs');
-const { decodePng } = require('D:/DeepSeek/SplatRoomV2/SplatRoomV3-0/docs/verify/lib/png.cjs');
+const { decodePng } = require(path.join(__dirname, '..', 'verify', 'lib', 'png.cjs'));
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 (async () => {
@@ -33,6 +34,6 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     });
     console.log(JSON.stringify(geo, null, 1));
     const box = await page.evaluate(() => { const b = document.getElementById('selection-range-bar').getBoundingClientRect(); return { x: Math.floor(b.left) - 4, y: Math.floor(b.top) - 4, width: Math.ceil(b.width) + 8, height: Math.ceil(b.height) + 8 }; });
-    await page.screenshot({ path: 'D:/DeepSeek/SplatRoomV2/_tmp/panel2.png', clip: box });
+    await page.screenshot({ path: path.join(__dirname, '..', '..', '..', '_tmp', 'panel2.png'), clip: box });
     await browser.close();
 })().catch(e => { console.log('FATAL ' + e); process.exit(1); });

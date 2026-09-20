@@ -1,6 +1,6 @@
 // 拖拽修复冒烟测试：验证 drop/dragover 在 document 任意位置都被 preventDefault
 //（浏览器默认"打开/下载"行为被拦截），且应用无报错。
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {

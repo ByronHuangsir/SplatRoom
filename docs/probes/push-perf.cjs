@@ -1,6 +1,6 @@
 // How long does ONE slider push take to land (the thing that makes dragging feel sticky)?
 // usage: node push-perf.cjs <modelNameUnderDist> [url]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const MODEL = process.argv[2] || 'test-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';

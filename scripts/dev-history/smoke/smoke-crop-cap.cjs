@@ -2,7 +2,7 @@
 // 1. 应用 + ?load 模型启动无错误
 // 2. 激活 crop 工具并启用 → 渲染多帧 → shader 无编译错误（cap uniforms/逻辑）
 // 3. 截图确认画面非空白（cap 面板渲染路径正常）
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const path = require('path');
 const fs = require('fs');
 

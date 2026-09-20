@@ -3,7 +3,7 @@
 //   · 帧间隔分布（max 帧应显著下降）
 //   · 停手后是否真的补了最后一帧（画面顺序最终是"按最终位姿排序"）
 // 用法：node sortrate.cjs <url> [model] [seconds]
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'merged-scene.ply';

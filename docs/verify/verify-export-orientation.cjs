@@ -16,7 +16,7 @@
 //     del dist\big-model.ply        # 打包前必须删（否则会被打进 asar）
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { decodePng } = require(path.join(__dirname, 'lib', 'png.cjs'));
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';

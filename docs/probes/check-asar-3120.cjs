@@ -1,5 +1,6 @@
-const asar = require('D:/DeepSeek/SplatRoomV2/SplatRoomV3-0/node_modules/@electron/asar');
-const src = 'D:/DeepSeek/SplatRoomV2/SplatRoomV3-0/release/win-unpacked/resources/app.asar';
+const path = require('path');
+const asar = require('@electron/asar');
+const src = path.join(__dirname, '..', '..', 'release', 'win-unpacked', 'resources', 'app.asar');
 const raw = asar.listPackage(src).map(f => f.replace(/\\/g, '/').replace(/^\/+/, ''));
 const idx = asar.extractFile(src, 'dist/index.js').toString('utf8');
 const cssPath = raw.find(f => f.toLowerCase().endsWith('.css'));
