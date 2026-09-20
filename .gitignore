@@ -43,3 +43,4 @@ seg-lab/*.jpg
 # 未入库的一次性调试脚本（归档但不提交）
 scripts/dev-history/local/
 _tmp/
+release/
