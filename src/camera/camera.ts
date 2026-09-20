@@ -565,8 +565,18 @@ class Camera extends Element {
         this.finalPass = new SimpleRenderPass(device,
             new ShaderQuad(device, vertexShader, fragmentShader, 'final-blit'), {
                 vars: () => {
+                    // blitScale maps the destination backbuffer pixel to a texel of the main target.
+                    // It is (1, 1) whenever the two are the same size; it differs while the
+                    // interaction-time degradation renders into a smaller target, and without it the
+                    // blit copies 1:1 and leaves the rest of the frame black (see blit-shader.ts).
+                    const dstWidth = device.width;
+                    const dstHeight = device.height;
                     return {
-                        srcTexture: this.mainTarget.colorBuffer
+                        srcTexture: this.mainTarget.colorBuffer,
+                        blitScale: [
+                            dstWidth > 0 ? this.mainTarget.width / dstWidth : 1,
+                            dstHeight > 0 ? this.mainTarget.height / dstHeight : 1
+                        ]
                     };
                 }
             });

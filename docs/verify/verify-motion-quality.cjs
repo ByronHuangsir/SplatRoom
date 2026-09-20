@@ -17,11 +17,52 @@
 //
 // usage: node docs/verify/verify-motion-quality.cjs "<url>" [model]
 const puppeteer = require('puppeteer-core');
+const { decodePng } = require('./lib/png.cjs');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Coverage of the lit content over the FULL canvas. Guards the blit: the final pass copies the
+// offscreen main target onto the backbuffer, and it used to be a 1:1 `texelFetch` copy, which is only
+// correct while the two are the same size. The moment the degradation shrinks the target, a 1:1 copy
+// leaves the picture in the bottom-left with the rest of the frame reading out-of-range texels —
+// reported by the user on 2026-09-21 as "移动、缩放时画面会收缩到左下角，在上部、右部产生黑色空间".
+// Measured with the old copy: degraded lit 31.4% vs settled 76.3%, top-right quadrant 40.2% vs 92.7%.
+const canvasCoverage = async (page) => {
+    const clip = await page.evaluate(() => {
+        const c = document.querySelector('canvas').getBoundingClientRect();
+        return {
+            x: Math.round(c.x),
+            y: Math.round(c.y),
+            width: Math.max(1, Math.round(c.width)),
+            height: Math.max(1, Math.round(c.height))
+        };
+    });
+    const png = await page.screenshot({ type: 'png', clip });
+    const img = decodePng(Buffer.from(png));
+    let lit = 0;
+    let maxX = -1;
+    let minY = img.height;
+    for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) {
+            const i = (y * img.width + x) * img.channels;
+            if (Math.max(img.data[i], img.data[i + 1], img.data[i + 2]) > 60) {
+                lit++;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+            }
+        }
+    }
+    return {
+        size: `${img.width}x${img.height}`,
+        litPercent: +((lit / (img.width * img.height)) * 100).toFixed(1),
+        rightMarginPx: maxX < 0 ? img.width : img.width - 1 - maxX,
+        topMarginPx: minY >= img.height ? img.height : minY
+    };
+};
+
 
 (async () => {
     const browser = await puppeteer.launch({
@@ -57,8 +98,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }
     await sleep(3000);
 
-    const state = () => page.evaluate(() => {
-        const scene = window.scene;
+    const state = () => page.evaluate(() => {        const scene = window.scene;
         const cam = scene.camera;
         return {
             engaged: scene.motionQuality.engaged,
@@ -214,6 +254,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         check('the settle sort is issued, not left pending',
             owed !== null && owed.pending === false,
             `sortSettlePending after the drag = ${owed ? owed.pending : 'null'}`);
+
+        // ---- the degraded frame must still cover the whole canvas ----
+        // A 1:1 blit regression is invisible to every other check here (the render target *is*
+        // smaller, the state is correct, the restore works) yet ruins the picture on screen.
+        const settledCoverage = await canvasCoverage(page);
+        const spin = rotate(1500);
+        await sleep(700);                                   // degraded and rendering
+        const degradedCoverage = await canvasCoverage(page);
+        const degradedState = await state();
+        await spin;
+        check('while degraded the image still fills the canvas (no black corner)',
+            degradedState.engaged === true &&
+            degradedCoverage.rightMarginPx <= 16 && degradedCoverage.topMarginPx <= 16 &&
+            degradedCoverage.litPercent >= settledCoverage.litPercent * 0.6,
+            `degraded ${degradedCoverage.size} margins right/top = ${degradedCoverage.rightMarginPx}/${degradedCoverage.topMarginPx} px, ` +
+            `lit ${degradedCoverage.litPercent}% (settled ${settledCoverage.litPercent}%, engaged=${degradedState.engaged}, scale=${degradedState.renderScale})`);
 
         await page.evaluate(() => {
             delete window.__SPLATROOM_MOTION_QUALITY__;
