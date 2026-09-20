@@ -67,6 +67,8 @@
 
 **另外发现一个"零引擎改动、低风险"的候选**：`GSplatProcessor`（`index.js:426` 已导出，`framework\gsplat\gsplat-processor.js`）支持 `processGLSL/processWGSL` 用户钩子 + `colorBuffers`（MRT）+ 任意 `setParameter`（可传我们的选择状态纹理），是**离屏 work-buffer→work-buffer 的全屏 pass**，**不要求改 unified**。我们目前 0 处使用（`grep GSplatProcessor src/` 无命中）。
 
+**还有一条与"状态纹理卡点"直接相关的官方通道**：`GSplatVaryings`（`index.js:147` 已导出，`scene.gsplat.varyings`）允许注册自定义 per-splat 值，由投影器写进**投影缓存**（`gsplatUserCacheWriteCS` → `projCache[base + word] = value`），再由 hybrid 顶点着色器读回（`gsplatUserCacheReadVS`）。它解决的是"**把每高斯的值从投影阶段带进片元阶段**"——正是我们 `output.color1`（选择底色 MRT）那类需求的正规通道；但**它不能替我们解决"投影器怎么读到我们的选择状态"**（那仍然只能靠 extra stream）。两版都有此 API。
+
 **升级引擎的代价（若有人提议顺手升级）**：全树 **433 个文件**有差异（含 `deprecated\deprecated.js` −214 行、三套 build 变体 `playcanvas` / `.dbg` / `.prf`），且必须**同步重新校准 6 个被我们覆盖的 gsplat chunk**（否则丢阴影、丢 `SCENE_TEXTURE_DEPTH` 深度写入、丢 Firefox/D3D12 workaround）。**为了本轮的目的一点都不划算。**
 
 ## 2. 它的"快"具体由哪几件事构成（全部带出处）
