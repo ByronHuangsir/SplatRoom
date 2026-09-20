@@ -42,12 +42,23 @@ const _fallbackLocalDir = new Vec3();
 const _fallbackInvModel = new Mat4();
 
 // P0-2（2026-09-20，用户 2000 万点实测 ⑥）：排序派发/相机闸门的节流参数。
-// 为什么是 800 ms：20M 一次全量排序约 0.4 s，把放行间隔设在"一次排序时长"之上，
-// worker 才有机会空闲（实测限流前它只要相机在动就一直排 ≈2.5 次/秒，每次排序完成
-// 引擎要做一次 ~80 MB 主线程上传 ⇒ 轨道旋转 max 帧 462~490 ms）。
-// 停手 200 ms 后补一帧，保证静止画面用的仍是最终位姿的顺序。
-const SORT_MIN_INTERVAL_MS = 800;
+//
+// 2026-09-21 用户报「快速移动/旋转视角时会出现排序错误 —— 背面的内容跑到前面遮挡住正常画面」
+// ⇒ 闸门从"固定 800 ms 一次"改成**"动得够多 + 上一次排序已完成 + 不早于 200 ms"**：
+//   • 固定间隔的问题：快速旋转时 800 ms 内相机能转过很大角度，顺序过期得离谱（实测该夹具上
+//     4 秒旋转期间只派发 1~2 次，甚至 0 次 ⇒ 顺序基本是冻结的，背面自然盖到前面）。
+//   • 新的准入条件把"顺序新鲜度"绑在**相机转了多远**上，而不是挂了多久；同时用完成事件
+//     （`sorter.on('updated')` / 引擎 scene 的 `gsplat:sorted`）保证同一时刻只有一次排序在飞，
+//     worker 不会被请求淹没（它自己的 1e-3 门限在快速旋转时等于"每帧都排"）。
+//   • 代价：快速旋转时排序次数会向 worker 的上限（20M ≈2.5 次/秒）靠拢，每次完成仍有一次
+//     ~80 MB 主线程上传 —— 用户明确说"排序错误比卡帧更严重"，所以先保正确性。
+const SORT_MIN_INTERVAL_MS = 200;
 const SORT_SETTLE_MS = 200;
+// 相机自上次派发以来转过的角度超过这个值才值得再排一次（度）。取值理由：20M 一次排序 ~0.4 s，
+// 快速拖动时 2.5° 大约对应"顺序该刷新了"的观感阈值；慢速平移几乎不触发消耗。
+const SORT_MOVE_DEG = 2.5;
+// 派发后等不到完成事件时，多久之后认为 worker 空闲（异常兜底，避免闸门永久锁死）
+const SORT_INFLIGHT_TIMEOUT_MS = 3000;
 
 const boundingPoints =
     [-1, 1].map((x) => {
@@ -116,6 +127,15 @@ class Splat extends Element {
     // 见 onPreRender 里那段的注释：每帧派发全量排序会让 worker 100% 饱和（实测轨道旋转
     // max 帧 462.8 ms、3 秒内 5 帧 >33 ms），而上游 SuperSplat 3.3.0 在运动帧**根本不排序**。
     private _sortLastDispatch = 0;
+    // 上一次派发时的相机位姿（局部空间）：准入判定用"相对上次派发动了多远"，不是"这一帧动没动"
+    private readonly _sortDispatchPos = new Vec3();
+    private readonly _sortDispatchDir = new Vec3(1, 0, 0);
+    // 派发时刻（0 = 没有排序在飞）；完成事件到达时清零
+    private _sortPendingSince = 0;
+    // 在飞期间攒下的最新待办位姿（自己的合并，见 dispatchSort）
+    private readonly _sortPendingPos = new Vec3();
+    private readonly _sortPendingDir = new Vec3(1, 0, 0);
+    private _sortHasPending = false;
     private _sortSettleAt = 0;
 
     selectionAlpha = 1;
@@ -673,12 +693,18 @@ class Splat extends Element {
         this.scene.events.on('view.bands', this.rebuildMaterial, this);
         this.rebuildMaterial(this.scene.events.invoke('view.bands'));
 
+        // 排序完成信号：引擎的 GSplatSorter 收到 worker 回包时会 fire 'updated'
+        // （gsplat-sorter.js:28-32），闸门靠它知道"这一次排序已经结束、可以派下一次了"。
+        // 这正是 `_sortInFlight` 那个不存在的补丁字段本来该干的事（引擎 2.21.3 里没有它）。
+        this.entity.gsplat.instance.sorter?.on('updated', this._onSortUpdated, this);
+
         // we must update state in case the state data was loaded from ply
         await this.updateState();
     }
 
     remove() {
         this.scene.events.off('view.bands', this.rebuildMaterial, this);
+        this.entity.gsplat.instance.sorter?.off('updated', this._onSortUpdated, this);
 
         this.scene.contentRoot.removeChild(this.entity);
         this.scene.boundDirty = true;
@@ -717,10 +743,12 @@ class Splat extends Element {
      * 4 秒内 6 帧 >33 ms（同机 idle median 16.6 ms）。
      * 所以只在"我们自己的派发"上做限流是没用的（实测：限流后仍 45 次/秒 postMessage）。
      *
-     * 闸门规则：最快每 SORT_MIN_INTERVAL_MS 放行一次；被挡下的调用记住最新位姿，
-     * 相机停稳 SORT_SETTLE_MS 后补发一帧 —— 静止画面用的仍是最终位姿的顺序。
-     * 这与上游 SuperSplat 3.3.0 的策略同向（它运动帧完全不排序），只是我们仍保证 ~1 次/秒的
-     * 顺序刷新，避免早期"顺序长时间不更新导致画面翻转/穿插"那个老问题（那段历史见下面 onPreRender 的注释）。
+     * 闸门规则（2026-09-21 起，见 `_sortAdmit`）：**不早于 SORT_MIN_INTERVAL_MS + 没有排序在飞 +
+     * 自上次派发以来相机转够了角度（或位移够多）**；被挡下的调用记住最新位姿，相机停稳 SORT_SETTLE_MS
+     * 后补发一帧 —— 静止画面用的仍是最终位姿的顺序。
+     * 旧版是"最快每 800 ms 放行一次"（纯时间间隔）：用户实测"快速旋转时背面内容跑到前面"，
+     * 因为 800 ms 内相机能转过很大角度；而且实测整段手势有时一次都没派发（4 秒旋转只 1~2 次、甚至 0 次）。
+     * 新规则把顺序新鲜度绑在**动了多远**上，并靠完成事件保证 worker 不被淹没。
      */
     private ensureSorterGate(sorter: any) {
         if (!sorter || sorter.__splatRoomGate) {
@@ -729,9 +757,11 @@ class Splat extends Element {
         const orig = sorter.setCamera.bind(sorter);
         sorter.setCamera = (pos: any, dir: any) => {
             const now = performance.now();
-            if (now - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
-                this._sortLastDispatch = now;
-                this._sortSettleAt = 0;
+            if (this._sortAdmit(now, pos, dir)) {
+                this._noteSortDispatched(now, pos, dir);
+                // 引擎自己会按它的 1e-3 门限决定是否真排；这里同样标"在飞"，让自家派发等它结束
+                // （完成事件或 3 s 超时都会清掉，不会永久锁死）
+                this._sortPendingSince = now;
                 orig(pos, dir);
             } else if (this._sortSettleAt === 0) {
                 // 挡下了：安排"停手后补一帧"。补帧在 onPreRender 里做（它拿到的是同一帧的相机位姿）。
@@ -768,34 +798,116 @@ class Splat extends Element {
     }
 
     /**
+     * 上一次派发之后相机转过的角度（度）。用**自上次派发**的位姿而不是上一帧：闸门的准入条件要回答的是
+     * "顺序相对于相机已经过期多少"，而不是"这一帧动没动"。
+     */
+    private _sortAngleSinceDispatch(localDir: Vec3) {
+        const d = this._sortDispatchDir;
+        const dot = Math.min(1, Math.max(-1, d.x * localDir.x + d.y * localDir.y + d.z * localDir.z));
+        return (Math.acos(dot) * 180) / Math.PI;
+    }
+
+    /** 是否已经有一次排序在飞（完成事件见 `_onSortUpdated`） */
+    private _sortInFlight(now: number) {
+        return this._sortPendingSince !== 0 && now - this._sortPendingSince < SORT_INFLIGHT_TIMEOUT_MS;
+    }
+
+    /**
+     * 闸门与自家派发**共用**的准入判定（P0-3 v2，2026-09-21）：
+     *   ① 不早于 SORT_MIN_INTERVAL_MS（地板，避免把 worker 淹没）；
+     *   ② 同一时刻只有一次排序在飞（靠完成事件，而不是时间猜）；
+     *   ③ 自上次派发以来相机**转够了角度**、或**位移够多**（按模型尺寸比例）—— 顺序新鲜度绑在"动得多远"上。
+     * 为什么不是固定间隔：用户实测"快速旋转时背面内容跑到前面"，而固定 800 ms 在快转时能转过很大角度；
+     * 固定间隔还解释不了"整段手势一次都没派发"（实测 4 秒旋转只派发 1~2 次、有时 0 次）。
+     */
+    private _sortAdmit(now: number, localPos: Vec3, localDir: Vec3) {
+        if (now - this._sortLastDispatch < SORT_MIN_INTERVAL_MS) {
+            return false;
+        }
+        if (this._sortInFlight(now)) {
+            return false;
+        }
+        if (this._sortAngleSinceDispatch(localDir) > SORT_MOVE_DEG) {
+            return true;
+        }
+        // 纯平移（视角方向不变）也要能刷新顺序：按模型半径的 1% 作为"动够了"的位置阈值
+        const radius = this.worldBound ? this.worldBound.halfExtents.length() : 0;
+        if (!(radius > 0)) {
+            return false;
+        }
+        const dx = localPos.x - this._sortDispatchPos.x;
+        const dy = localPos.y - this._sortDispatchPos.y;
+        const dz = localPos.z - this._sortDispatchPos.z;
+        return dx * dx + dy * dy + dz * dz > (radius * 0.01) * (radius * 0.01);
+    }
+
+    /**
+     * 记下"顺序以这个位姿为准"（簿记）。**不**设置在飞标记 —— 在飞标记只有真正发出请求时才置位
+     * （见 postSort），否则 `dispatchSort` 会把自己刚记的簿记误判成"已有排序在飞"而永远只排队不发送
+     * （第一版就是这么写错的，实测 posts 恒为 0）。
+     */
+    private _noteSortDispatched(now: number, localPos: Vec3, localDir: Vec3) {
+        this._sortLastDispatch = now;
+        this._sortDispatchPos.copy(localPos);
+        this._sortDispatchDir.copy(localDir);
+        this._sortSettleAt = 0;
+    }
+
+    /** 排序结果到达（引擎的 sorter 在收到 worker 回包时 fire 'updated'）⇒ 不再有排序在飞 */
+    private _onSortUpdated() {
+        this._sortPendingSince = 0;
+        // 在飞期间攒下的最新位姿在这里补发（这就是 `_sortInFlight` 那个不存在的字段本想做的事）。
+        // 仍然尊重最小间隔：否则在"排序很快、相机一直在动"的场景下会变成完成即发的自旋。
+        if (this._sortHasPending && performance.now() - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
+            this._sortHasPending = false;
+            this.postSort(this._sortPendingPos, this._sortPendingDir);
+        }
+    }
+
+    /**
      * 直接给排序 worker 派一次全量排序（绕开引擎 1e-3 的 epsilon 门限）。
      *
      * 引擎的 `GSplatInstance.sort()` 对相机方向用 `equalsApprox(..., 1e-3)`：缓慢旋转时
      * 每帧方向变化约 1e-4，远小于门限 ⇒ 引擎把请求丢掉、worker 一直用旧顺序（画面"翻转/穿插"）。
      * 所以这里自己按 splat 局部坐标的相机位姿直接 `postMessage`，并带 `forceUpdate: true`。
-     * `_sortInFlight` 的合并逻辑（gsplat-sorter.js 的补丁）保证同一时刻只有一个排序在飞，
-     * 飞行期间只记一个"待办位姿"——所以这里派发多少次都不会堆队列。
+     *
+     * ⚠️ **2026-09-21 修掉一个"永久卡死"的老 bug**：这里原来用 `ws._sortInFlight` / `ws._pendingCamera`
+     * 做合并，但**这两个字段在本机引擎（playcanvas 2.21.3）里根本不存在**
+     * （`grep -r _sortInFlight node_modules/playcanvas` 零命中；交接包 5.3 节记过"没有合并"，
+     * 但没意识到它更严重的后果）：第一次派发把 `ws._sortInFlight = true` 之后，**再没有任何代码会清它**
+     * ⇒ 此后每一次派发都走进 `_pendingCamera` 分支**只记录、不发送**，也就是**这条派发路径从此彻底死掉**。
+     * 实测（`_tmp/admit-diag.cjs`，3 秒快转）：`dispatchSort` 被调用 2 次、`worker.postMessage` **0 次**、
+     * 完成事件 0 次 —— 顺序一直冻结在旧位姿上，正是用户报的"快速旋转时背面内容跑到前面"。
+     * 现在改成**自己的**在飞标记（`_sortPendingSince`，由完成事件 `_onSortUpdated` 清零，带 3 s 超时兜底）
+     * 与**自己的**待办位姿（`_sortPendingPos/_sortPendingDir`）：在飞时只记最新位姿，完成时立刻补发一次。
      */
     private dispatchSort(localPos: Vec3, localDir: Vec3) {
+        // 记录"顺序以这个位姿为准"的簿记（无论这次是真发还是排队，都会成为最新一次请求）
+        this._noteSortDispatched(performance.now(), localPos, localDir);
+
+        if (this._sortInFlight(performance.now())) {
+            // 已有一次排序在飞：只记最新位姿，等完成事件到达时补发（真正的合并）
+            this._sortPendingPos.copy(localPos);
+            this._sortPendingDir.copy(localDir);
+            this._sortHasPending = true;
+            return;
+        }
+        this.postSort(localPos, localDir);
+    }
+
+    /** 真正把一次排序请求发给 worker（并标上"在飞"时刻） */
+    private postSort(localPos: Vec3, localDir: Vec3) {
         try {
-            const inst = this.entity?.gsplat?.instance;
-            const ws = inst?.sorter as any;
+            const ws = this.entity?.gsplat?.instance?.sorter as any;
             if (!ws || !ws.worker) {
                 return;
             }
-            if (ws._sortInFlight) {
-                ws._pendingCamera = {
-                    pos: { x: localPos.x, y: localPos.y, z: localPos.z },
-                    dir: { x: localDir.x, y: localDir.y, z: localDir.z }
-                };
-            } else {
-                ws._sortInFlight = true;
-                ws.worker.postMessage({
-                    cameraPosition: { x: localPos.x, y: localPos.y, z: localPos.z },
-                    cameraDirection: { x: localDir.x, y: localDir.y, z: localDir.z },
-                    forceUpdate: true
-                });
-            }
+            ws.worker.postMessage({
+                cameraPosition: { x: localPos.x, y: localPos.y, z: localPos.z },
+                cameraDirection: { x: localDir.x, y: localDir.y, z: localDir.z },
+                forceUpdate: true
+            });
+            this._sortPendingSince = performance.now();
         } catch (e) {
             // best-effort：排序失败不该影响渲染
         }
@@ -898,21 +1010,19 @@ class Splat extends Element {
             if (moved) {
                 this._sortLastPos.copy(_fallbackLocalPos);
                 this._sortLastDir.copy(_fallbackLocalDir);
-                if (now - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
-                    // 间隔到了：这一帧用的就是最新位姿，不需要再补帧
-                    this._sortLastDispatch = now;
-                    this._sortSettleAt = 0;
+                if (this._sortAdmit(now, _fallbackLocalPos, _fallbackLocalDir)) {
+                    // 间隔/在飞/位移都允许：这一帧用的就是最新位姿，不需要再补帧
+                    this._noteSortDispatched(now, _fallbackLocalPos, _fallbackLocalDir);
                     this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir);
                 } else if (this._sortSettleAt === 0) {
-                    // 被最小间隔挡下了：安排"停手后补一帧干净排序"
+                    // 被准入条件挡下了：安排"停手后补一帧干净排序"
                     this._sortSettleAt = now + SORT_SETTLE_MS;
                 }
             } else if (this._sortSettleAt !== 0 && now >= this._sortSettleAt) {
                 // 相机真的停了（连续 SORT_SETTLE_MS 没有位移）→ 补最后一帧。
                 // 注意这里**不能**在"还没到点"时把 deadline 往后推：空闲帧会一直推，
                 // 补帧就永远不会发生（第一版就是这么写的）。
-                this._sortSettleAt = 0;
-                this._sortLastDispatch = now;
+                this._noteSortDispatched(now, _fallbackLocalPos, _fallbackLocalDir);
                 this.dispatchSort(_fallbackLocalPos, _fallbackLocalDir);
             }
         }

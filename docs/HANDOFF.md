@@ -688,6 +688,18 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     ⇒ **所有合成旋转/拖动的探针都必须自己 `scene.forceRender = true`**
     （`gpu-frame-probe.cjs` / `perf-probe.cjs` / A/B 脚本一直如此；`verify-motion-quality.cjs` 漏了、已修）。
     推论：**"程序里转动相机"和"用户真的在拖"不是等价场景** —— 前者要显式请求帧。
+25. **`_sortInFlight` / `_pendingCamera` 在引擎里不存在，而且会把排序派发路径"锁死"**（2026-09-21 新增，
+    用户报"快速旋转时背面内容跑到前面"的根因）：`Splat.dispatchSort()` 原来用这两个字段做合并，
+    但 `grep -r _sortInFlight node_modules/playcanvas` **零命中**。第一次派发把 `ws._sortInFlight = true`
+    之后**没有任何代码会清它** ⇒ 之后每次派发都只写进 `_pendingCamera`、**永远不再发 worker 消息**。
+    实测（3 秒快转）：`dispatchSort` 调用 **2** 次 / `worker.postMessage` **0** 次 / 完成事件 **0** 次。
+    现在改用自家在飞标记（`_sortPendingSince` + `sorter.on('updated')` 清零 + 3 s 超时）与自家待办位姿。
+    **教训**：凡是从"引擎某个 patch 字段"推出来的行为，先 `grep` 确认字段真的存在。
+26. **范围滑块"只能收缩、不能扩展"是结构性的，不是映射问题**（同上）：面板每轴只有两个方块，
+    它们**同时**带动 core 与 outer 两个窗口（margin 恒为 0），而"选中框外的东西"只能由 core 与 outer
+    之间的**带**产生（`selection-core.ts`：外窗之外直接丢掉；带内不看形状；core 内由形状判定）
+    ⇒ 带永远为空 ⇒ 向框外扩展不可能。实测：屏幕轴向外推 −40/140 选中数 8506 → **8506（不变）**，
+    向内推 40/60 → **174**（有效）。要支持扩展就得恢复"向外 = 扩 outer、向内 = 收 core"的双语义。
 
 ---
 

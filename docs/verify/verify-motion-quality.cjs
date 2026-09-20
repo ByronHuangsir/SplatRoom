@@ -220,26 +220,41 @@ const canvasCoverage = async (page) => {
         });
         await sleep(300);
 
-        // sample _sortLastDispatch while dragging: each change is one dispatch opportunity the 800 ms
-        // throttle allowed through
-        const dispatchSamples = [];
-        const sampler = (async () => {
-            for (let i = 0; i < 26; i++) {
-                dispatchSamples.push((await gateState()).lastDispatch);
-                await sleep(100);
+        // Count real worker posts, not just dispatch opportunities. The check exists because the
+        // dispatch path was found **permanently dead** (2026-09-21): it gated on `ws._sortInFlight`,
+        // a field that does not exist in this engine, so after the first dispatch every later request
+        // was written to a `_pendingCamera` branch and never sent (measured: 2 calls, 0 posts). The
+        // user-visible symptom was exactly the reported one — during a fast rotation the order stayed
+        // frozen, so back-facing splats drew in front.
+        await page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            const ws = splat.entity.gsplat.instance.sorter;
+            if (ws && ws.worker && !ws.worker.__counted) {
+                const real = ws.worker.postMessage.bind(ws.worker);
+                ws.worker.__posts = 0;
+                ws.worker.postMessage = (msg, ...rest) => {
+                    ws.worker.__posts++;
+                    return real(msg, ...rest);
+                };
+                ws.worker.__counted = true;
             }
-        })();
+        });
+        const posts = () => page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            const ws = splat && splat.entity.gsplat.instance.sorter;
+            return ws && ws.worker ? ws.worker.__posts : null;
+        });
+        const postsBefore = await posts();
         await rotate(2500);
-        await sampler;
-        let allowedChanges = 0;
-        for (let i = 1; i < dispatchSamples.length; i++) {
-            if (dispatchSamples[i] !== dispatchSamples[i - 1]) {
-                allowedChanges++;
-            }
-        }
-        check('the 800 ms sorter gate still limits dispatch opportunities during a 2.5 s drag',
-            allowedChanges >= 1 && allowedChanges <= 6,
-            `dispatch opportunities allowed during the drag = ${allowedChanges} (2.5 s / 800 ms ≈ 3)`);
+        const postsAfter = await posts();
+        const postsDuring = postsAfter - postsBefore;
+
+        check('a fast drag keeps issuing sorts (the order is not frozen)',
+            postsBefore !== null && postsDuring >= 2,
+            `worker posts during a 2.5 s drag = ${postsDuring} (must be > 0; a dead dispatch path reports 0)`);
+        check('sorts during a drag stay bounded (no request flood)',
+            postsDuring <= 80,
+            `worker posts during a 2.5 s drag = ${postsDuring} (floor is 200 ms plus the 2.5 deg motion gate)`);
 
         // the settle sort must be consumed, not left owed (this is the deadlock guard: the armed frame
         // only happens if something keeps rendering)
