@@ -216,8 +216,15 @@ class SelectRangeOp implements EditOp {
 
     private preMask: Uint8Array;
 
-    // the gesture-start selection in range form: undo needs to set it back
-    private pre: IndexRanges;
+    // the gesture-start selection in range form: undo needs to set it back.
+    //
+    // **惰性**（2026-09-20）：原来是在构造时（= 每次手势开始时）就用
+    // `IndexRanges.fromPredicate` 扫一遍 20M 行建好，实测 108–149ms —— 占"框选期间最长阻塞"
+    // 的三分之一强，而绝大多数手势**永远不会被撤销**。现在只在 `undo()` 第一次真正需要时派生并缓存。
+    // 派生用的谓词与原来构造时用的逐字相同（`preMask[i] !== 0`，上界同样是 numSplats =
+    // preMask.length），输入 preMask 在手势期间是只读的（applySelectionMask / revertSelectionMask
+    // 都只读它），所以撤销之后的选中集合与改动前**逐位相同**。
+    private pre: IndexRanges | null = null;
 
     // rows this op owns (monotonic; see SplatState.applySelectionMask)
     private managed: Uint8Array;
@@ -229,14 +236,12 @@ class SelectRangeOp implements EditOp {
     constructor(
         splat: Splat,
         preMask: Uint8Array,
-        pre: IndexRanges,
         mask: Uint8Array,
         managed: Uint8Array,
         op: SelectionOp
     ) {
         this.splat = splat;
         this.preMask = preMask;
-        this.pre = pre;
         this.mask = mask;
         this.managed = managed;
         this.op = op;
@@ -247,15 +252,20 @@ class SelectRangeOp implements EditOp {
         this.mask = mask;
     }
 
+    /** 手势开始时的选中集（不含 locked），按需派生一次并缓存。 */
+    private preRanges(): IndexRanges {
+        return (this.pre ??= IndexRanges.fromPredicate(this.preMask.length, i => this.preMask[i] !== 0));
+    }
+
     async do() {
-        this.splat.state.applySelectionMask(this.preMask, this.mask, this.managed, this.op);
+        await this.splat.state.applySelectionMask(this.preMask, this.mask, this.managed, this.op);
         await this.splat.updateState(State.selected);
     }
 
     async undo() {
         const { state } = this.splat;
-        state.revertSelectionMask(this.preMask, this.mask, this.managed, this.op);
-        state.setBits(this.pre, State.selected);
+        await state.revertSelectionMask(this.preMask, this.mask, this.managed, this.op);
+        state.setBits(this.preRanges(), State.selected);
         await this.splat.updateState(State.selected);
     }
 

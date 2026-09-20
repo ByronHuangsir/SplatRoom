@@ -6,7 +6,6 @@ import { EditHistory } from '../core/edit-history';
 import { SelectAllOp, SelectNoneOp, SelectInvertOp, SelectOp, SelectRangeOp, HideSelectionOp, UnhideAllOp, DeleteSelectionOp, UndeleteSelectionOp, ResetOp, MultiOp, AddSplatOp, SurfaceRefineOp, EditOp } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { healInpaint, getSelectedIndices, HealParams } from '../core/heal-inpaint';
-import { IndexRanges } from '../core/index-ranges';
 import { getDepthSelection, getScreenRange, getScreenSelection } from '../core/selection-flags';
 import { detectProblems, applyFix, PlanarFixParams, PlanarFixSession } from '../geometry/planar-fix';
 import { semanticSelect } from '../geometry/semantic-select';
@@ -18,7 +17,9 @@ import { Element, ElementType } from '../scene/element';
 import type { GridPlane } from '../scene/infinite-grid';
 import { Scene } from '../scene/scene';
 import { selectDepthBand } from '../splat/selection-band';
-import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import type { SelectionRegionSpec } from '../splat/selection-core';
+import { RangeProjectionCache, SelectionRangeRegion, SelectionRangeView, createRangeCache, regionFromSpec, selectRange, selectRangeFromCache, rangeDistances, screenWindow, tailFractions, vec3Like, viewExtentFromBound, viewExtentFromSplats } from '../splat/selection-range';
+import { prepareSlot, prewarmSplats, workerAnalyze, workerSelect } from '../splat/selection-worker-client';
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State, SelectionOp } from '../splat/splat-state';
@@ -1037,12 +1038,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // the model's depth extent along the pose's view axis: the world bound is the cheap
     // path, a per-splat scan the fallback (the WebGPU bound readback returns zeros, see
-    // splat.updateLocalBounds, and a degenerate extent would select nothing at all)
-    const poseExtent = (splat: Splat, pose: ReturnType<typeof poseSnapshot>) => {
-        return viewExtentFromBound(splat.worldBound, pose.cameraPosition, pose.viewDir) ??
-            viewExtentFromSplats(splat, splat.worldTransform.data, pose.cameraPosition, pose.viewDir) ??
-            { min: 0, max: 1 };
-    };
+    // splat.updateLocalBounds, and a degenerate extent would select nothing at all).
+    // 这两步现在都在 analyzeEntry 里（包围盒那一步 O(1) 留在主线程，逐点扫描那一步交给 worker）。
 
     // O2: opKind 的枚举形式，给 SplatState 那趟写位循环用（免得内层循环里比字符串）
     const selectionOps: Record<'add' | 'remove' | 'set' | 'intersect', SelectionOp> = {
@@ -1088,6 +1085,113 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         return {};
     };
 
+    // ---- 相位计时（量测用）：`window.__selPhases` 里留一份上一杆各阶段的毫秒数 ----
+    // 只有 ~10 次 push，代价可以忽略；它是"主线程到底把时间花在哪"的唯一直接证据
+    // （20M 上拆过一次：投影 + 缓存分配填充约 700ms、preMask / managed 各一趟 20M 循环）。
+    const selPhase = (name: string, ms: number) => {
+        const w = window as any;
+        (w.__selPhases ??= []).push({ name, ms: +ms.toFixed(2) });
+    };
+    const selPhaseClear = () => {
+        (window as any).__selPhases = [];
+    };
+    const phase = async <T>(name: string, fn: () => T | Promise<T>): Promise<T> => {
+        const t = performance.now();
+        const v = await fn();
+        selPhase(name, performance.now() - t);
+        return v;
+    };
+
+    /**
+     * 一次手势的**第一步**：量三条轴的稀疏尾巴（`tails`），必要时量深度范围。
+     *
+     * 深度范围先用包围盒（`viewExtentFromBound`，O(1)）；包围盒退化时（WebGPU 的 bound 回读返回全零）
+     * 才退化成逐点扫描 —— 20M 上那是几百毫秒，所以这一趟也交给 worker（它有 x/y/z）。
+     * worker 不可用/出错时原样退回主线程，结果完全一致。
+     */
+    const analyzeEntry = async (
+        splat: Splat,
+        spec: SelectionRegionSpec,
+        region: SelectionRangeRegion,
+        pose: ReturnType<typeof poseSnapshot>,
+        state: Uint8Array,
+        bounds: { x0: number, y0: number, x1: number, y1: number }
+    ) => {
+        const boundExtent = viewExtentFromBound(splat.worldBound, pose.cameraPosition, pose.viewDir);
+        const slot = await phase('resolveSlot', () => prepareSlot(splat));
+        if (slot !== null) {
+            const w = await phase('worker.begin', () => workerAnalyze(
+                slot,
+                spec,
+                state,
+                { ...pose, worldTransform: splat.worldTransform.data },
+                bounds,
+                boundExtent
+            ));
+            if (w) {
+                return {
+                    extent: w.extent,
+                    depthTails: w.tails.depth,
+                    screenTails: { x: w.tails.x, y: w.tails.y }
+                };
+            }
+        }
+        // 回退：主线程（原样保留的旧路径，与改动前逐字一致）
+        const extent = await phase('extent', () => boundExtent ??
+            viewExtentFromSplats(splat, splat.worldTransform.data, pose.cameraPosition, pose.viewDir) ??
+            { min: 0, max: 1 });
+        const analyzed = await phase('tailFractions', () => tailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, extent, bounds, region));
+        return { extent, depthTails: analyzed.depth, screenTails: { x: analyzed.x, y: analyzed.y } };
+    };
+
+    /**
+     * 一次手势的**第二步**：全量投影 + 掩码 + 投影缓存（worker 侧顺带做掉 preMask / managed）。
+     *
+     * 这是这次改动最贵、也最关键的一趟：20M 上一次就是几百毫秒的主线程占用，现在整趟跑在 worker 上，
+     * 主线程只做"收掩码 + 写状态位"。回退时是原来的主线程实现（同一份 core 循环）。
+     */
+    const entryMasks = async (
+        splat: Splat,
+        spec: SelectionRegionSpec,
+        region: SelectionRangeRegion,
+        view: SelectionRangeView,
+        extent: { min: number, max: number },
+        state: Uint8Array,
+        numSplats: number
+    ) => {
+        const slot = await phase('resolveSlot2', () => prepareSlot(splat));
+        if (slot !== null) {
+            const r = await phase('worker.select', () => workerSelect(slot, spec, view, extent.min, extent.max));
+            if (r) {
+                // managed = preMask ∪ hit 已经在 worker 里合并好了（原来主线程上那趟 20M 循环）；
+                // 手势开始选区的 IndexRanges（撤销用）不再在这里建 —— 见 SelectRangeOp.pre 的惰性派生
+                return { preMask: r.preMask, hit: r.hit, managed: r.managed, cache: r.cache };
+            }
+        }
+        // 回退：主线程（原样保留的旧路径）
+        const preMask = await phase('preMask', () => {
+            const m = new Uint8Array(numSplats);
+            for (let i = 0; i < numSplats; i++) {
+                if ((state[i] & State.selected) !== 0 && (state[i] & State.locked) === 0) {
+                    m[i] = 255;
+                }
+            }
+            return m;
+        });
+        const cache = await phase('createCache', () => createRangeCache(numSplats, extent.min, extent.max));
+        const hit = new Uint8Array(numSplats);
+        const managed = new Uint8Array(numSplats);
+        await phase('selectRange', () => selectRange(splat, region, view, cache, hit, managed));
+        await phase('managedMerge', () => {
+            for (let i = 0; i < numSplats; i++) {
+                if (preMask[i] !== 0) {
+                    managed[i] = 1;
+                }
+            }
+        });
+        return { preMask, hit, managed, cache };
+    };
+
     // one entry's hit mask for the current range (O2: 直接产掩码，不再产 IndexRanges)。
     // `entry.hit` 是复用缓冲，`entry.managed` 是"被本算子接管的行"（只增不减）——
     // selectRange* 在写掩码的同一趟里顺手置位，所以这里不需要额外再扫一遍。
@@ -1109,7 +1213,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // run a screen gesture: capture the pose, build one op per splat, hand them to history
     const runRangeSelection = async (
-        region: SelectionRangeRegion,
+        spec: SelectionRegionSpec,
         opKind: 'add' | 'remove' | 'set' | 'intersect',
         splats: Splat[],
         bounds: { x0: number, y0: number, x1: number, y1: number }
@@ -1118,11 +1222,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             return;
         }
 
+        // 区域判定只有一处实现（selection-core.regionFromSpec）：主线程留一份给滑块重切，
+        // worker 用 spec 还原一份给投影循环 —— 两边不可能漂移。
+        const region = regionFromSpec(spec);
+
         // 新手友好：**新的一次框选从整段穿透开始**。范围属于"你正在微调的那一次选择"，上一次留下的
         // 最近/左右 不该悄悄把这一次裁掉（用户实测：框住塔却只选到塔身一半 —— 就是上一轮的滑块值
         // 还在生效）。先清掉旧手势再复位，这样复位事件不会触发一次没用的重切。
         rangeGesture = null;
         events.fire('selection.resetRange');
+        selPhaseClear();
 
         const pose = poseSnapshot();
         const { near, far } = getDepthSelection();
@@ -1135,15 +1244,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                 continue;
             }
 
-            const extent = poseExtent(splat, pose);
-
             // where the gaussians this gesture sees actually sit — along the view axis and inside the
             // box — in ONE subsampled pass: the sparse tails / margins get compressed so the first
             // push of any block already changes the selection (see tailFractions). On a 13M-splat
             // scene the full-scan version cost 1.5s per gesture; this is ~30ms
-            const analyzed = tailFractions(splat, { ...pose, worldTransform: splat.worldTransform.data }, extent, bounds, region);
-            const tails = analyzed.depth;
-            const screenTails = { x: analyzed.x, y: analyzed.y };
+            const { extent, depthTails: tails, screenTails } = await analyzeEntry(splat, spec, region, pose, state, bounds);
 
             const distances = rangeDistances(extent.min, extent.max, near, far, tails);
             const view: SelectionRangeView = {
@@ -1156,21 +1261,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             };
 
             // the selection as it stands, minus locked rows: a hidden splat is locked AND
-            // still carries the selected bit (see HideSelectionOp)
-            const preMask = new Uint8Array(numSplats);
-            for (let i = 0; i < numSplats; i++) {
-                if ((state[i] & State.selected) !== 0 && (state[i] & State.locked) === 0) {
-                    preMask[i] = 255;
-                }
-            }
-
-            // the projection cache is filled by this same pass, so later slider pushes are cheap.
-            // O2: hit / managed 都是**每 entry 一块、复用**的缓冲 —— 推杆时 hit 只 fill(0) 再重写。
-            // A3: 深度的量化区间 = 模型沿视轴的深度范围（extent），两端因此精确、内部误差远小于窗口步长。
-            const cache = createRangeCache(numSplats, extent.min, extent.max);
-            const hit = new Uint8Array(numSplats);
-            const managed = new Uint8Array(numSplats);
-            selectRange(splat, region, view, cache, hit, managed);
+            // still carries the selected bit (see HideSelectionOp).
+            //
+            // the projection cache is filled by this same pass, so later slider pushes are cheap:
+            // O2 的 hit / managed 都是每 entry 一块的复用缓冲（推杆时 hit 只 fill(0) 再重写），
+            // A3 的深度量化区间 = 模型沿视轴的深度范围（extent），两端因此精确、内部误差远小于窗口步长。
+            //
+            // 20M 上这一段（preMask + 全量投影 + 掩码 + managed 合并 + 120MB 缓存）就是那 1275ms 的
+            // 主体，现在整段跑在 selection-worker 里；这里拿到的 preMask/hit/managed/cache 都是
+            // **转移**回来的普通缓冲（零拷贝），后面的算子 / 滑块 / 撤销完全不需要知道自己换了线程。
+            const { preMask, hit, managed, cache } = await entryMasks(splat, spec, region, view, extent, state, numSplats);
 
             // 环模式：**只选"表面能碰到的部分"** —— 对齐 V2 / SuperSplat 的 selection depth 语义：
             // 渲染一次深度 pass（每像素最前表面），只保留落在那层表面前后极薄一带里的高斯。
@@ -1185,38 +1285,38 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             let ringPickMask: Uint8Array | null = null;
             if (events.invoke('camera.mode') === 'rings') {
                 scene.camera.pickPrep(splat, opKind);
-                const pick = await scene.camera.pickRect(
+                const pick = await phase('ringsPick', () => scene.camera.pickRect(
                     bounds.x0 / pose.width,
                     bounds.y0 / pose.height,
                     (bounds.x1 - bounds.x0) / pose.width,
                     (bounds.y1 - bounds.y0) / pose.height
-                );
+                ));
                 const picked = new Set<number>();
                 for (let i = 0; i < pick.length; i++) {
                     picked.add(pick[i]);
                 }
-                for (let i = 0; i < numSplats; i++) {
-                    if (picked.has(i)) {
-                        hit[i] = 255;
-                        managed[i] = 1;
-                    } else {
-                        hit[i] = 0;
+                // 逐位等价于原来的 `for i < numSplats: hit[i] = picked.has(i) ? 255 : 0`，
+                // 但只遍历拾取结果（≤ 画布像素数）而不是 2000 万个点 —— 20M 上后者本身就是一段
+                // 秒级的主线程占用。越界 id 在原实现里本来就被忽略（循环上界是 numSplats），
+                // 这里用同样的判断保持等价。
+                await phase('ringsMask', () => {
+                    hit.fill(0);
+                    for (const id of picked) {
+                        if (Number.isInteger(id) && id >= 0 && id < numSplats) {
+                            hit[id] = 255;
+                            managed[id] = 1;
+                        }
                     }
-                }
+                });
                 console.log(`[v3] rings pick (V2 logic): ${picked.size} visible ids`);
                 // 记下来给滑块重切用（见 rangeMask）：不清空的话，下一次推杆会用解析穿透掩码
                 // 覆盖掉这次拾取，"只选表面"就静默失效了
                 ringPickMask = hit;
             }
-            // 手势开始时就选中的行也在"被接管"之列（旧实现里它们先被 clearBits(pre) 清掉）
-            for (let i = 0; i < numSplats; i++) {
-                if (preMask[i] !== 0) managed[i] = 1;
-            }
-            const pre = IndexRanges.fromPredicate(numSplats, i => preMask[i] !== 0);
 
             entries.push({
                 splat,
-                op: new SelectRangeOp(splat, preMask, pre, hit, managed, selectionOps[opKind]),
+                op: new SelectRangeOp(splat, preMask, hit, managed, selectionOps[opKind]),
                 view,
                 extent,
                 cache,
@@ -1237,9 +1337,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const gestureSplats = entries.map(entry => entry.splat);
         cancelPendingBounds(gestureSplats);
         deferBounds(gestureSplats);
-        for (const entry of entries) {
-            await editHistory.add(entry.op);
-        }
+        await phase('applyMasks', async () => {
+            for (const entry of entries) {
+                await editHistory.add(entry.op);
+            }
+        });
         armBoundSettle();
 
         rangeGesture = entries.length ? { region, bounds, entries } : null;
@@ -1370,6 +1472,16 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     events.on('selection.depthRange', requestRange);
     events.on('selection.screenRange', requestRange);
 
+    // 选中"选择工具"的那一刻就把 x/y/z 开始推进 worker（分块 + 让出宏任务，主线程每次占用几毫秒）。
+    // 目的：别让 240MB 的上传压在**第一次手势**上 —— 否则第一次框选的端到端里会多出一段上传时间。
+    // 名字与 selection-depth-bar.ts 的 TOOLS_WITH_RANGE 一致。
+    const SELECTION_TOOLS = new Set(['rectSelection', 'lassoSelection', 'polygonSelection', 'brushSelection', 'floodSelection']);
+    events.on('tool.activated', (name: string | null) => {
+        if (name && SELECTION_TOOLS.has(name)) {
+            prewarmSplats(selectedSplats());
+        }
+    });
+
     events.function('select.rect', async (op: 'add'|'remove'|'set'|'intersect', rect: { start: { x: number, y: number }, end: { x: number, y: number } }) => {
         const { width, height } = scene.targetSize;
         const px0 = Math.min(rect.start.x, rect.end.x) * width;
@@ -1378,7 +1490,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const py1 = Math.max(rect.start.y, rect.end.y) * height;
 
         await runRangeSelection(
-            { contains: (px, py) => px >= px0 && px <= px1 && py >= py0 && py <= py1 },
+            { kind: 'rect', px0, py0, px1, py1 },
             op,
             selectedSplats(),
             { x0: px0, y0: py0, x1: px1, y1: py1 }
@@ -1415,16 +1527,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const empty = bx1 < bx0 || by1 < by0;
 
         await runRangeSelection(
-            {
-                contains: (px, py) => {
-                    const mx = Math.floor((px / width) * cw);
-                    const my = Math.floor((py / height) * ch);
-                    if (mx < 0 || my < 0 || mx >= cw || my >= ch) {
-                        return false;
-                    }
-                    return alpha[my * cw + mx] > 0;
-                }
-            },
+            // 判定实现只有一份：selection-core.regionFromSpec（主线程与 worker 共用）
+            { kind: 'alpha', alpha, cw, ch, width, height },
             op,
             selectedSplats(),
             // canvas pixels -> device pixels (the same mapping the region test uses)
@@ -1515,9 +1619,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         const slack = 3;
 
         await runRangeSelection(
-            {
-                contains: (px, py) => Math.abs(px - clickX) <= slack && Math.abs(py - clickY) <= slack
-            },
+            { kind: 'point', x: clickX, y: clickY, slack },
             op,
             selectedSplats(),
             { x0: clickX - slack, y0: clickY - slack, x1: clickX + slack, y1: clickY + slack }

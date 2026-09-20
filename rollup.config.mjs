@@ -206,6 +206,36 @@ const lodWorker = {
     cache: false
 };
 
+// Selection worker (V3): runs the 20M-splat projection / mask / preMask passes
+// off the main thread, so a box/lasso/polygon/brush gesture no longer blocks the
+// UI (measured 1275.7ms -> see docs/verify evidence). Instantiated with
+// `new Worker('selection-worker.js', { type: 'module' })` from
+// src/splat/selection-worker-client.ts. It must NOT pull playcanvas in: the
+// shared core it imports (src/splat/selection-core.ts) is deliberately free of
+// engine/DOM imports, which is also what makes the main thread and the worker
+// run the exact same loop.
+const selectionWorker = {
+    input: 'src/workers/selection-worker.ts',
+    output: {
+        dir: 'dist',
+        format: 'esm',
+        sourcemap: true
+    },
+    plugins: [
+        alias({
+            entries: {
+                'playcanvas': ENGINE_DIR,
+                '@playcanvas/pcui': PCUI_DIR
+            }
+        }),
+        resolve(),
+        json(),
+        typescript()
+    ],
+    treeshake: 'smallest',
+    cache: false
+};
+
 // L1 integration probe (dev/test only): bundles the real worker client + the
 // main-thread loader so a headless browser can assert byte-identical output.
 // Gated behind BUILD_PROBE so production builds stay lean — run with:
@@ -233,7 +263,7 @@ const lwProbe = {
     cache: false
 };
 
-const configs = [application, serviceWorker, loadWorker, surfaceWorker, lodWorker];
+const configs = [application, serviceWorker, loadWorker, surfaceWorker, lodWorker, selectionWorker];
 if (process.env.BUILD_PROBE) {
     configs.push(lwProbe);
 }
