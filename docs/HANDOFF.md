@@ -670,6 +670,17 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     用户报"无法扩展"时要先确认他当时是 `centers` 还是 `rings`。
 21. ~~**`docs/V3-WebGPU-现状.md` 里没有第五十三轮那一节**（最新仍是 6.54）~~ —— **已补**：
     `1a3232f` 写入 **6.55**（第五十三轮 ③ 深度行程映射）。③ 的完整叙述另见提交 `a4b411f` 的长信息与本文第 5.4 节。
+22. **测量旋转时不要写 `cam.elev`**（2026-09-21 新增，代价很大）：本 fork 的 Camera 只有 **`elevation`**
+    （`src/camera/camera.ts:271/275`），写成 `cam.elev` 会传 `undefined` ⇒ 俯仰角 NaN ⇒ **相机矩阵整体 NaN**，
+    模型根本没被正常绘制。实测对照（各转 1 秒）：`cam.elev` 下运动检测 **0/60 帧**、控制台 **948 条 NaN/秒**；
+    `cam.elevation` 下 **60/60 帧、0 条**。凡是用错的写法量到的"旋转期"帧时间结论都要重测
+    （排序**消息数**类结论不受影响：引擎每帧无条件调 `sorter.setCamera`，与相机是否 NaN 无关）。
+    已修：`docs/probes/sortrate.cjs`、`docs/probes/perf-probe.cjs`、`docs/probes/gpu-frame-probe.cjs`。
+23. **性能测量必须带可见性检查**（同上）：着色器会剔除投影尺寸小于 `minPixelSize`（引擎默认 **2 px**）的高斯，
+    所以"点很多但高斯是亚像素"的夹具会**几乎什么都不画**却显示很快的帧时间。实测：亚像素 20M 夹具
+    `litPercent` **2.1%** / GPU **2.4 ms**；把高斯调大后 **81%** / GPU **70 ms**。
+    `docs/probes/gpu-frame-probe.cjs` 会打印 `litPercent`（口径同 `verify-large-model-ui.cjs`：`max(r,g,b) > 60`），
+    **没有它就不要汇报性能数字**。
 
 ---
 

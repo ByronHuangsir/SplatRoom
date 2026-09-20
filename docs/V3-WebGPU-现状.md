@@ -3286,6 +3286,91 @@ group-renderer 激活时由 `group-renderer.ts` 自己 `sort()`）。**闸门在
 5. **无结论的一条**：排序闸门在 webgl2 上量到 0 次 worker 消息（见 6.54），需另找中间夹具 + 给 `dispatchSort` 打点定论。
 6. `dist\test-20m.ply` 打包前必须删。
 
+---
+
+### 6.56 第五十四轮：交互期降级（P0-3 v1）—— 先量后改，量出"降 SH 波段没用、降分辨率才有用"
+
+承接 6.53/6.54/6.55 一直挂着的 **P0-3**（交互期降级）。这一轮的做法是"**先把 GPU 每帧耗时接进来、
+把每个候选旋钮量一遍，再挑真正有效的做**"。完整数字与出处见 `docs/perf/交互期降级-实现与实测.md`，
+前置侦察（含对文档结论的更正）见 `docs/perf/P0-3-交互期降级-前置侦察.md`。
+
+#### 先接上"眼睛"：GPU 每帧耗时
+
+引擎本来就带 `device.gpuProfiler`（timestamp query，WebGPU/WebGL2 都有），但**本仓库从来没有消费过它**
+（`grep gpuProfiler src/` 零命中）。新增 `src/core/gpu-frame-timing.ts` 包装 `gpuProfiler.report`，
+按 `renderVersion` 把异步回报**归属到产生它的那一帧**，并按动/静分类统计；另加
+`src/core/camera-motion.ts`（位姿对比 + 指针按下，settle 200 ms）给帧打标签。
+探针 `docs/probes/gpu-frame-probe.cjs` 打印空闲/旋转两相的帧间隔、GPU 段、longtask 与 `litPercent`。
+
+#### 顺手查出并修掉两个**测量**层面的 bug（都很值钱）
+
+1. **探针的旋转把相机搞成了 NaN**：`sortrate.cjs`（上一轮遗留）与 `perf-probe.cjs` 写的是
+   `cam.setAzimElev(cam.azim + 1.2, cam.elev, 0)`，而本 fork 的 Camera **只有 `elevation`、没有 `elev`**
+   ⇒ 俯仰角 NaN ⇒ **相机矩阵整体 NaN ⇒ 模型根本没被正常绘制**。
+   同一进程对照（各转 1 秒）：错误写法 **运动检测 0/60 帧、控制台 948 条 NaN/秒**；
+   正确写法 **60/60 帧、0 条**。⇒ **此前用这两支探针量到的"旋转期"帧时间结论全部作废**（含我上一轮报的
+   "旋转 p95 21.3 ms"）；排序**消息数**类结论（P0-2 的 45.1 → 4.2 次/秒）不受影响 —— 引擎每帧无条件调
+   `sorter.setCamera`，闸门限的是它，与相机是否 NaN 无关。已在 3 个探针里改为 `cam.elevation`。
+2. **合成夹具"20M 点"其实什么都没画**：高斯是亚像素，被 `minPixelSize`（引擎默认 2 px）剔除 ⇒
+   `litPercent` 只有 **2.1%**、GPU **2.4 ms** —— "快"是假象。把高斯调大（新增尺寸/房间半径旋钮）后
+   **81%** / GPU **70 ms**，才是真正的重负载。⇒ **以后任何性能数字都必须带 `litPercent`**
+   （已写进 `docs/HANDOFF.md` 的坑列表第 22/23 条）。
+
+#### 旋钮量化（20M fill 夹具，静止强制帧，同进程）
+
+| 旋钮 | 帧 p50 | GPU p50 | Δ |
+|---|---|---|---|
+| 基线（SH3 / minPixelSize 2 / 全分辨率） | 69.8 ms | 69.92 ms | — |
+| SH 波段 → 1 / → 0 | 69.5 | 69.57 | **−0.5%** |
+| minPixelSize → 4 / 8 / 16 | 69.9 / 68.8 / 58.6 | 70.01 / 68.87 / 58.75 | 0 / −1.5% / **−16%** |
+| **渲染缩放 0.7 / 0.5 / 0.35** | **39.9 / 25.4 / 18.1** | 39.98 / 25.43 / 18.93 | **−43% / −64% / −73%** |
+| 恢复全分辨率 | 69.9 | 69.92 | 0（画面 mean\|ΔRGB\| = **0**，逐像素精确恢复） |
+
+**读法**：这个模型的 GPU 时间**与像素面积近似成正比**（填充/overdraw 主导）⇒ 文档原来推荐的
+"先降 SH 波段"在填充受限场景下**不成立**；`alphaClipForward` 仍是 no-op（6.53 已记）；
+真正有效的是**降渲染分辨率**。另有一条走不通：`config.camera.pixelScale` **不能**当交互旋钮
+（它改画布/设备分辨率，实测 0.5/0.35 时帧时间反而涨到 242/472 ms 且画面整体变了）；
+正确机制是 `camera.targetSizeOverride` + `rebuildRenderTargets()`（PiP 预览用的同一套）。
+
+#### 做出来的东西
+
+`src/core/motion-quality.ts`（纯策略状态机：`autoEngageMs = 60`、预算 33 ms、步进限频 **300 ms**、
+阶梯 = 渲染缩放 0.7 / 0.5）+ `src/scene/scene.ts` 接线（幂等施加/恢复）。
+**降级完全不碰 `view.bands`**（那条路会写进偏好、`.ssproj`、设置面板与导出弹窗）——
+回归套件专门有一项断言这一点。逃生开关 `window.__SPLATROOM_MOTION_QUALITY__ = false`。
+
+#### A/B 实测（20M fill / WebGPU / 连续旋转 4 秒 / 同进程）
+
+| 量 | 关闭 | 打开 |
+|---|---|---|
+| 帧 p50 | 70.9 ms | **29.8 ms（−58%）** |
+| 帧 max | 208.2 ms | 77.8 ms |
+| GPU p50（运动中） | 71.0 ms | **29.96 ms** |
+| 4 秒内帧数 | 58 | **119（×2.05）** |
+| 渲染目标宽度（运动中） | 1280 | **640**（自适应进到 0.5 档） |
+| 停手后 | — | 精确恢复（override → null、target 1280） |
+
+**诚实边界**：`>33 ms` 的帧数没降（52 → 48，p50 减半 ≠ 全部 30 fps）；p95 仍 69.7 ms
+（约 5% 的帧是全分辨率或正逢档位切换，切换要重建渲染目标）；`litPercent` 对清晰度不敏感，
+画质代价看 mean\|ΔRGB\|（0.5 档为 113）。**合成夹具≠真机**，真机上值不值要用用户的真实扫描件复核。
+
+#### 验证与产物
+
+- 新增 `docs/verify/verify-motion-quality.cjs`（**7/7**，含"`view.bands` 全程不变"与"停手精确恢复"，
+  已进批量）与 `docs/verify/verify-motion-quality-policy.mts`（纯 node **13/13**）。
+- 全量：**webgpu 39 套 `TOTAL FAILED: 0`** + **webgl2 39 套 `TOTAL FAILED: 0`**；
+  `npm run check` 退出码 **0**。
+
+#### 还剩什么
+
+1. **降级期间拾取坐标不一致**：投影/拾取换算用变小的 `scene.targetSize`（`src/app/editor.ts:1027` 等），
+   "边转边框选"这种操作需要复核；PiP 预览也写同一个 `targetSizeOverride`，叠加行为无专项套件。
+2. **上游更深的那一层没做**：紧凑化 + indirect draw（只画存活高斯）、贡献剔除、遮挡剔除、
+   运动帧完全不排序的 1 spp 随机透明 —— 可行性已在 `docs/perf/supersplat-3.3.0-代码可借鉴点.md` 里查清
+   （引擎 2.21.3 已自带 `ComputeRadixSort` / indirect draw / unified 管线，**升级引擎买不到性能**）。
+3. **真机复核**：用用户的 20M / 13M 真实扫描件跑一次 A/B（合成夹具是均匀大高斯，最不利于剔除类优化）。
+4. `dist\test-20m.ply` / `dist\test-20m-fill.ply` 打包前必须删。
+
 
 
 

@@ -26,8 +26,11 @@ import { Camera } from '../camera/camera';
 import { CameraPath3D } from '../camera/camera-path-3d';
 import { CameraPathControl } from '../camera/camera-path-control';
 import { CameraPreview } from '../camera/camera-preview';
+import { CameraMotion } from '../core/camera-motion';
 import { CommandQueue } from '../core/command-queue';
 import { Events } from '../core/events';
+import { GpuFrameTiming } from '../core/gpu-frame-timing';
+import { MotionQuality } from '../core/motion-quality';
 import { DataProcessor } from '../data-processor/index';
 import { PCApp } from '../pc-app';
 import { GroupRenderer } from '../splat/group-renderer';
@@ -123,6 +126,18 @@ class Scene {
     _warnedRenderError = false;
     _warnedGroupNoMainCam = false;
 
+    // 相机是否正在动（指针按下 / 位姿变化 / 未超过 settle 窗口）。两个消费者：
+    // GPU 每帧计时给帧打"动/静"标签，交互期降级只在 moving 时启用。见 src/core/camera-motion.ts。
+    readonly cameraMotion = new CameraMotion();
+    // GPU 每帧耗时（引擎 timestamp query 的异步回报，按 renderVersion 归属到帧）。
+    // 默认关闭（开启会让引擎每帧 resolve 一次 timestamp + map staging buffer）；
+    // 探针与自适应质量控制器按需打开。见 src/core/gpu-frame-timing.ts。
+    readonly gpuFrameTiming: GpuFrameTiming;
+    // 交互期降级策略（运动时降渲染分辨率，停手恢复）。见 src/core/motion-quality.ts。
+    readonly motionQuality = new MotionQuality();
+    // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
+    private _appliedRenderScale = 1;
+
     dataProcessor: DataProcessor;
     assetLoader: AssetLoader;
     groupManager: GroupManager;
@@ -162,6 +177,7 @@ class Scene {
         this.config = config;
         this.canvas = canvas;
         this.commandQueue = commandQueue;
+        this.gpuFrameTiming = new GpuFrameTiming(graphicsDevice);
 
         // configure the playcanvas application. we render to an offscreen buffer so require
         // only the simplest of backbuffers.
@@ -632,6 +648,39 @@ class Scene {
         }
     }
 
+    // 交互期降级的"施加/恢复"：幂等地把渲染分辨率缩放设成给定量。
+    // 用 camera.targetSizeOverride（PiP 预览用的同一机制，camera.ts 的 setTargetSizeOverride）
+    // 而不是 config.camera.pixelScale —— 后者会改画布/设备分辨率并触发 resize 反馈（实测
+    // 0.5/0.35 时帧时间反而涨到 242/472 ms 且画面整体变化），不能当交互旋钮用。
+    // 缩放为 1 时置回 null，恢复是逐像素精确的（实测 mean|ΔRGB| = 0）。
+    private applyRenderScale(scale: number) {
+        if (Math.abs(scale - this._appliedRenderScale) < 1e-3) {
+            return;
+        }
+        this._appliedRenderScale = scale;
+
+        const cam = this.camera;
+        if (scale >= 1) {
+            cam.targetSizeOverride = null;
+        } else {
+            cam.targetSizeOverride = {
+                width: Math.max(1, Math.round(this.targetSize.width * scale)),
+                height: Math.max(1, Math.round(this.targetSize.height * scale))
+            };
+        }
+        cam.rebuildRenderTargets();
+    }
+
+    // 场景里的高斯点总数（没有 timestamp query 时，降级只能按模型规模判断，见 MotionQuality）
+    private splatCount() {
+        let total = 0;
+        const elements = this.getElementsByType(ElementType.splat) as Splat[];
+        for (let i = 0; i < elements.length; i++) {
+            total += elements[i].numSplats ?? 0;
+        }
+        return total;
+    }
+
     private onPreRenderInner() {
         // P2 主渲染前校验：PiP 的 sorter/orderTexture swap 只在 onPostRender 的
         // try/finally 窗口内存在，正常时主渲染永远看不到 PiP 状态。若上一帧
@@ -728,6 +777,49 @@ class Scene {
         // update render target size
         this.targetSize.width = Math.ceil(this.app.graphicsDevice.width / this.config.camera.pixelScale);
         this.targetSize.height = Math.ceil(this.app.graphicsDevice.height / this.config.camera.pixelScale);
+
+        // 相机运动状态（本帧位姿对比 + 指针按下），必须在元素渲染之前更新：
+        // 交互期降级（motion-quality）与 GPU 计时的帧标签都读它。
+        this.cameraMotion.update(
+            this.camera.position,
+            this.camera.forward,
+            !!this.camera.userDragging,
+            performance.now()
+        );
+
+        // 交互期降级：需要 GPU 每帧耗时来判断"值不值得降"，所以策略开着时就把 profiler 打开。
+        // 实测代价可忽略（20M 上开/关的帧 p50 都是 ~69.6ms）；排障可整体关掉：
+        //   window.__SPLATROOM_MOTION_QUALITY__ = false
+        const qualityEnabled = (globalThis as any).__SPLATROOM_MOTION_QUALITY__ !== false;
+        this.motionQuality.enabled = qualityEnabled;
+        if (qualityEnabled && !this.gpuFrameTiming.enabled) {
+            this.gpuFrameTiming.setEnabled(true);
+        } else if (!qualityEnabled && this.gpuFrameTiming.enabled) {
+            this.gpuFrameTiming.setEnabled(false);
+        }
+
+        this.gpuFrameTiming.noteFrame(this.cameraMotion.moving);
+
+        const qualityChanged = this.motionQuality.update(
+            this.cameraMotion.moving,
+            this.splatCount(),
+            this.gpuFrameTiming.supported,
+            // 用"最近若干静止帧的峰值"而不是最后一帧：本应用按需渲染，空闲时可能只出几帧空转帧
+            // （实测 0.075 ms），拿最后一帧当依据会在用户一停手就解除武装
+            this.gpuFrameTiming.settledSpanPeak,
+            this.gpuFrameTiming.lastMovingGpuMs,
+            performance.now()
+        );
+        if (qualityChanged) {
+            this.applyRenderScale(this.motionQuality.renderScale);
+        }
+        // 降级期间保持渲染，直到"恢复全分辨率"那一帧真正发生：本应用是按需渲染的，
+        // 相机停手后不再有自然帧，若就此停住，画面会一直停在低分辨率（实测：不加这一条时
+        // verify-motion-quality 的"停手恢复"一项失败，override 一直挂在 896x537）。
+        // 恢复施加完（engaged=false 且缩放回到 1）就不再强制渲染，不会白烧电。
+        if (this.motionQuality.engaged || this._appliedRenderScale !== 1) {
+            this.forceRender = true;
+        }
 
         this.forEachElement(e => e.onPreRender());
 

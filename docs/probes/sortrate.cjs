@@ -80,11 +80,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             requestAnimationFrame(loop);
 
             // 模拟连续拖拽旋转（每 16ms 推一次方位角，共 seconds 秒）
+            // 注意：第三参数用的是 `cam.elevation`。本 fork 的 Camera 没有 `elev` 属性，
+            // 写成 `cam.elev` 会传进 undefined ⇒ 俯仰角变 NaN ⇒ 相机矩阵 NaN（模型画不出来，
+            // 且视图立方体每帧刷 translate(NaN, NaN)）。2026-09-21 实测：用 `cam.elev`
+            // 的 1 秒旋转里相机位姿非有限、运动检测 0/60 帧；换成 `cam.elevation` 后 60/60 帧。
             posts = 0;
             const t0 = performance.now();
             const until = t0 + seconds * 1000;
             while (performance.now() < until) {
-                cam.setAzimElev(cam.azim + 1.2, cam.elev, 0);
+                cam.setAzimElev(cam.azim + 1.2, cam.elevation, 0);
                 await sleep2(16);
             }
             const orbitMs = performance.now() - t0;

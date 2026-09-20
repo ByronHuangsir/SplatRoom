@@ -20,8 +20,16 @@
 //   "truncated or corrupt", so this writes into a fixed reusable block and never pads.
 //
 // usage: node docs/verify/gen-synth-large-splat.cjs [--out=<path>] [--points=20000000] [--sh=3] [--seed=12345]
+//                                      [--core-scale=<units>] [--room-radius=<units>] [--room-scale=<units>] [--tail-scale=<units>]
 // default out: ../_tmp/synth-large.ply  (outside dist/ on purpose: a >4 GB file in dist/ breaks
 // electron-builder, and dist/*.ply must be removed before packaging — hardlink it in when needed)
+//
+// The size knobs exist because splat SIZE decides whether the model renders at all: the shaders cull
+// any gaussian whose projected size is under `minPixelSize` (engine default 2 px), and the camera
+// frames `framingRadius` (the 1%-99% clipped bound). With the default sizes the core splats project
+// to well under a pixel at that distance, so a "20M point" fixture can end up drawing almost nothing
+// and still report fast frames. `--room-radius` also controls the framing distance, since the room
+// dominates the clipped bound.
 const fs = require('fs');
 const path = require('path');
 
@@ -34,6 +42,12 @@ const POINTS = parseInt(arg('points', '20000000'), 10);
 const SH = parseInt(arg('sh', '3'), 10);
 const SEED = parseInt(arg('seed', '12345'), 10);
 const OUT = arg('out', path.join(__dirname, '..', '..', '..', '_tmp', 'synth-large.ply'));
+// splat half-sizes in world units; the defaults keep the first fixture's proportions (the size
+// distribution is parameterised now, so byte output is not identical to that first file)
+const CORE_SCALE = parseFloat(arg('core-scale', '0.013'));
+const ROOM_RADIUS = parseFloat(arg('room-radius', '1200'));
+const ROOM_SCALE = parseFloat(arg('room-scale', '0.14'));
+const TAIL_SCALE = parseFloat(arg('tail-scale', '1.2'));
 
 const SH_C0 = 0.28209479177387814;
 const SH_REST = { 0: 0, 1: 9, 2: 24, 3: 45 };
@@ -127,11 +141,11 @@ while (written < POINTS) {
             z = rad * w * Math.sin(phi);
             colour = [0.82, 0.72, 0.45];        // warm stone, like the scanned artefact
             opacity = 0.75 + rnd() * 0.24;
-            scale = 0.006 + rnd() * 0.02;
+            scale = CORE_SCALE * (0.45 + rnd() * 1.1);
         }
         else if (r < CORE_FRAC + ROOM_FRAC) {
             // room-scale surround: floor + walls + clutter, 43%
-            const rad = 500 + rnd() * 700;
+            const rad = ROOM_RADIUS * (0.42 + rnd() * 0.58);
             const u = rnd() * 2 - 1;
             const phi = rnd() * Math.PI * 2;
             const w = Math.sqrt(1 - u * u);
@@ -140,7 +154,7 @@ while (written < POINTS) {
             z = rad * w * Math.sin(phi);
             colour = [0.45, 0.47, 0.5];
             opacity = 0.35 + rnd() * 0.5;
-            scale = 0.03 + rnd() * 0.25;
+            scale = ROOM_SCALE * (0.2 + rnd() * 1.8);
         }
         else {
             // far noise tail: 2% spread over a shell at ~4800 => AABB inflated ~54x vs the core
@@ -154,7 +168,7 @@ while (written < POINTS) {
             z = rad * w * Math.sin(phi);
             colour = [0.2, 0.6, 0.3];           // green strays: easy to spot / count in a probe
             opacity = 0.05 + rnd() * 0.2;
-            scale = 0.4 + rnd() * 1.6;
+            scale = TAIL_SCALE * (0.35 + rnd() * 1.3);
         }
 
         if (x < minX) minX = x;
@@ -209,5 +223,7 @@ console.log(JSON.stringify({
     aabb: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ], centre: [cx, cy, cz] },
     aabbHalfDiagonal: halfDiagonal,
     coreRadius: CORE_R,
-    aabbInflationVsCore: halfDiagonal / CORE_R
+    aabbInflationVsCore: halfDiagonal / CORE_R,
+    // size knobs, so a measurement can tell whether the model is expected to survive the 2 px cull
+    sizes: { coreScale: CORE_SCALE, roomRadius: ROOM_RADIUS, roomScale: ROOM_SCALE, tailScale: TAIL_SCALE }
 }, null, 1));

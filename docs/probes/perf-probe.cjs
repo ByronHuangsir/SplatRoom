@@ -113,7 +113,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             requestAnimationFrame(loop);
             const t0 = performance.now();
             while (performance.now() - t0 < ms) {
-                if (rotate) cam.setAzimElev(cam.azim + 1.2, cam.elev, 0);
+                if (rotate) cam.setAzimElev(cam.azim + 1.2, cam.elevation, 0);
                 await sleep2(16);
             }
             stop = true;
