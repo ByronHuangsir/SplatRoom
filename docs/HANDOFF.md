@@ -762,6 +762,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `sortrate.cjs` | **P0-2 的口径**：包一层 `worker.postMessage` 数派发、采样帧间隔、检查停手补帧（`… test-20m.ply 4` 表示转 4 秒） |
 | `sort-lag.cjs` | **顺序延迟补偿的口径（第六轮）**：`disp` = "生效排序表里的次序"与"按当前相机算出的真实深度次序"的归一化平均秩差（0 = 正确，0.333 = 随机）。`SORT_LAG_DEG_PER_FRAME=6`（猛甩 375°/s，默认）/ `2`（正常拖拽 125°/s）；`SORT_LAG_MODE=baseline\|predict\|both`。**必须先看 `settledDisp` ≈ 0**，否则说明度量本身坏了（例：读 `sorter.centers` 会得到恒 0.19~0.33） |
 | `shape-ghost.cjs` | **降级期"选区虚影"的像素级口径（第六轮）**：同一相机位姿下全分辨率 vs 降级各抓一张画布像素，按 16×16 瓦片比较，并与"无形状"对照相减（`boxOverControlWorst`） |
+| `sort-cost.cjs` | **"GPU 排序能省多少"的上限口径（第七轮）**：拆开量 worker 排序 / λ / 排队 / 80 MB 上传 / ≥1 MiB 分配 / 含上传帧 vs 不含，并跑一个"零上传反事实"相位（`litPercent` 保证仍在画同一批高斯）。结论见 `交互期降级-实现与实测.md` §6.11 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |
