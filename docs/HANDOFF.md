@@ -1,7 +1,7 @@
 # SplatRoom V3 —— 新会话交接说明（HANDOFF）
 
 > 这份文档是给**一个全新会话 / 另一台电脑**（换 API KEY、或换了机器，没有任何对话记忆）看的：
-> 读完它 + `docs/进度存档.md` + `docs/V3-WebGPU-现状.md`（最新 **6.54**）就能无缝接着做。
+> 读完它 + `docs/进度存档.md` + `docs/V3-WebGPU-现状.md`（最新 **6.55**）就能无缝接着做。
 > 最后更新：**3.23.8（第五十三轮，2026-09-20）**。
 > ⚠️ **工程已从原机器拷到另一台能联网的电脑上继续** ⇒ 先看 **第 1.0 节「换机器：从零跑起来」**，
 > 那里列了新机器上必须重建/改路径的东西。
@@ -12,11 +12,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 代码库 | `D:\DeepSeek\SplatRoomV2\SplatRoomV3-0`（git 仓库，分支 `master`，**177 个提交**，工作树干净）—— 这是**原机器**的路径 |
+| 代码库 | `D:\DeepSeek\SplatRoomV2\SplatRoomV3-0`（git 仓库，分支 `master`，**179 个提交**，工作树干净；本文档就落在最新那一笔提交里）—— 这是**原机器**的路径 |
 | 当前版本 | **3.23.8** |
 | 产物 | `release\SplatRoom-3.23.8.exe`（**122.1 MB**，portable，已签名，FileVersion=ProductVersion=**3.23.8**，构建时间 2026-09-20 15:50） |
 | 打包复核（实测） | asar **5297** 条 / 唯一 PLY = `dist\test-model.ply` / **8** 个 wasm / `dist/index.js` 同时含字面量 `3.4.0` 与 `3.23.8` / 9 语言各 **689** 键 / 冒烟启动 4 进程（主窗口标题 SplatRoom）→ 杀净 0 |
-| 最新提交 | `ed0abb3`（3.23.8 打包复核）→ `a4b411f`（③ 深度行程映射）→ `c6beeac`（3.23.7 打包复核） |
+| 最新提交 | 本文档所在的那一笔（交接包终稿：提交数/6.55 更正 + 第 1.0.0 节交接包清单）→ `1a3232f`（交接记录：本文件重写 + 存档第五十三轮 + 现状 6.55）→ `ed0abb3`（3.23.8 打包复核）→ `a4b411f`（③ 深度行程映射） |
 | 技术栈 | PlayCanvas 2.21.3 / PCUI 6.1.4 / @playcanvas/splat-transform ^3.4.0 / i18next 26.3.6 / TypeScript 6.0.3 / Rollup 4.62.2 / Electron 43.4.0 / electron-builder 26.15.3 / Node ≥ 20.19（本机实测 v24.9.0 + npm 11.17.0 可用） |
 | 一直在改的东西 | 「选区范围」面板（最近/最远、左/右、上/下，六个方块）+ 环模式选取语义；最近四轮转向**导出内存**、**2000 万点交互性能**与**选择范围手感** |
 | 最近四轮做了什么 | ①**查看器 / 打包查看器 / SOG 导出流式化**（1300 万点瞬时分配 **4251.5 → 1979.1 MB**，输出逐字节不变）②**用户 2000 万点 / WebGPU 六项问题**：①②④⑤ 修掉、③⑥ 定位到根因 ③**P0-2 排序闸门 + P0-1 框选搬进 Worker**（排序消息 **45.1 → 4.2 次/秒**；主线程最长阻塞 **320–340 → 30–34 ms，−90.2%**）④**③ 深度轴改成"滑块百分比 = 选中质量占比"**（密集区行程 20 → **74.5** 个单位） |
@@ -26,7 +26,7 @@
 
 - `docs/perf/2000万点六项问题-排查发现.md`：2000 万点六项问题的逐条根因 + 实测数字 + 测量方法学 + 待办
 - `docs/perf/supersplat-3.3.0-对比调研.md`：浏览器版 SuperSplat 3.3.0 的性能实现对比（上游源码出处、P0/P1/P2 差异清单、量测口径与阈值）
-- `docs/V3-WebGPU-现状.md`：每一轮一节的"为什么这么改 + 实测数字"（最新 **6.54**；**6.55 尚未写，第五十三轮的数字目前在提交 `a4b411f` 的长信息里**）
+- `docs/V3-WebGPU-现状.md`：每一轮一节的"为什么这么改 + 实测数字"（最新 **6.55**，即第五十三轮 ③ 深度行程映射）
 
 **用户是谁**：一个 3D 高斯泼溅（splat）摄影师 / 开发者，用中文沟通。他自己有测试模型（1300 万点与 2000 万点的真实扫描件），
 会反复推敲界面手感，要求"严格照设计稿"并给出可量化的验证。**他是唯一的验收人**。
@@ -54,8 +54,37 @@ Edge            C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe
 
 ### 1.0 换机器：从零跑起来（另一台联网电脑，必读）
 
+#### 1.0.0 交接包里有什么（2026-09-20 交付，目录 `D:\DeepSeek\SplatRoomV2\交接包_20260920\`）
+
+| 文件 | 大小 / SHA256 | 内容 |
+| --- | --- | --- |
+| `SplatRoom-3.23.8.exe` | 122.11 MB / `FDBC14C5…CD32` | portable 可执行文件，FileVersion=ProductVersion=3.23.8，双击即用（不需 node、不需联网） |
+| `SplatRoomV3-0-源码与文档.zip` | 17.28 MB / `4655756C…96BF9` | 工作树快照 **706 个文件**（`src/` `static/` `scripts/` `docs/` 全套件与探针、`package.json`+`package-lock.json`、5 个小 `.ply` 夹具、36 个复现脚本）；不含 `.git`、`node_modules/`、构建产物、两个大模型夹具 |
+| `SplatRoomV3-0-完整Git历史.bundle` | 16.01 MB / `F25EE896…1CBBC` | **179 个提交**的完整历史，`git bundle verify` = `records a complete history` |
+| `完整工作记录-截至3.23.8.md` | 62.5 KB | 本文件的副本，不用解压就能读 |
+
+交付前实测（都在原机器上跑过，不是"应该没问题"）：zip 逐条目 SHA256 与仓库同名文件比对 **706/706 字节一致**（缺失 0、不符 0）；zip 与 `git ls-files` 的差集 41 项**全部**落在 `.gitignore` 覆盖的夹具与复现脚本上；bundle 克隆到临时目录得到 **提交个数与逐个 SHA 都同源仓库一致**；exe 属性与启动冒烟通过。
+
+**还原 git 历史（二选一，都实测过）**：
+
+```powershell
+# 方案 A：从 bundle 克隆（推荐），再把 zip 里被 git 忽略的补充件拷进去
+git clone .\SplatRoomV3-0-完整Git历史.bundle SplatRoomV3-0
+Expand-Archive .\SplatRoomV3-0-源码与文档.zip -DestinationPath .\_stage
+Copy-Item .\_stage\SplatRoomV3-0\dist\*                      .\SplatRoomV3-0\dist\ -Force
+Copy-Item .\_stage\SplatRoomV3-0\scripts\dev-history\local\* .\SplatRoomV3-0\scripts\dev-history\local\ -Force
+
+# 方案 B：就地解压 zip，再把历史接上（注意不能直接 fetch master:master，git 会拒绝）
+Expand-Archive .\SplatRoomV3-0-源码与文档.zip -DestinationPath .
+cd .\SplatRoomV3-0
+git init -q
+git fetch ..\SplatRoomV3-0-完整Git历史.bundle "refs/heads/master:refs/heads/from-bundle"
+git reset --hard from-bundle        # 工作树文件不动，只补上历史
+git update-ref -d refs/heads/from-bundle
+```
+
 1. **拷工程**：整个 `SplatRoomV3-0\` 目录（`docs\` 里有全部套件/探针/文档，是资产，必须带；
-   git 仓库本身也是资产 —— 177 个提交的历史、提交信息里的实测数字都在里面）。
+   git 仓库本身也是资产 —— 提交历史、提交信息里的实测数字都在里面；没有 git 也能用交接包里的 `.bundle` 还原，见第 1.0.0 节）。
    **可以不带**：`node_modules\`（第 3 步重建）、`release\` 里除最新那个 exe 之外的旧产物
    （实测 **62 个 exe / 合计 7.4 GB**，每个约 122 MB，纯历史包袱；`release\win-unpacked\` 留着有用，见第 3 步）。
    **`dist\*.ply` 里除 `test-model.ply` 之外的一律不要带**：
@@ -204,7 +233,7 @@ rollup.config.mjs                    selection-worker 打包项（产物 dist/se
 docs/verify/*.cjs                    验证套件（47 个 verify-*.cjs，其中 38 个进批量）
 docs/probes/*.cjs                    探针（测量方法写在文件头注释里，见第 9 节）
 docs/perf/*.md                       2000 万点六项问题的排查发现 + 与 SuperSplat 3.3.0 的性能对比调研
-docs/V3-WebGPU-现状.md               每一轮一节（最新 6.54），"为什么这么改 + 实测数字"
+docs/V3-WebGPU-现状.md               每一轮一节（最新 6.55 = 第五十三轮），"为什么这么改 + 实测数字"
 docs/进度存档.md                     交接页：当前产物 / 这一轮做了什么 / 待办 / 常用命令
 static/locales/*.json                9 语言，689 个扁平键（改文案要 9 个一起改，跑 npm run lint:locales）
 ```
@@ -639,8 +668,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 19. **`verify-webgpu-fallback.cjs` 不能传 url 参数**，否则变成 `?gpu=webgpu?gpu=…` → 假红。
 20. **环模式下三个范围滑块本来就不参与**（`rangeMask`: `if (entry.ringPick) return pick`）—— 这是设计语义不是 bug；
     用户报"无法扩展"时要先确认他当时是 `centers` 还是 `rings`。
-21. **`docs/V3-WebGPU-现状.md` 里没有第五十三轮那一节**（最新仍是 6.54）：③ 的完整叙述目前只在提交 `a4b411f`
-    的长信息和本文第 5.4 节里 —— 下次要引用"为什么这么改"时注意这一点。
+21. ~~**`docs/V3-WebGPU-现状.md` 里没有第五十三轮那一节**（最新仍是 6.54）~~ —— **已补**：
+    `1a3232f` 写入 **6.55**（第五十三轮 ③ 深度行程映射）。③ 的完整叙述另见提交 `a4b411f` 的长信息与本文第 5.4 节。
 
 ---
 
