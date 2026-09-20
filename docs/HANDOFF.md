@@ -681,6 +681,13 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     `litPercent` **2.1%** / GPU **2.4 ms**；把高斯调大后 **81%** / GPU **70 ms**。
     `docs/probes/gpu-frame-probe.cjs` 会打印 `litPercent`（口径同 `verify-large-model-ui.cjs`：`max(r,g,b) > 60`），
     **没有它就不要汇报性能数字**。
+24. **合成旋转不会请求渲染**（2026-09-21 新增，第三次踩到同类坑）：`cam.setAzimElev(...)` 是**程序化**改相机，
+    背后没有指针输入 ⇒ **不会把场景标记为脏** ⇒ 本应用（按需渲染）几乎不出帧。实测：一次 1 秒合成拖动之后
+    1.5 秒内 `Splat.onPreRender` 被调用 **0 次**（同一次里 `worker.postMessage` 也是 0），
+    于是"停手补帧"之类的**逐帧逻辑根本没有帧可跑**，而探针会把 0 次派发误读成功能坏了。
+    ⇒ **所有合成旋转/拖动的探针都必须自己 `scene.forceRender = true`**
+    （`gpu-frame-probe.cjs` / `perf-probe.cjs` / A/B 脚本一直如此；`verify-motion-quality.cjs` 漏了、已修）。
+    推论：**"程序里转动相机"和"用户真的在拖"不是等价场景** —— 前者要显式请求帧。
 
 ---
 

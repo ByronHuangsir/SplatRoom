@@ -94,11 +94,16 @@ class CameraMotion {
     }
 
     /**
-     * True while the camera should be treated as in motion: the pointer is held down, the pose
-     * changed on the last fed frame, or it changed within the last `settleMs`.
+     * True while the camera should be treated as in motion: the pointer is held down, or the pose
+     * changed within the last `settleMs`.
+     *
+     * Note this does not consult `movedThisFrame` as a latch. This app renders on demand, so if
+     * nothing requests a frame the tracker is simply not fed — a latched "moved on the last fed frame"
+     * would then read as "still moving" forever. The timestamp is the only state that ages correctly
+     * without new frames.
      */
     get moving() {
-        if (this._dragging || this._movedThisFrame) {
+        if (this._dragging) {
             return true;
         }
         const now = this.now();

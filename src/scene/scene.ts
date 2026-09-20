@@ -137,6 +137,10 @@ class Scene {
     readonly motionQuality = new MotionQuality();
     // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
     private _appliedRenderScale = 1;
+    // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
+    private _wasMoving = false;
+    // 停手补帧的武装时刻（0 = 没有欠着的补帧）；用于在补帧落地前持续出帧，并给它一个上限
+    private _settleSortArmedAt = 0;
 
     dataProcessor: DataProcessor;
     assetLoader: AssetLoader;
@@ -813,11 +817,44 @@ class Scene {
         if (qualityChanged) {
             this.applyRenderScale(this.motionQuality.renderScale);
         }
+
+        // 停手后的收尾：给每个 splat 补一帧"干净排序"，让静止画面用的是最终位姿的顺序。
+        // 为什么要显式做：`_sortSettleAt` 那套启发式只在"被闸门挡下的帧"里才会武装，
+        // 实测存在"整段手势结束却没有补帧"的情况（`verify-motion-quality.cjs` 抓到的就是它）。
+        if (this._wasMoving && !this.cameraMotion.moving) {
+            const splats = this.getElementsByType(ElementType.splat) as Splat[];
+            for (let i = 0; i < splats.length; i++) {
+                if (splats[i].visible) {
+                    splats[i].forceSettleSort();
+                }
+            }
+            this._settleSortArmedAt = performance.now();
+        }
+        this._wasMoving = this.cameraMotion.moving;
+
+        // 补帧欠着的时候必须继续出帧：本应用按需渲染，而"停手"那一刻正好是它想停的时候，
+        // 不强制的话那一帧永远不会到来（实测：武装了 deadline 却 0 次派发）。
+        // 加一个上限，避免 sorter 异常时无限出帧。
+        let settleSortPending = false;
+        if (this._settleSortArmedAt !== 0) {
+            const splats = this.getElementsByType(ElementType.splat) as Splat[];
+            for (let i = 0; i < splats.length; i++) {
+                if (splats[i].visible && splats[i].sortSettlePending) {
+                    settleSortPending = true;
+                    break;
+                }
+            }
+            if (!settleSortPending || performance.now() - this._settleSortArmedAt > 1500) {
+                this._settleSortArmedAt = 0;
+                settleSortPending = false;
+            }
+        }
+
         // 降级期间保持渲染，直到"恢复全分辨率"那一帧真正发生：本应用是按需渲染的，
         // 相机停手后不再有自然帧，若就此停住，画面会一直停在低分辨率（实测：不加这一条时
         // verify-motion-quality 的"停手恢复"一项失败，override 一直挂在 896x537）。
         // 恢复施加完（engaged=false 且缩放回到 1）就不再强制渲染，不会白烧电。
-        if (this.motionQuality.engaged || this._appliedRenderScale !== 1) {
+        if (settleSortPending || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
             this.forceRender = true;
         }
 

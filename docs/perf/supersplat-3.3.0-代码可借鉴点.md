@@ -71,6 +71,33 @@
 
 **升级引擎的代价（若有人提议顺手升级）**：全树 **433 个文件**有差异（含 `deprecated\deprecated.js` −214 行、三套 build 变体 `playcanvas` / `.dbg` / `.prf`），且必须**同步重新校准 6 个被我们覆盖的 gsplat chunk**（否则丢阴影、丢 `SCENE_TEXTURE_DEPTH` 深度写入、丢 Firefox/D3D12 workaround）。**为了本轮的目的一点都不划算。**
 
+### 1.4 路线 A′ 的 spike 实测：把 unified 打开会怎样（2026-09-21）
+
+上面 1.3 是**源码级**判断。本轮补了一次**运行时 spike**（20M fill 夹具 / WebGPU，
+`_tmp/unified-spike.cjs`）：在运行中的应用里**新建一个 `addComponent('gsplat', { asset, unified: true })`
+实体**、放进同一个 splat 图层（layer 5）、把原来的经典 splat 隐藏，然后量。
+
+| 量 | 经典通路（现状） | unified 通路（spike） |
+| --- | --- | --- |
+| 组件实例 | 有（`instance` 存在、`sorter` 存在） | **实例根本没建出来**（`instance = null`、`hasSorter = false`） |
+| 帧 p50 | 70.1 ms | 16.7 ms（**没有任何东西在被画**） |
+| GPU 段 p50 | **70.36 ms** | **1789900805800 ms（1.79×10¹²，垃圾值）** |
+| `litPercent` | **81.3%** | **0.1%（空屏）** |
+| 控制台报错 | 无 | 无（**静默失败**） |
+
+⇒ **结论（有实测支撑）**：引擎的 unified 通路在本 fork 里**不是"打开开关就能用"** ——
+实体拿不到 `GSplatInstance`（`instance = null`），屏幕是空的，而且**不报错**。
+原因与 1.3 的源码判断一致：unified 由引擎的 director/manager 驱动，而本 fork 的相机用**自建的
+`RenderPassForward` 通道列表**渲染 splat 图层（`src/camera/camera.ts` 的 `clear/main/splat/gizmo/final`），
+绕开了那条注册路径；即便把注册接上，1.3 列的卡点（自定义顶点入口被 `gsplatModifyVS` 取代、
+选择状态纹理必须改成 `Format.addExtraStreams`、`SH_BANDS` define 会被 `copyMaterialSettings` 覆盖）
+仍要逐个解决。
+
+**顺带修掉一个由此暴露的健壮性问题**：这一跑让 `gpuProfiler` 报出 `1.79×10¹² ms` 的**垃圾帧时**
+（没有可计时的 pass 时拿到未初始化的 query 值）。`src/core/gpu-frame-timing.ts` 现在会**丢弃不可信的值**
+（非有限 / 负 / > 10000 ms），否则自适应策略会被它一路顶到最粗档。
+
+
 ## 2. 它的"快"具体由哪几件事构成（全部带出处）
 
 | # | 机制 | 出处 | 关键参数 / 上游实测数字 |

@@ -3374,6 +3374,34 @@ group-renderer 激活时由 `group-renderer.ts` 自己 `sort()`）。**闸门在
     `"..." was not found in this archive` —— 单层路径（`dist/index.js`）碰巧能过，所以这个坑是**间歇性**的。
     现在探针会依次尝试几种变体（`readEntry`）。
 
+#### 第二轮补记（2026-09-21）：把"停手后补一帧干净排序"验证出来，顺带修三个真问题 + unified spike
+
+目标里那条"**停手后强制补一帧干净排序**"原来是**继承 P0-2 的启发式、从未验证**。加上断言后立刻失败，
+顺着查出三件事（细节见 `docs/perf/交互期降级-实现与实测.md` §6.5）：
+
+1. **启发式确实会漏补帧**：`_sortSettleAt` 只在"被 800 ms 闸门挡下的帧"里武装，放行时又清零；
+   而且闸门包的是 `sorter.setCamera`，**它不一定会真的给 worker 发消息**（引擎 worker 还有自己的 1e-3 门限）
+   ⇒ "闸门放行次数"不能当作排序已刷新的证据。
+2. **按需渲染 + 停手 = 补帧那一帧永远不来**：deadline 武装了却一直挂着。修法：新增
+   `Splat.forceSettleSort()` / `sortSettlePending`，`Scene` 在"运动 → 停手"跳变时武装，
+   **并在欠着补帧期间持续出帧**（1500 ms 上限）。这是上游 `pendingResolve` 的对应物。
+3. **合成旋转不会请求渲染（测量陷阱第三次踩到）**：`cam.setAzimElev(...)` 是程序化改相机、
+   不标记场景为脏 ⇒ 实测一次 1 秒合成拖动之后 1.5 秒内 `Splat.onPreRender` **0 次调用**，
+   于是逐帧逻辑没帧可跑、探针把 0 次派发误读成功能坏了。**所有合成旋转必须自己 `scene.forceRender = true`**
+   （已写进 `HANDOFF.md` 坑列表第 24 条）。
+
+**验证**：`verify-motion-quality.cjs` 扩到 **9/9，`failed: 0`**，新增两项即"闸门仍限流（2.5 秒拖动放行 5 次，界 1..6）"
+与"停手补帧不被拖欠（`sortSettlePending` 转 false）"；20M fill 上也实测停手 300 ms 后 `pending` true → false。
+
+**路线 A′（打开引擎 unified）的 spike 做了**（`_tmp/unified-spike.cjs`，20M fill）：
+新建 `addComponent('gsplat', { asset, unified: true })` 实体放进同一 splat 图层、隐藏原实体 ⇒
+**实例根本没建出来**（`instance = null`）、帧 p50 16.7 ms、`litPercent` **0.1%（空屏）**、
+GPU 段报出 **1.79×10¹² ms** 的垃圾值、**控制台无任何报错（静默失败）**。
+⇒ 结论：unified 在本 fork **不是"打开开关就能用"**（原因：unified 由引擎 director/manager 驱动，
+而本 fork 用自建 `RenderPassForward` 通道列表渲染 splat 图层，绕开了注册路径）。
+顺带修掉一个健壮性问题：`gpu-frame-timing.ts` 现在**丢弃不可信帧时**（非有限/负/> 10000 ms），
+否则那个垃圾值会把自适应策略顶到最粗档。详见 `docs/perf/supersplat-3.3.0-代码可借鉴点.md` §1.4。
+
 #### 还剩什么
 
 1. **降级期间拾取坐标不一致**：投影/拾取换算用变小的 `scene.targetSize`（`src/app/editor.ts:1027` 等），

@@ -72,13 +72,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         };
     });
 
+    // Rotate the camera for `ms`. `scene.forceRender` is set every iteration because this app renders
+    // on demand and a *programmatic* `setAzimElev` does not mark the scene dirty (there is no pointer
+    // input behind it) — without the forced frame a synthetic drag renders almost nothing, and the
+    // per-frame work under test (motion tracking, the sorter gate, the settle sort) never runs.
+    // Measured the hard way: `onPreRender` was called 0 times in the 1.5 s after such a drag, which
+    // made the settle-sort check report 0 dispatches for the wrong reason.
     const rotate = (ms) => page.evaluate(async (duration) => {
         const cam = window.scene.camera;
+        const scene = window.scene;
         const t0 = performance.now();
+        let stop = false;
+        const loop = () => {
+            scene.forceRender = true;
+            if (!stop) requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
         while (performance.now() - t0 < duration) {
             cam.setAzimElev(cam.azim + 1.5, cam.elevation, 0);
             await new Promise((r) => setTimeout(r, 16));
         }
+        stop = true;
     }, ms);
 
     const checks = [];
@@ -139,6 +153,67 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         check('window.__SPLATROOM_MOTION_QUALITY__ = false disables it while rotating',
             disabled.engaged === false && disabled.override === null,
             `engaged=${disabled.engaged} override=${disabled.override} moving=${disabled.moving}`);
+
+        // ---- sorter gate + settle-time clean frame ----
+        // The degradation must not disturb the P0-2 gate, and the frame that settles must issue a final
+        // sort so the resting image uses the final pose.
+        //
+        // Measured through the gate's own bookkeeping rather than `worker.postMessage` counts: on a
+        // 2000-point fixture the engine's sort path never engages the worker at all, so post counts are
+        // legitimately 0 here (the post-level evidence lives in
+        // docs/probes/settle-20m.cjs / docs/perf/交互期降级-实现与实测.md, measured on the 20M fixture
+        // where a drag really does post ~1.2×/s). What is fixture-independent is how often the throttle
+        // lets a dispatch opportunity through, and whether a settle sort is left owed.
+        const gateState = () => page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            return {
+                lastDispatch: splat._sortLastDispatch,
+                pending: splat.sortSettlePending
+            };
+        });
+
+        // degradation ON for this part: the point is that it does not disturb the sorter gate
+        await page.evaluate(() => {
+            delete window.__SPLATROOM_MOTION_QUALITY__;
+            window.scene.motionQuality.enabled = true;
+            window.scene.motionQuality.forceEngaged = true;
+        });
+        await sleep(300);
+
+        // sample _sortLastDispatch while dragging: each change is one dispatch opportunity the 800 ms
+        // throttle allowed through
+        const dispatchSamples = [];
+        const sampler = (async () => {
+            for (let i = 0; i < 26; i++) {
+                dispatchSamples.push((await gateState()).lastDispatch);
+                await sleep(100);
+            }
+        })();
+        await rotate(2500);
+        await sampler;
+        let allowedChanges = 0;
+        for (let i = 1; i < dispatchSamples.length; i++) {
+            if (dispatchSamples[i] !== dispatchSamples[i - 1]) {
+                allowedChanges++;
+            }
+        }
+        check('the 800 ms sorter gate still limits dispatch opportunities during a 2.5 s drag',
+            allowedChanges >= 1 && allowedChanges <= 6,
+            `dispatch opportunities allowed during the drag = ${allowedChanges} (2.5 s / 800 ms ≈ 3)`);
+
+        // the settle sort must be consumed, not left owed (this is the deadlock guard: the armed frame
+        // only happens if something keeps rendering)
+        let owed = null;
+        for (let i = 0; i < 12; i++) {
+            await sleep(100);
+            owed = await gateState();
+            if (!owed.pending) {
+                break;
+            }
+        }
+        check('the settle sort is issued, not left pending',
+            owed !== null && owed.pending === false,
+            `sortSettlePending after the drag = ${owed ? owed.pending : 'null'}`);
 
         await page.evaluate(() => {
             delete window.__SPLATROOM_MOTION_QUALITY__;

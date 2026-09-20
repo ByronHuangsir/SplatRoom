@@ -742,6 +742,32 @@ class Splat extends Element {
     }
 
     /**
+     * 让下一帧补一次"停手后的干净排序"（交互期降级 / 运动期限流的收尾）。
+     *
+     * 为什么需要显式调用，而不是依赖 `_sortSettleAt` 那套启发式：那条路的截止点**只在"被 800 ms 闸门
+     * 挡下的帧"里才会被武装**（`_sortSettleAt === 0` 时置位），而闸门放行时又会把它清零 ——
+     * 于是"最后一次放行"之后如果没再出现被挡下的帧，停手时就**没有任何补帧**。2026-09-21 实测：
+     * 2.5 秒连续旋转 + 停手 900 ms，`worker.postMessage` **0 次**（`verify-motion-quality.cjs` 的
+     * "settling issues one final clean sorted frame" 一项抓到的就是它）。
+     * 另外要注意：闸门包的是 `sorter.setCamera`，它**不一定会真的给 worker 发消息**
+     * （引擎 worker 自己还有 1e-3 门限），所以"闸门放行次数"也不能当作排序已刷新的证据。
+     *
+     * 本方法只把截止点置成"已过期"（`1`），真正的派发仍走 onPreRender 里那条停手分支
+     * （它用的是**当帧**的相机位姿，因此补出来的顺序与静止画面一致）；已经武装过就什么都不做
+     * ⇒ 一次手势最多补一帧，不会重复排序。
+     */
+    forceSettleSort() {
+        if (this._sortSettleAt === 0) {
+            this._sortSettleAt = 1;
+        }
+    }
+
+    /** 是否还有"停手补帧"欠着没派发（Scene 用它决定要不要继续出帧，见 scene.ts） */
+    get sortSettlePending() {
+        return this._sortSettleAt !== 0;
+    }
+
+    /**
      * 直接给排序 worker 派一次全量排序（绕开引擎 1e-3 的 epsilon 门限）。
      *
      * 引擎的 `GSplatInstance.sort()` 对相机方向用 `equalsApprox(..., 1e-3)`：缓慢旋转时

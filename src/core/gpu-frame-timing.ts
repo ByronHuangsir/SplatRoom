@@ -39,6 +39,10 @@ type GpuSpanStats = {
     max: number | null;
 };
 
+// Upper bound for a believable frame span. Anything above this is an uninitialised/garbage query
+// result rather than a slow frame (see the guard in _onReport).
+const MAX_PLAUSIBLE_FRAME_MS = 10000;
+
 const _spanStats = (values: number[]): GpuSpanStats => {
     if (values.length === 0) {
         return { count: 0, p50: null, p95: null, max: null };
@@ -98,6 +102,7 @@ class GpuFrameTiming {
     private readonly _settledRecent: number[] = [];
     private _reports = 0;
     private _nullReports = 0;
+    private _rejectedReports = 0;
 
     constructor(device: GraphicsDevice) {
         this._device = device;
@@ -182,7 +187,17 @@ class GpuFrameTiming {
             this._nullReports++;
             return;
         }
-        const gpuMs = typeof frameTime === 'number' ? frameTime : timings.reduce((sum, t) => sum + t, 0);
+        const rawMs = typeof frameTime === 'number' ? frameTime : timings.reduce((sum, t) => sum + t, 0);
+        // Sanity clamp. A frame that records no timestamped pass can report an uninitialised query
+        // value instead of zero: enabling the engine's unified gsplat path by mistake produced
+        // `frameTime = 1789900805800.25` (1.79e12 ms) with an empty viewport. Feeding that to the
+        // adaptive policy would pin it at the coarsest level forever, so implausible spans are dropped
+        // (they stay visible in `nullReports`/`rejectedReports` rather than in the statistics).
+        if (!Number.isFinite(rawMs) || rawMs < 0 || rawMs > MAX_PLAUSIBLE_FRAME_MS) {
+            this._rejectedReports++;
+            return;
+        }
+        const gpuMs = rawMs;
         this._reports++;
         const moving = !!mode;
         if (moving) {
@@ -228,6 +243,7 @@ class GpuFrameTiming {
             enabled: this._enabled,
             reports: this._reports,
             nullReports: this._nullReports,
+            rejectedReports: this._rejectedReports,
             samples: this._samples.length,
             lastGpuMs: last ? Math.round(last.gpuMs * 100) / 100 : null,
             lastWasMoving: last ? last.moving : null,
@@ -247,6 +263,7 @@ class GpuFrameTiming {
         this.lastMovingGpuMs = null;
         this._reports = 0;
         this._nullReports = 0;
+        this._rejectedReports = 0;
     }
 }
 
