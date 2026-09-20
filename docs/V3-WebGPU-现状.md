@@ -2814,6 +2814,175 @@ viewer 自己的 JS 里**就含** `data:application/octet-stream;base64,` 这个
    （6.51 的第 1 条"查看器 4.25 GB 瞬时分配"本轮已完成，见本节。）
 
 
+### 6.53 第五十一轮：2000 万点 / WebGPU 六项实测问题 —— ①②④⑤ 修掉，③⑥ 定位到根因
+
+用户在一台大扫描件上、**WebGPU 模式**下试出来的六条，本轮逐条实测定位并修掉四条，另外两条
+（③⑥）做到"根因可复核 + 修法明确"。完整数据、探针与逐条证据见 `docs/perf/2000万点六项问题-排查发现.md`。
+
+**夹具**：用户的原始文件 `D:\3DGS\训练结果\文物\LFS-文物-真珠舍利宝幢-35\splat_273200.ply`
+= **20,000,000 点 / 62 列（45 列 SH，加载后 64 列）/ 4.73 GB**。诊断时用硬链接放成 `dist\test-20m.ply`
+（`New-Item -ItemType HardLink`，**不占额外空间，但打包前必须删掉**）。所有实测都在
+`?gpu=webgpu` + 无头 Edge 上；4.9 GB 单响应会被浏览器中止，所以探针改用 **Range 分块（19×256 MB）
+在页面里拼 File**（应用本身是按 `BlobReadStream` 分块读的，所以这条路与真机一致）。
+
+**这张模型的一个关键特征**（后面 ③④⑤ 都源于它）：**AABB 被一撮几公里外的噪声点撑爆** ——
+实测 AABB 半径 **8297**（另一次读到 16115），而真正看得见的密集区半径只有 **153**（`denseRadius()`），
+差了 **×54**。
+
+#### ① "显示/隐藏 Splats"后已删除的点全回来了（已修 · 已实测）
+
+- 右侧那个按钮走的是 **`camera.toggleOverlay`**（`src/ui/right-toolbar.ts:164`），切的是**点覆盖层**
+  `SplatOverlay`；而默认 `camera.mode` 就是 `'centers'`（`src/core/preferences.ts:97`），所以人人会碰到。
+- 覆盖层着色器原来**只判锁定位（bit 2）**，注释写着 "deleted splats are already excluded from order
+  texture" —— 那句**只在 WebGL2 成立**（引擎的 order texture 是排序后的可见集合）。WebGPU 用的是
+  **恒等序纹理**、并且按 `splat.numSplats`（= 行数 − 已删除数）派发，删除位根本没人过问
+  ⇒ 前 N 行照画，删除的点全回来了。
+- 修：`src/shaders/splat-overlay-shader.ts` 自己判 **bit 4**（新增 `overlayShowDeleted` uniform，
+  "显示已删除"打开时仍可见）；`src/splat/splat-overlay.ts` 在 WebGPU 下改画**全部行**
+  （`splat.splatData.numSplats`，不再是可见行数），并在 `onPreRender` 每帧下发 `overlayShowDeleted`。
+- **实测（20M）**：`overlayDraw = 20,000,000`（全部行）而 `visible = 10,170,781`；
+  删掉 **49.1%** 的点后屏幕亮像素 **96.93% → 65.86%**（修复前会照旧 ~97%，因为前 N 行里照样包含被删的点）。
+
+#### ② "高斯点数据"展开没有任何数据（已修 · 已实测 · 含 SH 夹具复验）
+
+- 控制台每次都有：`CommandQueue task failed TypeError: e.updateBegin is not a function`。
+- 根因：`src/data-processor/calc-histogram.ts` 的 `clearRT()` 与 `src/data-processor/draw-points.ts` 的
+  `drawPointsWithShader()` 用了 **WebGL 专用** `updateBegin()/updateEnd()`
+  （`WebgpuGraphicsDevice` 没有这两个方法）；而且 `src/shaders/histogram-shaders.ts` 的 `binVS` 赋值了
+  `gl_PointSize`（WebGPU 转 WGSL 会丢入口点 → 非法 pipeline）⇒ **直方图 pass3 每次都抛异常**，
+  面板里既没有直方图也没有数值（属性名列表还在，所以看起来就是"展开了但没有任何数据"）。
+- 修（**实现形状与最初设想有一处偏离，理由充分、已接受**）：`clearRT` 加 `typeof` 守卫 + WebGPU 侧
+  改走 **`RenderPass` 的 color clear op**（WebGPU 的 `device.clear()` 本身也要在活动 pass 里才成立，
+  只加守卫不够）；bin pass 在 WebGPU 下改用 **`RenderPass + QuadRender`**（引擎自带 indexed 单位四边形，
+  每实例 2 个三角形），`binVS` 新增 **`GSPLAT_BIN_QUADS`** 变体（`gl_InstanceID` + `vertex_position`，
+  用 `uHistViewportSize` 扩成 1 像素，**不再赋值 `gl_PointSize`**）。
+  为什么不用"6 顶点 + 原始 `device.draw`"：WebGPU 的 `draw()` 必须在 render pass 内，且 device scope 的
+  uniform / 纹理只有 `QuadRender.render()` 会上传并绑定（它持有引擎模块私有的 `_dynamicBindGroup`，
+  公共 API 拿不到）—— 那条路在当前引擎下拿不到 splat 数据。**WebGL2 分支逐行未改。**
+- **实测**：WebGPU 与 WebGL2 **逐 bin 逐元素完全一致**（2000 / 3077 / 13,007,105 三档都验过，
+  两端数组 `arraysIdentical=True`、`differingBins=0`）；`numValues == numSplats`（既不重复计数也不漏画）；
+  WebGL2 与原基线**位相等**（零回归）。
+- **带 SH 的 20M 夹具复验**（新探针 `docs/probes/histogram-20m.cjs` —— 子代理只在 DC-only 夹具上验过，
+  而 `GSPLAT_BIN_QUADS` 与 `SH_BANDS` 正交，这条是补它没测的变体）：`shBands = 3`、
+  `infoMin = -4988.211`、`infoMax = 4817.011`、**212/256 列有柱子**、**consoleErrors 为空**。
+- 澄清一处易误读：面板里「Splat: / 选择:」是**悬停读数**（`src/ui/data-panel.ts:712-722`，
+  `showStats()` 仅在鼠标悬停/拖拽直方图时填写，默认 `display: none`），**不是缺数据**。
+
+#### ③ "选择范围只能收缩、无法扩展"（根因已量化 · 修法待落）
+
+- **功能没坏**：矩形 40–60% 选中 19,997,733，换更大的矩形 `add` → 19,999,986；
+  左右 40–60 把全屏选中从 19,282,378 收到 **14,347,710** —— 两个轴都能改。
+- **问题在深度轴的"行程分布"**（全屏框选后用 `selection.setDepthRange` 逐档推，20M 实测）：
+
+  | 深度范围 | 选中点数 |
+  |---|---|
+  | 0–100（默认整段） | 19,282,378 |
+  | 10–90 | 17,956,371 |
+  | 25–75 | 16,468,657 |
+  | 40–60 | 13,930,757 |
+  | 48–52 | 2,644,133 |
+  | 49–51 | 1,332,551 |
+  | 50–50.5 | **358,006** |
+
+  拖 0→40 只掉 28%，而 **48→50 就从 264 万掉到 36 万**：密集区挤在深度 ≈50 的一根针尖上，
+  **滑块绝大部分行程"没反应"**，靠近针尖时一步就是几百万点 —— 用户体感就是"拉几次没反应 / 只能收缩"。
+  这是"范围按**被噪声撑爆的 AABB** 线性映射"的必然结果（`poseExtent` / `rangeDistances`）。
+- 修法方向：深度范围改用**裁剪分位数**（与 `Splat.framingRadius()` 同一套 1%~99% 思路）或对 `tailMap`
+  做非线性压缩；**要等 P0-1 的 Worker 改造落地后再动** `src/app/editor.ts` / `src/splat/selection-range.ts`，
+  避免与其冲突。
+- 仍需用户确认：他用的控件（深度浮条 `#selection-range-bar`？）与当时模式（`centers` / `rings`）——
+  **环模式下 `rangeMask()` 直接把拾取掩码原样返回、滑块完全不参与**，那是另一种明确行为。
+- 顺带修掉（本轮已提交 `72a1085`）：`src/ui/bound-dimensions-overlay.ts` 在投影退化时会把
+  `translate(NaN, NaN)` 写进 SVG（控制台每次刷
+  `<g> attribute transform: Expected number, "translate(NaN, NaN)"`）—— 现在改成 `visibility: hidden`。
+
+#### ④ "框显所选"只显示一小块（已修 · 已实测）
+
+- 根因：`Splat.focalPoint()` 是对的（密集中心），但**取景半径用的是 `worldBound.halfExtents.length()`**
+  （AABB 半对角线），被远处噪声点撑爆 ⇒ 相机停在 8~16 km 外。旧实现实测三种状态：
+  导入后 **16115**、框显所选 **8297**、重置相机 **13629**（对只有 153 的密集区来说，屏幕上只剩一个点）。
+- 修：新增 **`Splat.framingRadius()`** = **裁剪包围盒**半对角线（按轴取 1%~99% 分位、抽样 ≤20 万点、
+  ×1.1 余量），三处取景都用它：`src/camera/camera.ts` 的 `getSplatInfo`、
+  `src/app/editor.ts` 的 `camera.focus` 处理器、`camera.reset`。
+- **第一版我用的是 `denseRadius()`（不透明度×尺度的加权 3σ），那是错的**：它会把薄墙 / 稀疏结构也裁掉，
+  实测直接让 **`verify-mask-vs-rect` 与 `verify-equirect-export` 两套回归失败**；
+  换成裁剪分位数后这两套恢复 `failed=0`。这就是"为什么不用 `denseRadius()`"的理由（记录在此以免重蹈）。
+- **实测（20M）**：取景半径 **301.7**（AABB 8297.4），框显所选后相机到密集中心 **301.67**
+  （比值 **1.0**，修复前 ×54），相机 y=96.13 在密集中心 y=18.05 上方。
+
+#### ⑤ "重置相机"改成回到密集区斜上方 15°（已修 · 已实测）
+
+- 原实现：`setFocalPoint(0,0,0)` + `setAzimElev(0,0)` + `setDistance(initialZoom)` —— 实测相机停在
+  离模型 **13629** 处（密集区半径 153），什么都看不到。
+- 修（`src/app/editor.ts` 的 `camera.reset` 分支）：**密集中心 + `framingRadius()` 取景 +
+  `setAzimElev(0, -15, 1)`**。为什么是 **−15°**：`Camera.calcForwardVec` 的 `y = sin(-elev)`，
+  `elev = -15` ⇒ `y > 0` ⇒ **相机在焦点上方 15°、俯视模型**（与 `camera.focus()` 导入时的初始视角一致）。
+  没有模型时保持原来的默认视角。
+- **实测（20M）**：相机 y=96.13 > 密集中心 y=18.05、仰角 **−15°**、方位角 0、距离/半径 **1.0**。
+
+#### ⑥ 不如浏览器版 SuperSplat 3.3.0 流畅（热点已量；两条在改、一条未开始）
+
+本机 20M 实测热点：
+
+| 量 | 值 |
+|---|---|
+| `select.rect` 一次（主线程全程占用） | **1275.7 ms** |
+| `splat.updateState()` | 38.4 ms（默认）/ 53.1 ms（selected）/ **179.2 ms**（deleted，含重建 20M 排序映射） |
+| 轨道旋转 3 秒（帧间隔） | median 16.7 / p95 29.6 / **max 462.8 ms**（**5 帧 >33 ms**） |
+| 空闲 3 秒（帧间隔） | median 16.7 / p95 16.9 / max 19.8（0 帧 >33 ms） |
+
+对比调研见 `docs/perf/supersplat-3.3.0-对比调研.md`（含上游 v3.3.0 源码出处与出处等级标注）。
+关键锚点：官方博客 20M 一档 **WebGL2 44.93 ms（22.3 fps）/ WebGPU 10.22 ms（97.8 fps）**；
+**本机 WebGPU 架构等价于那一列 WebGL2**（worker CPU 排序 + 每高斯展开 quad）
+⇒ **换后端本身不加速**，那 4.4× 来自"compute 投影 + 紧凑化 + GPU 基数排序 + indirect draw"，
+而且上游**运动帧完全不排序**。三条 P0 的进度：
+
+1. **P0-1（框选/套索/多边形/2D 笔刷搬进 Worker，目标主线程阻塞 ≤150 ms）** ——
+   **实施中，尚未验收提交**：新文件 `src/splat/selection-core.ts`、`src/splat/selection-worker-client.ts`、
+   `src/workers/selection-worker.ts`、`src/splat/state-bits.ts`，并改了 `src/app/editor.ts`、
+   `src/splat/selection-range.ts`、`src/splat/splat-state.ts`、`rollup.config.mjs`。
+   验收标准是**双后端跑既有选择类套件**（`verify-selection-range` 24 项 / `verify-selection-depth-bar` 19 项 /
+   `verify-mask-vs-rect` / `verify-selection-overlay` / `verify-sphere-brush` / `verify-shape-selection` /
+   `verify-selection-toolbar` / `verify-edit-hide` / `verify-range-cache-hint`）语义不变。
+2. **P0-2（交互期每帧强制全量排序 → 最小间隔 100 ms + 停手补一帧）** ——
+   **代码就绪，运行时验证待下一轮**（`tsc` / `eslint` 已过）：`src/splat/splat.ts` 新增
+   `_sortLastDispatch` / `_sortSettleAt` / `dispatchSort()`；检测阈值仍保持灵敏（1e-12），
+   只把"派发频率"与"检测阈值"拆开。背景：我们 fork 为绕开引擎 `GSplatInstance.sort()` 的 1e-3 epsilon
+   门限而用 1e-12 ⇒ 原来"只要动就每帧派一次"，20M 上一次全量排序 0.3~0.5 s，加上引擎在排序完成时的
+   **80 MB 主线程上传**，就出现了上表里的 462.8 ms 帧。第一版"补帧"逻辑有 bug
+   （空闲帧会把 deadline 一直往后推 ⇒ 永不补帧），已修并写进注释留痕。
+   验证探针：`_tmp/sortrate.cjs`（包一层 `worker.postMessage` 数派发次数、采样帧间隔、检查停手是否补帧）。
+3. **P0-3（交互期降级：降 SH 波段 / 抽稀 / 提高 `alphaClipForward`；中期做 compute 投影 + 紧凑列表 +
+   indirect draw）** —— **未开始**。
+
+#### 验证与产物
+
+- 新增套件 `docs/verify/verify-large-model-ui.cjs`（①②④⑤，**真 20M 夹具，5/5 全过**）：
+  ① 删 49.1% 后亮像素下降 + 覆盖层绘制数=全部行；④ 框显所选 距离/半径 <3；⑤ 重置相机在焦点上方且仰角 −15°；
+  以及一条"夹具确实是噪声撑爆 AABB"的前提检查。**不进批量**（需要大夹具）。
+- 新增探针：`docs/probes/histogram-20m.cjs`（带 SH 的直方图验证）、
+  `docs/probes/selection-range-20m.cjs`（③ 的量化）。
+- 全量回归：**37 个套件 `TOTAL FAILED: 0`**（webgpu）；关键选择类套件在 **webgl2** 也过；
+  `npm run check` 退出码 **0**。（批量里 `verify-merge-ui.cjs` 仍是既有的 UNPARSED，与本轮无关。）
+- 顺带修掉两个同类热耗/噪声：`focalPoint()` 对 >50 万点**改抽样**（原来每次取景要跑
+  **4000 万次 `Math.exp`**，20M 上秒级 → ~10 ms，与同文件里 `denseRadius()` 早就采样的做法对齐）；
+  `bound-dimensions-overlay` 不再往 SVG 写 `translate(NaN, NaN)`。
+- 本轮提交：`17aef18`（①②④⑤ + 两份报告）→ `13a41f8`（版本 **3.23.6**）→ `419d238`（focalPoint 抽样）
+  → `a8068a9` / `6c1cae0`（② 含 SH 夹具复验 + 探针）→ `72a1085`（NaN）→ `3f22e69` / `0135ddf`（③ 量化 + 探针）。
+- 产物：`release\SplatRoom-3.23.6.exe`（**122.1 MB**）：asar **5295** 条 / 唯一 PLY = `dist\test-model.ply` /
+  8 个 wasm / `dist\index.js` 含字面量 `3.4.0` + `3.23.6` / 9 语言各 **689** 键 /
+  exe 属性 FileVersion=ProductVersion=**3.23.6** / 冒烟 4 进程（窗口标题 SplatRoom）→ 杀净 0。
+
+#### 还剩什么
+
+1. **③ 的修法**（深度范围改裁剪分位数 / 非线性 `tailMap`）—— 等 P0-1 落地后动
+   `editor.ts` / `selection-range.ts`；还需用户确认控件与模式。
+2. **P0-1 验收**（Worker 化后的选择语义 + 主线程阻塞实测 ≤150 ms，双后端套件为裁判）。
+3. **P0-2 实测**（派发次数应从"每帧"降到 ≈10/秒、max 帧下降、停手补帧生效）。
+4. **P0-3 未开始**。
+5. `dist\test-20m.ply` 是硬链接到用户 4.73 GB 原件的诊断夹具，**打包前必须删**。
+
+
 
 
 
