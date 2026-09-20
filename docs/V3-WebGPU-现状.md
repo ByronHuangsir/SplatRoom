@@ -3360,6 +3360,19 @@ group-renderer 激活时由 `group-renderer.ts` 自己 `sort()`）。**闸门在
   已进批量）与 `docs/verify/verify-motion-quality-policy.mts`（纯 node **13/13**）。
 - 全量：**webgpu 39 套 `TOTAL FAILED: 0`** + **webgl2 39 套 `TOTAL FAILED: 0`**；
   `npm run check` 退出码 **0**。
+- **产物**：`release\SplatRoom-3.23.9.exe`（**122.04 MB**，portable，已签名）：asar **5293** 条 /
+  唯一 PLY = `dist\test-model.ply` / 8 个 wasm / `dist/index.js` 含字面量 `3.4.0` + **3.23.9** /
+  9 语言 zh-CN **689** 键 / exe 属性 FileVersion=ProductVersion=**3.23.9** / 冒烟 4 进程（窗口标题 SplatRoom）→ 杀净 0。
+  - **打包踩到一次坑（记一笔）**：第一次打包忘了"dist 里除 `test-model.ply` 外的夹具要先挪走"这一步，
+    结果 4 个夹具（cluster / floater-biggrid / floater-scale / floater）进了 asar ⇒ exe **123.5 MB**、
+    asar 里 **5 个 PLY**。挪走后重打 ⇒ **122.04 MB / 唯一 PLY** ✓。
+  - **条目数差异如实记**：本次 **5293**，而 3.23.8 记的是 **5297**（11 项检查全绿，仅这一个数字不同）。
+    本轮源码只新增 3 个模块（打进 `dist/index.js`，不新增条目）、不新增资源 ⇒ 差异**不是**本轮引入的，
+    但**未查清**（可能是两次构建的 `dist` 文件集或 `node_modules` 打包范围有 4 个条目的出入）。**不要把它当成回归**。
+  - 顺带修掉探针的一个真 bug：`docs/probes/check-asar-3120.cjs` 用 `listPackage()` 返回的**原始条目名**
+    （形如 `\dist\static\locales\zh-CN.json`，**带前导分隔符**）直接喂 `extractFile` 会报
+    `"..." was not found in this archive` —— 单层路径（`dist/index.js`）碰巧能过，所以这个坑是**间歇性**的。
+    现在探针会依次尝试几种变体（`readEntry`）。
 
 #### 还剩什么
 
