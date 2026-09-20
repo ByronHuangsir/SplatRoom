@@ -1,6 +1,9 @@
-// ③ 的量化：在 20M 模型上，深度/左右滑块每推一步到底改变了多少选中点数，
-// 以及"密集区"落在滑块行程的哪一段（怀疑：AABB 被远处噪声撑爆 ⇒ 有用行程只占极小一段）。
-// 用法：node sel-diag-20m.cjs <url> [model]
+// ③ 的量化（用户 2026-09-20 报的"选择范围只能收缩、无法扩展"）：
+// 在 20M 模型上全屏框选后，用 selection.setDepthRange 逐档推深度、再推一次左右，
+// 记下每一步的选中点数 —— 用来判断"密集区落在滑块行程的哪一段"。
+// 实测结论（test-20m.ply）：0–100→19,282,378；40–60→13,930,757；48–52→2,644,133；
+// 50–50.5→358,006 ⇒ 有用行程是一根针（密集区挤在深度 ≈50），这是"拉了没反应"的根因。
+// 用法：node docs/probes/selection-range-20m.cjs <url> [model]
 const puppeteer = require('C:/Users/Byon Huang/.workbuddy/binaries/node/workspace/node_modules/puppeteer-core');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
