@@ -41,6 +41,14 @@ const _fallbackLocalPos = new Vec3();
 const _fallbackLocalDir = new Vec3();
 const _fallbackInvModel = new Mat4();
 
+// P0-2（2026-09-20，用户 2000 万点实测 ⑥）：排序派发/相机闸门的节流参数。
+// 为什么是 800 ms：20M 一次全量排序约 0.4 s，把放行间隔设在"一次排序时长"之上，
+// worker 才有机会空闲（实测限流前它只要相机在动就一直排 ≈2.5 次/秒，每次排序完成
+// 引擎要做一次 ~80 MB 主线程上传 ⇒ 轨道旋转 max 帧 462~490 ms）。
+// 停手 200 ms 后补一帧，保证静止画面用的仍是最终位姿的顺序。
+const SORT_MIN_INTERVAL_MS = 800;
+const SORT_SETTLE_MS = 200;
+
 const boundingPoints =
     [-1, 1].map((x) => {
         return [-1, 1].map((y) => {
@@ -698,6 +706,42 @@ class Splat extends Element {
     }
 
     /**
+     * 给引擎的排序器装一道"相机闸门"（P0-2，2026-09-20，用户 2000 万点实测 ⑥）。
+     *
+     * 为什么必须装在**引擎**这一侧：`GSplatInstance.update()` 每帧都会调
+     * `sorter.setCamera()`（`gsplat-instance.js:123-126`，引擎自己的门限是 1e-6，等于"动一点就发"），
+     * 而 `GSplatSortWorker` 收到相机后按自己的 1e-3 门限决定是否真排（`gsplat-sort-worker.js:43-46`）。
+     * 旋转时每帧方向变化远大于 1e-3 ⇒ **worker 只要在动就一直在排**：20M 一次全量排序约 0.4 s
+     * （实测 `select.rect` 的那套相位表里 `selectRange` 同量级），也就是 ~2.5 次/秒，
+     * 而每次排序完成引擎都要做一次 ~80 MB 的主线程上传 ⇒ 实测轨道旋转 max 帧 462~490 ms、
+     * 4 秒内 6 帧 >33 ms（同机 idle median 16.6 ms）。
+     * 所以只在"我们自己的派发"上做限流是没用的（实测：限流后仍 45 次/秒 postMessage）。
+     *
+     * 闸门规则：最快每 SORT_MIN_INTERVAL_MS 放行一次；被挡下的调用记住最新位姿，
+     * 相机停稳 SORT_SETTLE_MS 后补发一帧 —— 静止画面用的仍是最终位姿的顺序。
+     * 这与上游 SuperSplat 3.3.0 的策略同向（它运动帧完全不排序），只是我们仍保证 ~1 次/秒的
+     * 顺序刷新，避免早期"顺序长时间不更新导致画面翻转/穿插"那个老问题（那段历史见下面 onPreRender 的注释）。
+     */
+    private ensureSorterGate(sorter: any) {
+        if (!sorter || sorter.__splatRoomGate) {
+            return;
+        }
+        const orig = sorter.setCamera.bind(sorter);
+        sorter.setCamera = (pos: any, dir: any) => {
+            const now = performance.now();
+            if (now - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
+                this._sortLastDispatch = now;
+                this._sortSettleAt = 0;
+                orig(pos, dir);
+            } else if (this._sortSettleAt === 0) {
+                // 挡下了：安排"停手后补一帧"。补帧在 onPreRender 里做（它拿到的是同一帧的相机位姿）。
+                this._sortSettleAt = now + SORT_SETTLE_MS;
+            }
+        };
+        sorter.__splatRoomGate = true;
+    }
+
+    /**
      * 直接给排序 worker 派一次全量排序（绕开引擎 1e-3 的 epsilon 门限）。
      *
      * 引擎的 `GSplatInstance.sort()` 对相机方向用 `equalsApprox(..., 1e-3)`：缓慢旋转时
@@ -774,6 +818,8 @@ class Splat extends Element {
             }
         }
         if (!hiddenByGroup && mainCamNode && inst.sorter) {
+            // P0-2：给引擎的相机派发装闸门（幂等，只会装一次）
+            this.ensureSorterGate(inst.sorter);
             // ---- Per-frame main-view sort fallback (bypasses engine epsilon gating) ----
             // Engine GSplatInstance.sort() at gsplat-instance.js L123 uses
             // equalsApprox(...,1e-3) on camera direction. Under slow rotation,
@@ -794,14 +840,10 @@ class Splat extends Element {
             // introduced for performance (order-texture upload cost) but caused
             // visible "鏉╂垵鐨潻婊冦亣" when the engine culler skips camera population.
             //
-            // P0-2 FIX (2026-09-20，用户 2000 万点实测 ⑥)：把"检测阈值"和"派发频率"拆开。
-            // 之前是"阈值 1e-12 ⇒ 只要动就每帧派"，20M 上一次全量排序 0.3~0.5 s，加上引擎在
-            // 排序完成时要做的 80 MB 主线程上传，实测轨道旋转期间 worker 100% 饱和、
-            // max 帧 462.8 ms、3 秒内 5 帧 >33 ms（同一台机器 idle 时 median 16.7 ms）。
-            // 上游 SuperSplat 3.3.0 更激进：运动帧**完全不排序**，静止帧才 GPU 排序。
-            // 这里取中间：检测仍然灵敏（1e-12），但派发最快每 SORT_MIN_INTERVAL_MS 一次，
-            // 且停手满 SORT_SETTLE_MS 后**补一帧**，保证静止画面用的仍是最终位姿的顺序。
-            // 语义不变：排序还是 worker 做、顺序还是最新位姿，只是不再每帧打断它。
+            // P0-2 FIX (2026-09-20，用户 2000 万点实测 ⑥)：真正的瓶颈不在"我们自己的派发"，
+            // 而在引擎每帧无条件调 sorter.setCamera()（见 ensureSorterGate 的注释）；
+            // 这里保留原来的灵敏检测（1e-12）在间隔到点时主动补一次带 forceUpdate 的派发
+            // （绕开 worker 自己的 1e-3 门限），并在停手后补最后一帧。
             const camWorld = mainCamNode.getWorldTransform();
             camWorld.getTranslation(_fallbackCamPos);
             camWorld.getZ(_fallbackCamDir);
@@ -823,11 +865,9 @@ class Splat extends Element {
             // 20M 上一次排序 0.3~0.5 s，叠加引擎"排序完成要 80 MB 主线程 memcpy"的上传，
             // 实测轨道旋转期间 worker 100% 饱和、max 帧 462.8 ms、3 秒内 5 帧 >33 ms。
             // 上游 SuperSplat 3.3.0 的做法更激进：运动帧完全不排序，静止帧才 GPU 排序。
-            // 这里取中间：运动期间最快每 SORT_MIN_INTERVAL_MS 派一次（≈10 次/秒，60fps 下等于
-            // 每 6 帧一次），**停手后 150 ms 再补一帧干净的排序**，保证最终画面与静止帧一致。
-            // 语义不变：排序仍然由 worker 做，顺序仍然是"最新的相机位姿"，只是不再每帧打断。
-            const SORT_MIN_INTERVAL_MS = 100;
-            const SORT_SETTLE_MS = 150;
+            // 这里取中间：在 sorter.setCamera 上装闸门（见 ensureSorterGate），把**引擎那条路**
+            // 限到 SORT_MIN_INTERVAL_MS 一次，**停手后 SORT_SETTLE_MS 再补一帧**，
+            // 保证最终画面与静止帧一致。
             const now = performance.now();
             if (moved) {
                 this._sortLastPos.copy(_fallbackLocalPos);
