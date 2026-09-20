@@ -3402,6 +3402,12 @@ GPU 段报出 **1.79×10¹² ms** 的垃圾值、**控制台无任何报错（�
 顺带修掉一个健壮性问题：`gpu-frame-timing.ts` 现在**丢弃不可信帧时**（非有限/负/> 10000 ms），
 否则那个垃圾值会把自适应策略顶到最粗档。详见 `docs/perf/supersplat-3.3.0-代码可借鉴点.md` §1.4。
 
+- **产物（第二轮）**：提交 `e8866d9` 之后 bump **3.23.10** 并重新打包 ——
+  `release\SplatRoom-3.23.10.exe`（**122.04 MB**，portable，已签名）：asar **5293** 条 /
+  唯一 PLY = `dist\test-model.ply` / 8 个 wasm / 字面量 `3.4.0` + **3.23.10** / zh-CN **689** 键 /
+  exe 属性 **3.23.10** / 冒烟 4 进程 → 杀净 0。回归：**webgpu 39 套 + webgl2 39 套 `TOTAL FAILED: 0`**、
+  `npm run check` 退出码 0。
+
 #### 还剩什么
 
 1. **降级期间拾取坐标不一致**：投影/拾取换算用变小的 `scene.targetSize`（`src/app/editor.ts:1027` 等），
