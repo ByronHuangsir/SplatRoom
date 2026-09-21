@@ -824,12 +824,17 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 44. **1.35 亿高斯"打不开"的真因是物化 7 GiB 列，不是读取**（2026-09-22 新增）：
     `src/io/read/loader.ts` 的 `materializeToDataTable()` 会给**每一列**分配
     `Float32Array(134,652,397)`（14 列 × 538 MB = **7.02 GiB**），随后还有 morton 索引 + permute
-    另开缓冲，引擎侧再叠加纹理 CPU 镜像与 centers。实测**900 秒仍未完成**、渲染进程工作集 10.9 GB。
+    另开缓冲（各约 0.5 GiB），引擎侧再叠加纹理 CPU 镜像（4.01 GiB）与 centers 三份（约 4.5 GiB）。
+    实测**900 秒仍未完成**、渲染进程工作集 10.9 GB（与"内存剖面 ≈ 11~12 GiB"的静态估算吻合）。
     修法：在**惰性 `ChunkSource` 上先降行数**（`src/io/read/strided-source.ts` 的"抽稀视口"：
     对外宣称 `numGaussians = target`，内部把 chunk 读翻译成对底层源的 gather 读，
     行号 `floor(i × total / target)`）⇒ 1.35 亿 → 6000 万时 7.02 GiB → 3.1 GiB，导入 87 s。
     **不要**用 `decimateSourceAdaptive` 做导入期抽稀：本仓库 `lod.ts:87-94` 已有结论 ——
     它需要完整工作副本，"for tens of millions of splats the copy alone would freeze the UI for minutes"。
+    **C 档（> 5000 万）即使能开，这几条软门槛仍是降级的**：
+    `selection-core.ts` 的 `CACHE_MAX_BYTES = 192 MB` ⇒ 投影缓存置空（每次推杆全量重投影）、
+    `splat.ts` 的 `mapping = new Uint32Array(numSplats)`（6000 万点 = 240 MB）、
+    `floater-panel.ts` 的 `AUTO_DETECT_MAX_SPLATS = 2_000_000` ⇒ 去浮云自动检测不跑。
 45. **分级（按点数 × 设备）的两条护栏**（2026-09-22 新增，`src/core/splat-tier.ts`）：
     ① **硬上限永远生效**（WebGPU 的排序结果是一个 u32/点的存储缓冲 ⇒
     `maxStorageBufferBindingSize/4`；纹理要 `ceil(sqrt(N))²`），默认 128 MB ⇒ 约 3350 万点；
