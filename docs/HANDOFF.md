@@ -918,7 +918,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `huge-model-open.cjs` | **超大模型"能不能打开"的分阶段口径（第十二轮）**：`Range` 分块拼 `File`（与拖入真实文件等价）→ `import` → 逐阶段计时 + 画布亮像素 + 帧时间，并打印 `splat.importReduction` / `tier.policyChanged` / `lodAuto` / `lodAssets` / `motionQuality`。Node 侧每 3 s 快照 `window.__stages`，**渲染进程被 OOM 杀掉也能保住已走过的阶段**。第 6 参 `naive` 走 `fetch().arrayBuffer()` 对照；第 7 参强制导入预算。用法：`node docs/probes/huge-model-open.cjs "<url>" huge-134m.ply 240 0 256 6000000` |
 | `huge-io-wall.cjs` | **大文件 I/O 三层的墙（第十二轮）**：① 纯流式读完（`res.body.getReader()`，不进单块）② 页内单块分配上限（真写一遍）③ `Range` 切不同大小做 `arrayBuffer()`。结论：流式 7.5 GB 没问题；单块约 2 GB 就失败 |
 | `alloc-wall.cjs` | **干净的"单块 `ArrayBuffer` 上限"口径（第十二轮，不做任何 I/O）**：`new ArrayBuffer(n)` + 每 4 MB 真写一次。实测 1.5 GB 可以 / **2 GB 失败** |
-| `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg |
+| `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg。**第 2 个参数可追加 Chromium 开关（逗号分隔）**，用来验证"alpha 编码是不是被特性开关挡住"——实测 `WebCodecsAlphaEncoder` / `AlphaEncoderWrapper` / `WebCodecsAlphaEncoding` 三个候选都不放行 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |
