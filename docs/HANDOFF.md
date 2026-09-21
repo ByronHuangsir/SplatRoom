@@ -757,6 +757,27 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     **教训**：观感类改变即使被要求"试试"，也应当**默认关 + 让用户看过后再决定**，
     不要替用户把默认值改掉；`docs/perf/交互期降级-实现与实测.md` §6.13 末尾列了三条救观感的改法
     （抖动式 alpha 测试 / 足迹放大 / 按转速门限只在猛甩时切）。
+37. **弧长重参数化的"分段起点"会少记一条弦 ⇒ 关键帧处永远差 1% 段长**（2026-09-21 新增，第十轮）：
+    `src/anim/spline.ts` 的 `buildArcLengthTable` 原来在**本段第一个采样之前**记
+    `_segmentStartArcs[seg]`，而段首那条弦（上一段 localT=0.99 → 本段段首）之后才累加 ⇒
+    `localFraction = 0` 反查到的是**上一段 99% 处**、`= 1` 停在**本段 99% 处**。
+    相机（`onEvaluate`）与关键帧标记（`getValueAt`）都用这条求值 ⇒ **两者一起偏**，
+    偏差 = 上一段弧长 × 1%（实测：均匀布局 0.012~0.048；压力布局 0.0656 / 0.0904，
+    与各段帧长的 1% 精确吻合）。**表现就是用户报的"关键帧位置不在当前帧位置、跳出去很远"**。
+    修法：按"段首采样下标 → 下一段段首采样下标"重算 `startArc / arcLength`，并在
+    `evaluateBySegmentArcLength` 里对 `localF ≤ 0 / ≥ 1` 直接按时间求值。
+    栏杆 `docs/verify/verify-keyframe-accuracy.cjs`（7 项）：修复后关键帧处偏差 **≤1e-9**、
+    相机视图模式下视口相机偏差 **0**。
+38. **删掉最后一个关键帧会残留"幽灵关键帧方块"**（2026-09-21 新增）：
+    `CameraPath3D.rebuildMesh()` 的三条早退分支（无轨道 / 无关键帧 / 无位置采样）只把路径网格
+    `count` 置 0，**没清** `kfMarkers / kfConePositions / kfSpherePositions / controlPoints` 等数组，
+    而标记网格是"有标记就重建" ⇒ 实测**轨道 0 个关键帧、元素仍留 1 个标记（frame 73）/ 108 个顶点**，
+    画面里多出一个停在旧位置的关键帧方块。修法：新增 `clearMarkerData()`，三条早退分支与
+    `scene.clear` 都走它（并保住"删光后再加关键帧能重建"）。
+39. **"WebGPU 专属"要先在两后端各量一遍再说**（2026-09-21 新增）：上面两条用户都报成
+    "webgpu 模式下"，实测同一次探测在 WebGPU 与 WebGL2 上给出**逐位相同**的偏差 —— 打包版默认走
+    WebGPU，用户只在那儿看到而已。本轮两次踩同一个坑（运动期不透明路径的顺序无关性、
+    关键帧精度），都在 WebGL2 上复现了。
 
 ---
 
@@ -801,6 +822,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `sort-tune.cjs` | **顺序补偿参数扫描（第八轮）**：三口径 disp（`timer` = 典型帧 / `consume` = 新顺序上线那一刻 / `reply` = 回包），扫速度窗 × 第二步权重 × 额外常数，并单独量"换向 600 ms 内"。参数用 `window.__SPLATROOM_SORT_TUNE__` 运行时注入。用法：`node docs/probes/sort-tune.cjs "<url>" test-20m-fill.ply 6 core 9000 "旧版,双步"`（第 4 参 = 每帧角度，第 5 参 = 配置集 core/all，第 6 参 = 恒速段 ms，第 7 参 = 标签过滤）。结论见 §6.12 |
 | `gen-layered-splat.cjs` | **"两层平板"夹具**（第十轮）：前后景深度差大、颜色区分 ⇒ 唯一能测出"顺序错位"的夹具（20M fill 只有 4.68/255，它 36~48）。`--points --size --gap --half --out`。用法：`node docs/probes/gen-layered-splat.cjs --out=../_tmp/synth-layered.ply --points=600000` |
 | `motion-opaque.cjs` | **运动期"不依赖顺序"渲染的决定性口径（第十轮）**：同一位姿下比较正确顺序 vs 乱序（Fisher-Yates）vs all-zeros 对照，alpha 混合与不透明路径各一遍；附帧代价 / 运动期派发次数 / order 字节数。规矩：上传两次 + 两次抓图收敛校验（见 HANDOFF 坑 33） |
+| `keyframe-marker.cjs` | **关键帧"位置不对"的三链路口径（第十轮）**：造关键帧 → 逐帧擦洗 → 同时量 ①元素世界坐标 vs 轨道求值 ②求值 vs 关键帧自身值（位置+target）③相机视图模式下的视口相机；含均匀/不均匀大跨距/插入后/含隐藏控制点/删光几个相位，以及 `_fixCameraPosition` 距离钳制诊断。用法：`node docs/probes/keyframe-marker.cjs "<url>" test-model.ply` |
+| `keyframe-marker-pixels.cjs` | 关键帧标记的**像素级**归属探针（第十轮，结论未依赖它）。两个坑：`onPreRender` 每帧重设实体 `enabled` ⇒ 手动启停无效、要改 `isVisible()`；224 档灰是无限网格线，白色判据要 ≥248 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |

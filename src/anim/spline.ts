@@ -64,6 +64,18 @@ class CubicSpline {
 
         const spatialDims = Math.min(3, dim);
 
+        // 每个段"段首采样"在 `_arcTable` 里的下标（pair 下标）。
+        // ⚠️ 2026-09-21 修：`_segmentStartArcs[seg]` 原来是在**本段第一个采样之前**记录的，
+        // 而那之后算的第一条弦（上一段的 localT=0.99 → 本段段首）被计进了本段的 `segArcLength`
+        // ⇒ 段首弧长实际指向"上一段倒数第二个采样点"，于是
+        //   localFraction = 0 求值出的是**上一段 99% 处**（离关键帧差 1% 段长！）
+        //   localFraction = 1 求值出的是**本段 99% 处**（永远到不了下一个关键帧）
+        // 实测偏差正好是各段弧长的 1%（20M 无关，任何场景都错）：在分层压力夹具上
+        // 关键帧 118 前一段 114 帧 ⇒ 预测 0.1 实测 0.0904、关键帧 176 ⇒ 预测 0.065 实测 0.0656。
+        // 表现就是用户报的"关键帧位置不在当前帧位置、跳出去很远"（相机与标记都少走这一段）。
+        // 现在按"段首采样下标 → 下一段段首采样下标"重新算段弧长，两端都落在关键帧采样上。
+        const firstSampleIndex = new Array<number>(n - 1).fill(-1);
+
         for (let seg = 0; seg < n - 1; seg++) {
             const t0 = times[seg];
             const t1 = times[seg + 1];
@@ -89,6 +101,9 @@ class CubicSpline {
                     segArcLength += dist;
                 }
 
+                if (i === 0) {
+                    firstSampleIndex[seg] = this._arcTable.length / 2;
+                }
                 this._arcTable.push(time, this._totalArcLength);
 
                 for (let d = 0; d < dim; d++) {
@@ -98,6 +113,22 @@ class CubicSpline {
             }
 
             this._segmentArcLengths[seg] = segArcLength;
+        }
+
+        // 用"段首采样 → 下一段段首采样"的弧长差重算每段，两端都与关键帧采样严格对齐
+        const tablePairs = this._arcTable.length / 2;
+        for (let seg = 0; seg < n - 1; seg++) {
+            const startIdx = firstSampleIndex[seg];
+            if (startIdx < 0) {
+                continue;
+            }
+            const endIdx = seg + 1 < n - 1 && firstSampleIndex[seg + 1] >= 0 ?
+                firstSampleIndex[seg + 1] :
+                tablePairs - 1;
+            const startArc = this._arcTable[startIdx * 2 + 1];
+            const endArc = this._arcTable[endIdx * 2 + 1];
+            this._segmentStartArcs[seg] = startArc;
+            this._segmentArcLengths[seg] = Math.max(0, endArc - startArc);
         }
     }
 
@@ -185,6 +216,18 @@ class CubicSpline {
         }
 
         localFraction = Math.max(0, Math.min(1, localFraction));
+
+        // 段两端**逐位精确**落在关键帧上：不依赖弧长表与二分插值的精度
+        // （关键帧处必须等于用户设的位姿，见 buildArcLengthTable 里那段说明）
+        if (localFraction <= 0) {
+            this.evaluate(times[segIndex], result);
+            return;
+        }
+        if (localFraction >= 1) {
+            this.evaluate(times[segIndex + 1], result);
+            return;
+        }
+
         const segArcLen = this._segmentArcLengths[segIndex];
 
         if (segArcLen < 1e-10) {

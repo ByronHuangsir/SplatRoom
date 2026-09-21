@@ -260,7 +260,7 @@ class CameraPath3D extends Element {
         events.on('scene.clear', () => {
             this.mesh.primitive[0].count = 0;
             this._frustumMesh.primitive[0].count = 0;
-            this._cpMesh.primitive[0].count = 0;
+            this.clearMarkerData();
             this.dirty = false;
             this.frustumDirty = false;
             this._cpDirty = true;
@@ -941,6 +941,39 @@ class CameraPath3D extends Element {
 
     // ---- Static path mesh ----
 
+    /**
+     * 清空所有"标记类"数据（关键帧方块 / 控制点菱形 / 锥体 / 焦距球）。
+     *
+     * 2026-09-21 修：`rebuildMesh()` 的三条**早退分支**（没有轨道 / 轨道没有关键帧 / 位置采样为空）
+     * 原来只把路径网格的 count 置 0，**没有清这些数组** ⇒ 删掉最后一个关键帧后，标记网格仍按
+     * 上一次的数组重建（实测：轨道 0 个关键帧，路径元素仍留着 1 个标记、108 个顶点）——
+     * 画面里就多出一个"凭空停在旧位置上的关键帧方块"。用户报的"关键帧位置不在当前帧位置"
+     * 与此吻合（该位置对应的关键帧已经不存在了）。
+     */
+    private clearMarkerData() {
+        this.kfMarkers = [];
+        this.kfMarkerFrames = [];
+        this.kfMarkerIndices = [];
+        this._kfStates = [];
+        this.kfConePositions = [];
+        this.kfConeIndices = [];
+        this.kfTargetDistances = [];
+        this._coneStates = [];
+        this.kfSpherePositions = [];
+        this.kfSphereIndices = [];
+        this._sphereStates = [];
+        this.controlPoints = [];
+        this.controlPointFrames = [];
+        this.controlPointIndices = [];
+        this._segmentBoundaries = [];
+        this._cpStates = [];
+        this._soloDragType = null;
+        this._soloDragIndex = -1;
+        this._cpDirty = true;
+        this._cpMesh.primitive[0].count = 0;
+        this._cpEntity.enabled = false;
+    }
+
     private rebuildMesh() {
         // Re-entrancy guard — prevents feedback loops where events fired
         // during rebuild trigger another rebuild
@@ -953,6 +986,7 @@ class CameraPath3D extends Element {
             const track = controller?.getTrack(TrackId.Camera);
 
             if (!track) {
+                this.clearMarkerData();
                 this.mesh.primitive[0].count = 0;
                 return;
             }
@@ -962,6 +996,7 @@ class CameraPath3D extends Element {
             const userKeyFrames = [...track.userKeys].filter(f => f < totalFrames).sort((a, b) => a - b);
 
             if (allKeys.length < 1) {
+                this.clearMarkerData();
                 this.mesh.primitive[0].count = 0;
                 return;
             }
@@ -994,6 +1029,7 @@ class CameraPath3D extends Element {
             }
 
             if (posSamples.length === 0) {
+                this.clearMarkerData();
                 this.mesh.primitive[0].count = 0;
                 return;
             }
