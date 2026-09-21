@@ -732,6 +732,27 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     **系统性偏早一个帧长**（375°/s 就是 4~13°）。折进 horizon 后实测换向 600 ms 内的错位
     0.296 → **0.174**（375°/s）、0.121 → **0.073**（125°/s），P95 同步下降；**再长的速度窗没有好处**
     （窗 200/300 ms 换向反而涨到 0.259/0.265）。详见 `交互期降级-实现与实测.md` §6.12。
+33. **"上传 order 有一帧滞后"会造出成堆的假结论**（2026-09-21 新增，第十轮）：
+    `uploadStream.upload` 把 copy 记进当前/下一帧的 command encoder ⇒ **上传一次然后抓图，抓到的可能是
+    上一次的内容**。本轮被它坑了三次：(a) "乱序 vs 正确"读成 0.03（其实没换过顺序）；(b) 阈值扫描
+    出现 0/111/0/111 的交替（每个变体落后一档）；(c) `ws.orderData.byteLength` 在被 transfer 的时刻是 0，
+    用它算 splat 数会得到**空数组上传**。规矩：**上传两次（中间各渲染几帧）+ 连续抓两张确认收敛
+    （两张必须相同）+ 一个 all-zeros 顺序对照（证明 order 真的被着色器读）**。
+34. **20M fill 合成夹具对"顺序错误"几乎不敏感**（2026-09-21 新增）：它 overdraw 极大、颜色相近 ⇒
+    同一姿势下乱序与正确顺序的画面平均色差只有 **4.68/255**；而"两层平板"夹具（
+    `docs/probes/gen-layered-splat.cjs`）是 **36.37**。⇒ 凡是要验证"顺序错位"的改动，
+    **必须用有深度结构的夹具**，否则会得出"顺序无所谓"的错误结论。
+35. **像素级顺序判据在套件宿主里要显式控制基准**（2026-09-21 新增）：套件第一版把"alpha 基准"量在了
+    **不透明路径**上（`settled` 那一刻若还欠着补帧/在飞，不透明路径仍生效）⇒ alpha 基准读到 0.05。
+    现在 `verify-motion-opaque.cjs` 用 `scene.motionOpaque.enabled` **显式开关两条基准**，并断言
+    "基准确实是 alpha 混合（`material.transparent === true`）"。另外 WebGL2 的 order 是 R32U 纹理，
+    套件里 `uploadStream.upload(array, texture)` 写不进去（对照恒 0.00）⇒ 像素判据只在 WebGPU 上断言，
+    WebGL2 明确记"未测"。
+36. **运动期不透明路径是"观感取舍"，默认开着**（2026-09-21 新增）：运动帧不透明 + 深度写 ⇒ 失去半透明
+    与软边（20M fill 上覆盖率 71.2% → 64.4%、同姿势与停手画面平均色差 ~13/255），换来
+    **顺序无关**（乱序画面差 36.37 → 0）+ 运动期不再排序（P50 32 → **18 ms**、P95 46.1 → **28.9 ms**、
+    order 数据 1526 → **76 MB**）。逃生开关 `window.__SPLATROOM_MOTION_OPAQUE__ = false`，
+    alpha 下限 `window.__SPLATROOM_MOTION_ALPHA_CLIP__`（默认 0.5）。详见 §6.13。
 
 ---
 
@@ -774,6 +795,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `shape-ghost.cjs` | **降级期"选区虚影"的像素级口径（第六轮）**：同一相机位姿下全分辨率 vs 降级各抓一张画布像素，按 16×16 瓦片比较，并与"无形状"对照相减（`boxOverControlWorst`） |
 | `sort-cost.cjs` | **"GPU 排序能省多少"的上限口径（第七轮）**：拆开量 worker 排序 / λ / 排队 / 80 MB 上传 / ≥1 MiB 分配 / 含上传帧 vs 不含，并跑一个"零上传反事实"相位（`litPercent` 保证仍在画同一批高斯）。结论见 `交互期降级-实现与实测.md` §6.11 |
 | `sort-tune.cjs` | **顺序补偿参数扫描（第八轮）**：三口径 disp（`timer` = 典型帧 / `consume` = 新顺序上线那一刻 / `reply` = 回包），扫速度窗 × 第二步权重 × 额外常数，并单独量"换向 600 ms 内"。参数用 `window.__SPLATROOM_SORT_TUNE__` 运行时注入。用法：`node docs/probes/sort-tune.cjs "<url>" test-20m-fill.ply 6 core 9000 "旧版,双步"`（第 4 参 = 每帧角度，第 5 参 = 配置集 core/all，第 6 参 = 恒速段 ms，第 7 参 = 标签过滤）。结论见 §6.12 |
+| `gen-layered-splat.cjs` | **"两层平板"夹具**（第十轮）：前后景深度差大、颜色区分 ⇒ 唯一能测出"顺序错位"的夹具（20M fill 只有 4.68/255，它 36~48）。`--points --size --gap --half --out`。用法：`node docs/probes/gen-layered-splat.cjs --out=../_tmp/synth-layered.ply --points=600000` |
+| `motion-opaque.cjs` | **运动期"不依赖顺序"渲染的决定性口径（第十轮）**：同一位姿下比较正确顺序 vs 乱序（Fisher-Yates）vs all-zeros 对照，alpha 混合与不透明路径各一遍；附帧代价 / 运动期派发次数 / order 字节数。规矩：上传两次 + 两次抓图收敛校验（见 HANDOFF 坑 33） |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |

@@ -539,6 +539,12 @@ varying highp float vEllipE02;
 varying highp float vEllipE11;
 varying highp float vEllipE12;
 varying highp float vEllipE22;
+// 运动期"不依赖顺序"的渲染（见 src/core/motion-opaque.ts）：
+//   uMotionOpaque 0/1 开关；uMotionAlphaClip 是该路径下的 alpha 下限。
+// 打开时：alpha 低于下限的片元直接丢弃、其余按**不透明**写出（颜色不预乘、alpha 写 1），
+// 可见性完全交给深度测试（材质同时切到 BLEND_NONE + depthWrite）⇒ 与排序顺序无关。
+uniform float uMotionOpaque;
+uniform float uMotionAlphaClip;
 
 void main(void) {
     mediump float A = dot(texCoord_flags.xy, texCoord_flags.xy);
@@ -678,6 +684,15 @@ void main(void) {
                 pcFragColor0 = vec4(finalColor * alpha, alpha);
                 pcFragColor1 = vec4(0.0, 0.0, 0.0, 0.0);
             }
+        }
+
+        // 运动期的不透明路径：低 alpha 直接丢弃，其余不预乘、alpha 写 1（RT1 保持与上面一致，
+        // 选区/描边那条通路的行为不变）。可见性由深度测试决定 ⇒ 与排序顺序无关。
+        if (uMotionOpaque > 0.5) {
+            if (alpha < uMotionAlphaClip) {
+                discard;
+            }
+            pcFragColor0 = vec4(finalColor, 1.0);
         }
     #endif
 }

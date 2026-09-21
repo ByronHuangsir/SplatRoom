@@ -46,6 +46,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.waitForFunction('!!window.scene', { timeout: 120000, polling: 500 });
     await sleep(1500);
 
+    // 本套件测的是"顺序延迟补偿"这条通路，而它在**运动期不透明路径**下是被故意停掉的
+    // （运动帧的可见性由深度测试决定，不需要顺序，见 docs/verify/verify-motion-opaque.cjs）。
+    // 所以要显式关掉那条路径，否则运动期一次派发都没有，本套件会整片假红。
+    await page.evaluate(() => { window.__SPLATROOM_MOTION_OPAQUE__ = false; });
+
     await page.evaluate(async (m) => {
         const buf = await (await fetch('./' + m)).arrayBuffer();
         window.__loadErr = null;

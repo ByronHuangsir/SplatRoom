@@ -30,6 +30,7 @@ import { CameraMotion } from '../core/camera-motion';
 import { CommandQueue } from '../core/command-queue';
 import { Events } from '../core/events';
 import { GpuFrameTiming } from '../core/gpu-frame-timing';
+import { MotionOpaque, applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { MotionQuality } from '../core/motion-quality';
 import { DataProcessor } from '../data-processor/index';
 import { PCApp } from '../pc-app';
@@ -135,6 +136,8 @@ class Scene {
     readonly gpuFrameTiming: GpuFrameTiming;
     // 交互期降级策略（运动时降渲染分辨率，停手恢复）。见 src/core/motion-quality.ts。
     readonly motionQuality = new MotionQuality();
+    // 运动期"不依赖顺序"的渲染（不透明 + 深度写 + alpha 下限）。见 src/core/motion-opaque.ts。
+    readonly motionOpaque = new MotionOpaque();
     // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
     private _appliedRenderScale = 1;
     // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
@@ -892,6 +895,25 @@ class Scene {
         }
         if (settleSortPending || sortInFlight || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
             this.forceRender = true;
+        }
+
+        // ---- 运动期"不依赖顺序"的渲染（A 方案，见 src/core/motion-opaque.ts）------------------
+        // 打开条件：相机在动（顺序反正追不上），**或者**停手后那一帧"干净排序"还没上线
+        // （否则切回 alpha 混合的那一瞬间顺序还是旧的 ⇒ 会闪一下错序，就是用户报的"短暂停留后消失"）。
+        // 停手那一刻排序刚被派发 ⇒ sortInFlight 为真、补帧欠着时 settleSortPending 为真，
+        // 两个条件一起保证"顺序上线了才恢复半透明"。
+        {
+            const wantOpaque = this.motionOpaque.active &&
+                (this.cameraMotion.moving || settleSortPending || sortInFlight);
+            const alphaClip = this.motionOpaque.effectiveAlphaClip;
+            this.motionOpaque.applied = wantOpaque;
+            const splats = this.getElementsByType(ElementType.splat) as Splat[];
+            for (let i = 0; i < splats.length; i++) {
+                splats[i].setMotionOpaque(wantOpaque, alphaClip);
+            }
+            // 合并渲染（组模式）走的是另一个实例/材质，必须一起切，否则组模式下会一半实一半透
+            const mergedInstance = (this.groupRenderer as any)?.mergedEntity?.gsplat?.instance;
+            applyMotionOpaqueMaterial(mergedInstance?.material, wantOpaque, alphaClip);
         }
 
         this.forEachElement(e => e.onPreRender());

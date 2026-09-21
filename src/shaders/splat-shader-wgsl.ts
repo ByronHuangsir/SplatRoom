@@ -412,6 +412,13 @@ uniform hslLumB: vec4f;
     uniform uEffectFade: f32;
 #endif
 
+// 运动期"不依赖顺序"的渲染（见 src/core/motion-opaque.ts）：
+//   uMotionOpaque 0/1 开关；uMotionAlphaClip 是该路径下的 alpha 下限。
+// 打开时：alpha 低于下限的片元直接丢弃、其余按**不透明**写出（颜色不预乘、alpha 写 1），
+// 可见性完全交给深度测试（材质同时切到 BLEND_NONE + depthWrite）⇒ 与排序顺序无关。
+uniform uMotionOpaque: f32;
+uniform uMotionAlphaClip: f32;
+
 // oriented crop-box clipping (same declarations as the vertex stage)
 uniform uCropBoxEnabled: f32;
 uniform uCropBoxPreview: f32;
@@ -707,6 +714,15 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         } else {
             output.color = vec4f(graded * alpha, alpha);
             output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+        }
+
+        // 运动期的不透明路径：低 alpha 直接丢弃，其余不预乘、alpha 写 1（color1 与上面一致，
+        // 选区/描边那条通路的行为不变）。可见性由深度测试决定 ⇒ 与排序顺序无关。
+        if (uniform.uMotionOpaque > 0.5) {
+            if (alpha < uniform.uMotionAlphaClip) {
+                discard;
+            }
+            output.color = vec4f(graded, 1.0);
         }
     #endif
 

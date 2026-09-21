@@ -212,8 +212,12 @@ const canvasCoverage = async (page) => {
             };
         });
 
-        // degradation ON for this part: the point is that it does not disturb the sorter gate
+        // degradation ON for this part: the point is that it does not disturb the sorter gate.
+        // 同时显式关掉**运动期不透明路径**：这条路径会（按设计）把运动期的排序全部停掉，
+        // 而本套件下面几条正是要验证"运动期仍在派发排序"。那条路径有自己的套件
+        // `verify-motion-opaque.cjs`；不关掉的话这里会以 0 次派发整片假红（实测 2026-09-21）。
         await page.evaluate(() => {
+            window.__SPLATROOM_MOTION_OPAQUE__ = false;
             delete window.__SPLATROOM_MOTION_QUALITY__;
             window.scene.motionQuality.enabled = true;
             window.scene.motionQuality.forceEngaged = true;
@@ -288,6 +292,7 @@ const canvasCoverage = async (page) => {
 
         await page.evaluate(() => {
             delete window.__SPLATROOM_MOTION_QUALITY__;
+            delete window.__SPLATROOM_MOTION_OPAQUE__;
             window.scene.motionQuality.forceEngaged = null;
         });
     } catch (e) {
