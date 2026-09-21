@@ -234,6 +234,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         }
         check('rotating: the extrapolation points along the direction of travel', signOk === true, signDetail);
 
+        // 双步外推的第二步必须真的在采样：回包 → 被某帧消费的实测延迟要折进 horizon。
+        // 少了这一截，顺序会系统性落后"一个帧长"（20M 上实测 ~10~35 ms，375°/s 就是 4~13°）。
+        // 见 docs/perf/交互期降级-实现与实测.md §6.12
+        const consume = await page.evaluate(() => {
+            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+            return {
+                ms: splat._sortConsumeMs,
+                samples: splat._sortConsumeSamples,
+                horizon: splat._sortPredictHorizon(),
+                latency: splat._sortLatencyMs
+            };
+        });
+        check('rotating: the second-step (reply -> consumed-on-screen) latency is sampled into the horizon',
+            consume.samples > 0 && consume.ms >= 0 && consume.ms <= 100 && consume.horizon >= consume.latency,
+            `consume=${consume.ms.toFixed(1)}ms (samples=${consume.samples}) latency=${consume.latency.toFixed(1)}ms ` +
+            `horizon=${consume.horizon.toFixed(1)}ms`);
+
         // ---- 5: 停手补帧不外推 ----
         const settlePosts = await collectSettle();
         const settleLast = settlePosts.length ? settlePosts[settlePosts.length - 1] : null;

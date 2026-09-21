@@ -178,6 +178,11 @@ class Splat extends Element {
     /** 一次排序从派发到落地的实测延迟（滑动平均，ms） */
     private _sortLatencyMs = SORT_LATENCY_DEFAULT_MS;
     private _sortLatencySamples = 0;
+    /** 回包 → 被某帧消费（上传并用于渲染）的实测延迟（滑动平均，ms）；外推的第二步 */
+    private _sortConsumeMs = 0;
+    private _sortConsumeSamples = 0;
+    /** 最近一次回包时刻（0 = 没有待消费的结果） */
+    private _sortLandedAt = 0;
 
     selectionAlpha = 1;
 
@@ -893,7 +898,10 @@ class Splat extends Element {
 
         // 找窗口外最近的样本（要有一个 ≥ 窗口 的时间跨度）：从最新往老扫，
         // 第一个"至少窗口这么老"的样本就是窗口端点。
-        const target = now - SORT_MOTION_WINDOW_MS;
+        // 窗口长度可被 `window.__SPLATROOM_SORT_TUNE__.windowMs` 覆盖（探针扫参用）。
+        const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
+        const windowMs = typeof tune.windowMs === 'number' ? tune.windowMs : SORT_MOTION_WINDOW_MS;
+        const target = now - windowMs;
         let best = -1;
         for (let age = 0; age < this._sortHistCount; age++) {
             const idx = (this._sortHistHead - 1 - age + SORT_MOTION_SAMPLES * 2) % SORT_MOTION_SAMPLES;
@@ -996,9 +1004,24 @@ class Splat extends Element {
         }
     }
 
-    /** 当前该外推多少毫秒（实测延迟的滑动平均，夹在 [0, SORT_PREDICT_MAX_MS]） */
+    /**
+     * 当前该外推多少毫秒 —— **两步**：
+     *
+     *   第一步 `_sortLatencyMs`：派发 → worker 回包（= worker 排序耗时，20M 实测 ~161 ms）；
+     *   第二步 `_sortConsumeMs`：回包 → **某一帧真的把它上传并拿去渲染**（实测 ~24 ms：
+     *     按需渲染下总要等下一帧的 `GSplatInstance.update()`）。
+     *
+     * 只算第一步会系统性偏早一个帧长 —— 顺序对齐的是"回包那一刻"的相机，而用户看到的是
+     * "上传完那一帧"的相机。375°/s 下这 24 ms 就是 **9°** 的固定偏差。
+     *
+     * 两项都可被 `window.__SPLATROOM_SORT_TUNE__` 覆盖（只给探针/套件调参用，见 sort-tune.cjs）。
+     */
     private _sortPredictHorizon() {
-        return Math.min(SORT_PREDICT_MAX_MS, Math.max(0, this._sortLatencyMs));
+        const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
+        const consumeWeight = typeof tune.consumeWeight === 'number' ? tune.consumeWeight : 1;
+        const extraMs = typeof tune.extraMs === 'number' ? tune.extraMs : 0;
+        const total = this._sortLatencyMs + consumeWeight * this._sortConsumeMs + extraMs;
+        return Math.min(SORT_PREDICT_MAX_MS, Math.max(0, total));
     }
 
     /**
@@ -1046,7 +1069,7 @@ class Splat extends Element {
     private _onSortUpdated() {
         const now = performance.now();
         if (this._sortPendingSince !== 0) {
-            // 实测延迟 = 派发 → 落地。这是外推的"进度"依据：λ 越准，顺序越对齐落地时刻。
+            // 实测延迟 = 派发 → 回包。这是外推第一步的依据。
             const latency = now - this._sortPendingSince;
             if (latency > 0 && latency < SORT_INFLIGHT_TIMEOUT_MS) {
                 this._sortLatencySamples++;
@@ -1055,6 +1078,8 @@ class Splat extends Element {
                     this._sortLatencyMs + (latency - this._sortLatencyMs) * SORT_LATENCY_ALPHA;
             }
         }
+        // 第二步的起点：回包时刻。真正"上线"要等下一帧的 update() 把它上传（见 onPreRender）
+        this._sortLandedAt = now;
         this._sortPendingSince = 0;
         // 在飞期间攒下的最新位姿在这里补发（这就是 `_sortInFlight` 那个不存在的字段本想做的事）。
         // 仍然尊重最小间隔：否则在"排序很快、相机一直在动"的场景下会变成完成即发的自旋。
@@ -1062,6 +1087,27 @@ class Splat extends Element {
             this._sortHasPending = false;
             this.postSort(this._sortPendingPos, this._sortPendingDir);
         }
+    }
+
+    /**
+     * 第二步延迟采样：回包 → 下一帧（那一帧的 `GSplatInstance.update()` 才把顺序上传并用于渲染）。
+     *
+     * 只在**运动中**且等待时间短（< 100 ms）时计入：按需渲染下停手后可能几百毫秒才来一帧，
+     * 那是"空闲"不是"延迟"，混进来会把 horizon 拉爆。
+     */
+    private _sampleSortConsume(now: number, moving: boolean) {
+        if (this._sortLandedAt === 0) {
+            return;
+        }
+        const wait = now - this._sortLandedAt;
+        this._sortLandedAt = 0;
+        if (!moving || !(wait > 0 && wait < 100)) {
+            return;
+        }
+        this._sortConsumeSamples++;
+        this._sortConsumeMs = this._sortConsumeSamples === 1 ?
+            wait :
+            this._sortConsumeMs + (wait - this._sortConsumeMs) * SORT_LATENCY_ALPHA;
     }
 
     /**
@@ -1217,6 +1263,8 @@ class Splat extends Element {
             const now = performance.now();
             // 顺序延迟补偿的速度估计（每帧采样；不管这一帧派不派发都要采，否则外推用的是陈旧速度）
             this._sampleSortMotion(now, _fallbackLocalPos, _fallbackLocalDir);
+            // 第二步延迟采样：这一帧就是"消费"上一份排序结果的那一帧（update() 在本帧更早处跑过）
+            this._sampleSortConsume(now, this.scene.cameraMotion.moving);
             if (moved) {
                 this._sortLastPos.copy(_fallbackLocalPos);
                 this._sortLastDir.copy(_fallbackLocalDir);
