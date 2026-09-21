@@ -5,6 +5,7 @@ import { i18n } from './localization';
 import { Tooltips } from './tooltips';
 import { SetSplatColorAdjustmentOp, type ColorAdjustment } from '../core/edit-ops';
 import { Events } from '../core/events';
+import { MIN_TONE_RANGE } from '../core/tone-range';
 import { Splat } from '../splat/splat';
 
 // pcui slider doesn't include start and end events
@@ -564,25 +565,29 @@ class ColorPanel extends Container {
 
         // White Point — reversed: slider right = brighter white
         // Internal splat.whitePoint = 2 - sliderValue
-        // Constraint: effective white > effective black → (2 - ws) > -bs → ws < 2 + bs
+        // Constraint: 有效白场 − 有效黑场 ≥ MIN_TONE_RANGE
+        //   ⇔ (2 - whiteSlider) - (-blackSlider) ≥ MIN_TONE_RANGE
+        //   ⇔ whiteSlider - blackSlider ≤ 2 - MIN_TONE_RANGE
+        // 2026-09-21 修：原来只保证 ≥ 0（两个滑块在"差 2"的边界上可以**相等**），
+        // 而相等时映射范围是 0 ⇒ 视口那条旧公式退化成 scale=1000 ⇒ **整幅画面过曝**
+        // （用户报"黑场拉到底变成过曝"：默认白场滑块 1、黑场滑块拉到 -1 正好落在该边界）。
         whitePointSlider.on('change', (value: number) => {
             updateOp((op) => {
                 op.newState.whitePoint = 2 - value;
             });
-            if (value >= 2 + blackPointSlider.value) {
-                blackPointSlider.value = value - 2;
+            if (value - blackPointSlider.value > 2 - MIN_TONE_RANGE) {
+                blackPointSlider.value = value - (2 - MIN_TONE_RANGE);
             }
         });
 
         // Black Point — reversed: slider right = lighter black
         // Internal splat.blackPoint = -sliderValue
-        // Constraint: effective white > effective black → (2 - ws) > -bs → bs > ws - 2
         blackPointSlider.on('change', (value: number) => {
             updateOp((op) => {
                 op.newState.blackPoint = -value;
             });
-            if (value <= whitePointSlider.value - 2) {
-                whitePointSlider.value = value + 2;
+            if (whitePointSlider.value - value > 2 - MIN_TONE_RANGE) {
+                whitePointSlider.value = value + (2 - MIN_TONE_RANGE);
             }
         });
 

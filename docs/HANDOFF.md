@@ -161,7 +161,7 @@ node -e "const s=require('fs').readFileSync('dist/index.js','utf8');console.log(
 
 ## 2. 怎么跑验证
 
-### 2.1 全量（**webgpu 38 套**；`verify:diag` 另有 7 项）
+### 2.1 全量（**webgpu 44 套**；`verify:diag` 另有 7 项）
 
 ```powershell
 npx serve dist -p 3621      # 后台起静态服务（另开一个窗口/后台任务）
@@ -175,10 +175,13 @@ foreach ($s in $suites) {
 }
 ```
 
-`docs/verify/` 里现在有 **47 个 `verify-*.cjs`**，上面这段跑 **38 个**（排除的 9 个：`verify-measure-online*` 3 个、
-`verify-blackscreen.cjs`、`verify-large-model-backend.cjs`、`verify-webgpu-fallback.cjs`、`verify-load-worker.cjs`、
-`verify-selection-responsiveness.cjs`、`verify-large-model-ui.cjs`）。
-**双后端**：webgl2 侧跑同一段（换成 `?gpu=webgl2`）是 **36 套**（少的那两套只支持 WebGPU）。
+`docs/verify/` 里现在有 **53 个 `verify-*.cjs`**，批量脚本（`_tmp\run-batch.ps1`）跑 **44 个**
+（排除的 9 个：`verify-measure-online*` 3 个、`verify-blackscreen.cjs`、`verify-large-model-backend.cjs`、
+`verify-webgpu-fallback.cjs`、`verify-load-worker.cjs`、`verify-selection-responsiveness.cjs`、
+`verify-large-model-ui.cjs`）。
+**双后端**：webgl2 侧跑**同一份 44 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
+**最近一轮实测（第十一轮，3.23.18）：webgpu 44 套 `TOTAL FAILED: 0`、webgl2 同 44 套 `TOTAL FAILED: 0`**，
+两边各有 1 个 `UNPARSED`（`verify-merge-ui.cjs`，既有输出形状问题，不是失败）。
 
 **UNPARSED 是既有输出形状问题、不是失败**：`verify-merge-ui.cjs`（根本没有 `failed` 字段，看 `pageerrors: []`）、
 `verify-sphere-brush.cjs`（单独跑 **6/6**，退出码 0）、`verify-edit-grade-crop.cjs`（单独跑 **4/4**，`failed` 字段在批量里没被解析出来）。
@@ -778,6 +781,34 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     "webgpu 模式下"，实测同一次探测在 WebGPU 与 WebGL2 上给出**逐位相同**的偏差 —— 打包版默认走
     WebGPU，用户只在那儿看到而已。本轮两次踩同一个坑（运动期不透明路径的顺序无关性、
     关键帧精度），都在 WebGL2 上复现了。
+40. **"范围 = 0 也允许"的护栏等价于没有护栏**（2026-09-21 新增，第十一轮，用户报"黑场拉到底变过曝"）：
+    `blackPoint / whitePoint` 是**层级区间**，UI 两滑块反向（`blackPoint = -b`、`whitePoint = 2 - w`），
+    旧护栏只保证 `whitePoint - blackPoint >= 0`，而**等号可达**（默认白场滑块 1 时把黑场拉到 −1）；
+    视口那条公式是 `denom = max(0.001, wp - bp)` ⇒ **`scale = 1000`** ⇒ 实测冲白 **98.9%**。
+    并且 `offset` 写成了 `-lo`（正确是 `-lo * scale`）⇒ **只要范围 ≠ 1 就整体抬亮**
+    （实测平均亮度 0.420 → 0.164@范围0.5 → **0.994**@范围0.1，用户看到的"越压越亮"）。
+    导出（`color-grade.ts`）、直方图（`calc-histogram.ts`）、范围选择（`select-by-range.ts`）
+    又各写一遍第三种公式 ⇒ 交叉参数（黑场 1.2/白场 0.8）下**视口读 1000、导出读 2.5**。
+    现在统一到 `src/core/tone-range.ts`（`MIN_TONE_RANGE = 0.05`、`offsetBase = -lo * scale`、NaN 兜底），
+    UI 护栏留 0.05 死区。**规矩**：① 区间型参数只能有**一个**计算点；
+    ② "刚好允许相等"的边界必须留死区；③ 改了护栏要配一条"拉到极限"的端到端断言。
+    详见 `docs/调色黑场过曝与颜色面板行重叠-排查与修复-2026-09-21.md`。
+41. **`overflow: hidden` + 可收缩的 flex 子项 = 行重叠 ⇒"看得见但点不到"**（2026-09-21 新增）：
+    `#color-panel` 是 `max-height: 90vh; overflow: hidden`，而分区是**默认可收缩**的 flex 子项。
+    1280×800 下（90vh = 720，内容需要 935）分区被压扁（tone 的 content `clientH=164 / scrollH=220`），
+    **"黑场"行溢出自己分区 56px**（"洋红"84px）、行与行还互相重叠 16px；溢出部分落在
+    **DOM 里更靠后的那个分区容器**范围内并被它盖住 ⇒ `document.elementFromPoint(标签中心)`
+    命中的是别的分区容器、标签收不到指针事件 ⇒ **这一行拖不动也点不到**
+    （`document.body.style.cursor` 在 `pointerdown` 后仍为空字符串，正常应为 `ew-resize`）。
+    修法：分区 `flex: 0 0 auto` + 面板 `overflow-y: auto`（装不下就滚动，别把分区压扁）。
+    **规矩**：UI 交互类断言必须断言"目标真的能被 `elementFromPoint` 命中"，
+    只断言"数值变了"会长期假绿/误报。体检三件套：`overflowingRows` / `scrollH-clientH` / `hitIsLabel`。
+42. **"拖不动"要先怀疑命中区域，而不是交互逻辑**（2026-09-21 新增）：套件里"在标签上横向拖拽"
+    一直没反应时，我按"面板 `selected` 没打开"的方向查了两轮（`selection.changed` 是唯一赋值点，
+    还专门补了 `selection` 事件），实际是坑 41 那条布局覆盖。
+    **线索本身**：合成 `PointerEvent` 用 `dispatchEvent` 会**绕过命中测试**（所以它能"拖成功"），
+    真实 `page.mouse` 不会 —— 两者表现不一致，就说明问题在"能不能被点到"，不在事件处理逻辑。
+    另外 `document.body.style.cursor` 是个廉价可靠的"处理器是否真的跑到了"探针。
 
 ---
 
@@ -824,6 +855,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `motion-opaque.cjs` | **运动期"不依赖顺序"渲染的决定性口径（第十轮）**：同一位姿下比较正确顺序 vs 乱序（Fisher-Yates）vs all-zeros 对照，alpha 混合与不透明路径各一遍；附帧代价 / 运动期派发次数 / order 字节数。规矩：上传两次 + 两次抓图收敛校验（见 HANDOFF 坑 33） |
 | `keyframe-marker.cjs` | **关键帧"位置不对"的三链路口径（第十轮）**：造关键帧 → 逐帧擦洗 → 同时量 ①元素世界坐标 vs 轨道求值 ②求值 vs 关键帧自身值（位置+target）③相机视图模式下的视口相机；含均匀/不均匀大跨距/插入后/含隐藏控制点/删光几个相位，以及 `_fixCameraPosition` 距离钳制诊断。用法：`node docs/probes/keyframe-marker.cjs "<url>" test-model.ply` |
 | `keyframe-marker-pixels.cjs` | 关键帧标记的**像素级**归属探针（第十轮，结论未依赖它）。两个坑：`onPreRender` 每帧重设实体 `enabled` ⇒ 手动启停无效、要改 `isVisible()`；224 档灰是无限网格线，白色判据要 ≥248 |
+| `grade-blackpoint.cjs` | **调色"黑场/白场"数值范围的口径（第十一轮）**：按滑块档位设 `blackPoint / whitePoint`（含 UI 够不到的 range 0、以及 `.ssproj` 可给出的交叉区间），读**真实视口材质**的 `clrScale / clrOffset`，抓画布统计平均亮度 / 冲白 / 纯黑，并同时打印导出侧公式的 `scale/offset` 做对照（改前视口 1000 vs 导出 2.5）。用法：`node docs/probes/grade-blackpoint.cjs "<url>" test-model.ply` |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |

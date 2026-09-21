@@ -7,7 +7,12 @@
     width: 320px;
     flex-direction: column;
     max-height: 90vh;
-    overflow: hidden;
+    // 2026-09-21 修：原来这里是 `overflow: hidden`，而各分区默认可收缩（flex-shrink: 1）。
+    // 窗口高度不足时（实测 1280x800）分区被压扁 ⇒ 行**溢出自己的 content 容器并相互重叠**，
+    // 后一个分区的容器反过来盖住前一行的命中区域（"黑场"行溢出 56px，真实鼠标拖不动它的标签）。
+    // 现在：分区不可收缩 + 面板纵向滚动，行长什么样就占多高。
+    overflow-x: hidden;
+    overflow-y: auto;
 
     &:not(.pcui-hidden) {
         display: flex;
@@ -18,6 +23,7 @@
     .color-panel-category {
         display: flex;
         flex-direction: column;
+        flex: 0 0 auto;
         margin-bottom: 4px;
     }
 
@@ -34,6 +40,7 @@
     .color-panel-category-content {
         display: flex;
         flex-direction: column;
+        flex: 0 0 auto;
         padding: 4px 0 6px;
     }
 

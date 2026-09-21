@@ -1,5 +1,7 @@
 import { Color } from 'playcanvas';
 
+import { toneRange } from './tone-range';
+
 const SH_C0 = 0.28209479177387814;
 
 const dcDecode = (v: number) => v * SH_C0 + 0.5;
@@ -100,19 +102,17 @@ class ColorGrade {
         const enabled = p.colorGradeEnabled !== false;
 
         // whitePoint/blackPoint define the tonal range to remap onto [0,1].
-        // The UI sliders can cross (whitePoint < blackPoint): Math.max(0.001,
-        // negative) would yield scale=1000 and blow the colors out. Treat the
-        // pair as an ordered range so the scale stays bounded either way.
-        const lo = Math.min(p.blackPoint, p.whitePoint);
-        const hi = Math.max(p.blackPoint, p.whitePoint);
-        const denom = Math.max(0.001, hi - lo);
-        const scale = 1 / denom;
+        // 2026-09-21：改用共用的 `toneRange()`（有序区间 + 最小间距）——这里原来那份
+        // `Math.max(0.001, hi - lo)` 在两值相等时同样会给出 scale=1000（过曝），
+        // 而且与视口那份（不排序）在"白场 < 黑场"时结果完全不同 ⇒ 视口与导出不一致。
+        const tone = toneRange(p.blackPoint, p.whitePoint);
+        const scale = tone.scale;
         this.s = {
             r: scale * p.tintClr.r * (1 + p.temperature),
             g: scale * p.tintClr.g,
             b: scale * p.tintClr.b * (1 - p.temperature)
         };
-        this.offset = -lo + p.brightness;
+        this.offset = tone.offsetBase + p.brightness;
         this.saturation = p.saturation;
         this.transparency = p.transparency;
         this.highlights = p.highlights ?? 0;

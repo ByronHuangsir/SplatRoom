@@ -21,6 +21,7 @@ import {
 import { drawPointsWithShader } from './draw-points';
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { GRID_DIM, NUM_BINS } from './histogram-config';
+import { toneRange } from '../core/tone-range';
 import {
     fullscreenVS,
     tileMinMaxFS,
@@ -212,9 +213,12 @@ class CalcHistogram {
         const cameraPos = options?.cameraPos ?? zeroVec3;
         const onScreenOnly = options?.onScreenOnly ? 1 : 0;
 
-        // ColorGrade math, kept in sync with ColorGrade in src/color-grade.ts.
+        // ColorGrade math, kept in sync with ColorGrade in src/core/color-grade.ts.
+        // 2026-09-21：改用共用的 `toneRange()`（原来裸的 `1/(whitePoint-blackPoint)` 在两者相等时是
+        // Infinity、交叉时是负数 ⇒ 直方图 GPU 通路拿到 Inf/NaN）。
         const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency } = splat;
-        const cgInvRange = 1 / (whitePoint - blackPoint);
+        const tone = toneRange(blackPoint, whitePoint);
+        const cgInvRange = tone.scale;
 
         const values: any = {
             transformA,
@@ -235,7 +239,7 @@ class CalcHistogram {
                 cgInvRange * tintClr.g,
                 cgInvRange * tintClr.b * (1 - temperature)
             ],
-            cgOffset: -blackPoint + brightness,
+            cgOffset: tone.offsetBase + brightness,
             cgSaturation: saturation,
             transparency
         };

@@ -22,6 +22,7 @@ import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
+import { toneRange } from '../core/tone-range';
 import { suggestLodLevel } from '../lod/lod';
 import { Element, ElementType } from '../scene/element';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
@@ -1350,9 +1351,15 @@ class Splat extends Element {
 
         // combine black pointer, white point and brightness
         if (this._colorGradeEnabled) {
-            const offset = -this.blackPoint + this.brightness;
-            const denom = Math.max(0.001, this.whitePoint - this.blackPoint);
-            const scale = 1 / denom;
+            // 黑场/白场 → 有序区间 + 最小间距（**唯一实现**，与导出/直方图/范围选择共用）。
+            // 原这里单独写了一份：`denom = max(0.001, whitePoint - blackPoint)`、
+            // `offset = -blackPoint + brightness`。两处都错：
+            //   • 两值相等时（UI 把黑场滑块拉到底正好落在那个边界上）denom 掉到 0.001 ⇒ scale = 1000；
+            //   • offset 没乘 scale ⇒ 范围 ≠ 1 时"拉黑场"会把中间调整体抬亮（实测 0.29 → 0.99）。
+            // 两件事合起来就是用户报的"黑场拉到底变成过曝"。
+            const tone = toneRange(this.blackPoint, this.whitePoint);
+            const offset = tone.offsetBase + this.brightness;
+            const scale = tone.scale;
 
             material.setParameter('clrOffset', [offset, offset, offset]);
             material.setParameter('clrScale', [

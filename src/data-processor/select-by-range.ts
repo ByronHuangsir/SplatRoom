@@ -17,6 +17,7 @@ import {
 import { BufferPool } from './buffer-pool';
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { packedMaskHeight, packedMaskWidth } from './histogram-config';
+import { toneRange } from '../core/tone-range';
 import { vertexShader, fragmentShader } from '../shaders/select-by-range-shader';
 import { Splat } from '../splat/splat';
 
@@ -142,9 +143,13 @@ class SelectByRange {
         const cameraPos = options.cameraPos ?? zeroVec3;
         const onScreenOnly = options.onScreenOnly ? 1 : 0;
 
-        // ColorGrade math, kept in sync with ColorGrade in src/color-grade.ts.
+        // ColorGrade math, kept in sync with ColorGrade in src/core/color-grade.ts.
+        // 2026-09-21：改用共用的 `toneRange()`。这里原来是裸的 `1 / (whitePoint - blackPoint)`：
+        // 两值相等（UI 黑场滑块拉到底正好落在那个边界）得到 **Infinity**、白场<黑场得到负数
+        // ⇒ 这条 GPU 选择通路拿到 Inf/NaN。现在与视口/导出逐位同一套公式。
         const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency } = splat;
-        const cgInvRange = 1 / (whitePoint - blackPoint);
+        const tone = toneRange(blackPoint, whitePoint);
+        const cgInvRange = tone.scale;
 
         const values: any = {
             transformA,
@@ -165,7 +170,7 @@ class SelectByRange {
                 cgInvRange * tintClr.g,
                 cgInvRange * tintClr.b * (1 - temperature)
             ],
-            cgOffset: -blackPoint + brightness,
+            cgOffset: tone.offsetBase + brightness,
             cgSaturation: saturation,
             transparency,
             output_params: [resources.texture.width, resources.texture.height],

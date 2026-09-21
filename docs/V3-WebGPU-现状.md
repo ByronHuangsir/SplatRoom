@@ -3483,6 +3483,81 @@ exe 属性 **3.23.13** / 冒烟 4 进程 → 杀净 0。
 3. **真机复核**：用用户的 20M / 13M 真实扫描件跑一次 A/B（合成夹具是均匀大高斯，最不利于剔除类优化）。
 4. `dist\test-20m.ply` / `dist\test-20m-fill.ply` 打包前必须删。
 
+---
+
+### 6.57 第十一轮：调色"黑场拉到底变过曝" —— 层级区间改成唯一实现，另修颜色面板行重叠
+
+用户报「**调色模块，黑场拉到底变成过曝了**，看看这些数值范围的参数是否有问题」。
+实测是**三处数值范围缺陷叠加**（都在渲染/导出的数值范围内，与后端无关：两后端逐位同值），
+另外在写回归套件时**顺手查出一个颜色面板行重叠的布局缺陷**。
+完整机制、实测表与可复跑步骤见 `docs/调色黑场过曝与颜色面板行重叠-排查与修复-2026-09-21.md`。
+
+#### 缺陷①：护栏允许"范围 = 0"这个退化值
+
+`blackPoint / whitePoint` 是**层级（levels）区间**，UI 两个滑块反向
+（`blackPoint = -b`、`whitePoint = 2 - w`）。旧护栏只保证 `whitePoint - blackPoint >= 0`，
+而**等号可达**：默认白场滑块 1（白场 1.0）时把黑场滑块拉到 −1 ⇒ 黑场 = 白场 = 1.0 ⇒ 范围 0。
+视口那条公式是 `denom = Math.max(0.001, whitePoint - blackPoint)` ⇒ **`scale = 1000`**
+⇒ 实测冲白像素 **98.8~98.9%**、平均亮度 **0.994**（用户看到的就是这个）。
+
+#### 缺陷②：`offset` 没乘 `scale`（"一压就变亮"的主因）
+
+层级映射应为 `out = (in - lo) / (hi - lo) = in * scale + (-lo * scale)`，即 `offset = -lo * scale`；
+旧代码写的是 `offset = -lo` ⇒ **只要范围 ≠ 1 就整体抬亮**。实测平均亮度：
+范围 1.0 → **0.420**、0.5 → 0.164（本该比 0.420 更暗）、0.1 → **0.994**。
+
+#### 缺陷③：直方图 / 范围选择里是裸的除法
+
+`calc-histogram.ts` 与 `select-by-range.ts` 直接写 `1 / (whitePoint - blackPoint)`：
+范围 0 ⇒ `Infinity`、交叉 ⇒ 负数 ⇒ 这两条 GPU 通路拿到 Inf/NaN（直方图与"按范围选择"在极端参数下失效）。
+导出侧（`core/color-grade.ts`）又写了**第三种**公式（有序区间 + `max(0.001, hi-lo)` + `-lo`）
+⇒ 交叉参数（黑场 1.2 / 白场 0.8）下**视口读 `scale=1000`、导出读 `2.5`**。
+
+#### 修法：`src/core/tone-range.ts` 作唯一真源
+
+```ts
+MIN_TONE_RANGE = 0.05;
+toneRange(bp, wp) -> { lo, hi, range, scale, offsetBase }  // lo/hi 有序、range 有下限、NaN 兜底
+// scale = 1 / range, offsetBase = -lo * scale
+```
+
+四处调用点全部换成它（视口材质 / 导出 / 范围选择 / 直方图）；
+UI 护栏改成 `whiteSlider - blackSlider <= 2 - MIN_TONE_RANGE`（两滑块互相联动，
+于是"黑场拉到底"停在 `range = 0.05`，`scale` 上界 `1/0.05 = 20`）。
+
+**修后实测**（20 万点 / WebGPU / 黑场滑块扫一遍）：平均亮度
+**0.420 → 0.229 → 0.164 → 0.125 → 0.008 单调下降**、全程 **0% 冲白**；
+UI 极限位置 `range = 0.05 / scale = 20 / offset = −20`，纯黑 **96.17%**；
+交叉参数视口与导出都是 `2.5 / −2`。
+
+#### 顺手查出的布局缺陷：颜色面板行重叠 ⇒"黑场"这一行拖不动
+
+`#color-panel` 是 `max-height: 90vh; overflow: hidden`，而各分区是**默认可收缩**的 flex 子项。
+1280×800 下（90vh = 720，内容需要 935）分区被压扁（tone 的 content `clientH=164 / scrollH=220`）：
+**"黑场"行溢出自己分区 56px**（"洋红"84px）、行与行还互相重叠 16px；溢出部分落在 DOM 里
+**更靠后的那个分区容器**范围内并被它盖住 ⇒ `document.elementFromPoint(标签中心)` 命中的是别的
+分区容器，指针事件到不了标签（`document.body.style.cursor` 在 `pointerdown` 后仍为空字符串，
+正常应为 `ew-resize`）⇒ **这一行既拖不动也点不到**，滑块同理。
+
+修法（`src/ui/scss/color-panel.scss` 三处）：分区 `flex: 0 0 auto` + 面板 `overflow-y: auto`
+（装不下就滚动，而不是把分区压扁）。修后 1280×800：**无任何行溢出**（`overflowing rows: none`）、
+面板 `clientH/scrollH = 720/935`、命中 `label "黑场"`、真实鼠标拖拽拿到 `range=0.05 / scale=20`。
+
+#### 工具与护栏
+
+- 探针 `docs/probes/grade-blackpoint.cjs`：按滑块档位读**真实视口材质**的 `clrScale / clrOffset`、
+  抓画布统计平均亮度 / 冲白 / 纯黑，并同时打印导出侧公式做对照（改前 1000 vs 2.5）。
+- 套件 `docs/verify/verify-tone-range.cjs`（**9 项**，webgpu / webgl2 均 0 失败）：
+  单调压黑不冲白 / 极限压黑 / `scale` 有界且 `offset == -lo*scale` / 退化区间有限 /
+  交叉区间视口 == 导出 / **面板布局（行不溢出 + 标签可命中）** / **真实鼠标把标签拖到底** /
+  键盘通道（滑块自身 `change` 路径）同一组数字 / 直方图与范围选择不产生 Inf/NaN。
+- 新增坑（`docs/HANDOFF.md` 40/41/42）：区间型参数必须有唯一计算点、"刚好允许相等"的护栏等于没护栏；
+  `overflow: hidden` + 可收缩 flex 子项 = 行重叠"看得见但点不到"；"拖不动"要先怀疑命中区域
+  （合成 `PointerEvent` 用 `dispatchEvent` 会**绕过命中测试**，所以它能"拖成功"而真实鼠标不能 ——
+  这个不一致本身就是线索；`document.body.style.cursor` 是判断处理器有没有真跑的廉价探针）。
+
+**产物**：`release\SplatRoom-3.23.18.exe`；提交见 `docs/进度存档.md` 第十一轮。
+
 
 
 
