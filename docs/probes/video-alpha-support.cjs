@@ -11,18 +11,21 @@
 // 编一帧"左半边不透明、右半边全透明"的 RGBA，再用 `VideoDecoder` 解回来读 alpha，
 // 看 alpha 通道到底有没有被保住（这是"透明视频"成立与否的分水岭）。
 //
-// usage: node docs/probes/video-alpha-support.cjs "<url>"
+// usage: node docs/probes/video-alpha-support.cjs "<url>" [extraChromiumArgs]
+//   第 2 个参数是**追加的 Chromium 开关**（逗号分隔），用来验证"alpha 编码是不是被特性开关挡住"，
+//   例：node docs/probes/video-alpha-support.cjs "http://localhost:3621/?gpu=webgpu" "--enable-features=WebCodecsAlphaEncoder"
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', '..', 'node_modules', 'puppeteer-core'));
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
+const EXTRA_ARGS = String(process.argv[3] || '').split(',').map(s => s.trim()).filter(Boolean);
 
 (async () => {
     const browser = await puppeteer.launch({
         executablePath: EDGE,
         headless: 'new',
-        args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],
+        args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist', ...EXTRA_ARGS],
         protocolTimeout: 0
     });
     const page = await browser.newPage();
@@ -140,7 +143,7 @@ const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
         return result;
     });
 
-    console.log(JSON.stringify(out, null, 1));
+    console.log(JSON.stringify({ extraArgs: EXTRA_ARGS, ...out }, null, 1));
     await browser.close().catch(() => { });
     process.exit(0);
 })().catch((e) => { console.log(JSON.stringify({ fatal: String(e).slice(0, 400) })); process.exit(1); });
