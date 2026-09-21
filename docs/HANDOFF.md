@@ -855,7 +855,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `motion-opaque.cjs` | **运动期"不依赖顺序"渲染的决定性口径（第十轮）**：同一位姿下比较正确顺序 vs 乱序（Fisher-Yates）vs all-zeros 对照，alpha 混合与不透明路径各一遍；附帧代价 / 运动期派发次数 / order 字节数。规矩：上传两次 + 两次抓图收敛校验（见 HANDOFF 坑 33） |
 | `keyframe-marker.cjs` | **关键帧"位置不对"的三链路口径（第十轮）**：造关键帧 → 逐帧擦洗 → 同时量 ①元素世界坐标 vs 轨道求值 ②求值 vs 关键帧自身值（位置+target）③相机视图模式下的视口相机；含均匀/不均匀大跨距/插入后/含隐藏控制点/删光几个相位，以及 `_fixCameraPosition` 距离钳制诊断。用法：`node docs/probes/keyframe-marker.cjs "<url>" test-model.ply` |
 | `keyframe-marker-pixels.cjs` | 关键帧标记的**像素级**归属探针（第十轮，结论未依赖它）。两个坑：`onPreRender` 每帧重设实体 `enabled` ⇒ 手动启停无效、要改 `isVisible()`；224 档灰是无限网格线，白色判据要 ≥248 |
-| `grade-blackpoint.cjs` | **调色"黑场/白场"数值范围的口径（第十一轮）**：按滑块档位设 `blackPoint / whitePoint`（含 UI 够不到的 range 0、以及 `.ssproj` 可给出的交叉区间），读**真实视口材质**的 `clrScale / clrOffset`，抓画布统计平均亮度 / 冲白 / 纯黑，并同时打印导出侧公式的 `scale/offset` 做对照（改前视口 1000 vs 导出 2.5）。用法：`node docs/probes/grade-blackpoint.cjs "<url>" test-model.ply` |
+| `grade-blackpoint.cjs` | **调色"黑场/白场"数值范围的口径（第十一轮）**：按滑块档位设 `blackPoint / whitePoint`（含 UI 够不到的 range 0、以及 `.ssproj` 可给出的交叉区间），读**真实视口材质**的 `clrScale / clrOffset`，抓画布统计平均亮度 / 冲白 / 纯黑，并同时打印导出侧公式的 `scale/offset` 做对照（改前视口 1000 vs 导出 2.5）；**黑场 / 白场两端各扫一遍**。用法：`node docs/probes/grade-blackpoint.cjs "<url>" test-model.ply` |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |

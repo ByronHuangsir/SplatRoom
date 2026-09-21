@@ -134,6 +134,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             });
         }
 
+        // 沿"白场滑块"从 1 扫到 2（另一端到底），按同一条 UI 护栏联动黑场滑块
+        // 护栏：whiteSlider - blackSlider <= 2 - MIN_TONE_RANGE ⇒ 超了就抬黑场滑块
+        const whiteRows = [];
+        let blackSlider = 0;
+        for (const w of [1, 1.25, 1.5, 1.75, 1.95, 2]) {
+            if (w - blackSlider > 2 - 0.05) {
+                blackSlider = w - (2 - 0.05);
+            }
+            const blackPoint = -blackSlider;
+            const whitePoint = 2 - w;
+            splat.blackPoint = blackPoint;
+            splat.whitePoint = whitePoint;
+            await render(3);
+            const stats = await grabStats();
+            whiteRows.push({
+                whiteSlider: w,
+                blackSlider: +blackSlider.toFixed(2),
+                blackPoint: +blackPoint.toFixed(2),
+                whitePoint: +whitePoint.toFixed(2),
+                range: Math.abs(whitePoint - blackPoint),
+                material: mat(),
+                ...stats
+            });
+        }
+
         // 交叉（白场 < 黑场）：文档/.ssproj 可以直接给出这种值，绕过 UI 护栏
         splat.blackPoint = 1.2;
         splat.whitePoint = 0.8;
@@ -146,7 +171,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await render(3);
         const restored = await grabStats();
 
-        return { rows, crossed, restored };
+        return { rows, whiteRows, crossed, restored };
     });
 
     console.log(JSON.stringify({ model: MODEL, url: URL, ...out, errors: errs.slice(0, 5) }, null, 1));

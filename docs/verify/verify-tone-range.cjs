@@ -194,6 +194,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             `scales: ${sweep.rows.map(r => r.scale.toFixed(2)).join(', ')} (cap ${(1 / MIN_TONE_RANGE).toFixed(0)}), ` +
             `offsets: ${sweep.rows.map(r => Number(r.offset).toFixed(2)).join(', ')}`);
 
+        // ---- 3b：另一端（白场滑块拉到底）—— 语义上就是"冲白"，但必须同样有界 ----
+        // UI 护栏：whiteSlider - blackSlider <= 2 - MIN_TONE_RANGE；超了抬黑场滑块。
+        // 用途：① 证明"另一端"不是另一处过曝 bug；② 把"有界 + 单调"这条不变量钉在两侧。
+        const whiteSweep = await page.evaluate(async () => {
+            const rows = [];
+            let blackSlider = 0;
+            for (const w of [1, 1.25, 1.5, 1.75, 1.95, 2]) {
+                if (w - blackSlider > 2 - 0.05) {
+                    blackSlider = w - (2 - 0.05);
+                }
+                await window.__set(-blackSlider, 2 - w);
+                const st = await window.__stats();
+                rows.push({
+                    whiteSlider: w,
+                    blackSlider: +blackSlider.toFixed(2),
+                    blackPoint: -blackSlider,
+                    whitePoint: 2 - w,
+                    range: Math.abs(2 - w - (-blackSlider)),
+                    ...window.__params(),
+                    meanLum: +st.meanLum.toFixed(4),
+                    blownPct: +st.blownPct.toFixed(2)
+                });
+            }
+            await window.__restore();
+            return rows;
+        });
+        const wLast = whiteSweep[whiteSweep.length - 1];
+        check('the other end (white point at its limit) brightens monotonically and stays bounded too',
+            whiteSweep.every((r, i) => i === 0 || r.meanLum >= whiteSweep[i - 1].meanLum - 0.005) &&
+            whiteSweep.every(r => Number.isFinite(r.scale) && r.scale <= 1 / MIN_TONE_RANGE + 1e-6) &&
+            Math.abs(wLast.offset - (-Math.min(wLast.blackPoint, wLast.whitePoint) * wLast.scale)) < 1e-4,
+            `meanLum: ${whiteSweep.map(r => r.meanLum.toFixed(3)).join(' -> ')}; ` +
+            `scales: ${whiteSweep.map(r => r.scale.toFixed(2)).join(', ')} (cap ${(1 / MIN_TONE_RANGE).toFixed(0)}); ` +
+            `blown: ${whiteSweep.map(r => `${r.blownPct}%`).join(', ')} — ` +
+            `白场到底 = 冲白是**设计语义**，这里守的是"scale 有界、单调、offset 仍 = -lo*scale"`);
+
         check('degenerate range (blackPoint == whitePoint, unreachable from the UI) stays finite and crushes to black',
             sweep.degenerate.finite && sweep.degenerate.scale <= 1 / MIN_TONE_RANGE + 1e-6 &&
             sweep.degenerate.blownPct < 1 && sweep.degenerate.blackPct > 50,
