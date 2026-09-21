@@ -17,6 +17,7 @@
 import { buildLodAssets, planLodFractions, setLodDistances, getLodDistances } from './lod';
 import { EditHistory } from '../core/edit-history';
 import { Events } from '../core/events';
+import { splatTier } from '../core/splat-tier';
 import { Element, ElementType } from '../scene/element';
 import type { Scene } from '../scene/scene';
 import { Splat } from '../splat/splat';
@@ -103,16 +104,31 @@ export const registerLodEvents = (
         for (const s of splats) await generateForSplat(s);
     });
 
-    // Auto-generate for the first large splat of a fresh load (auto mode only).
+    // Auto-generate for the first large splat of a fresh load.
+    //
+    // 2026-09-22 分级：B 档（500 万~5000 万）与 C 档（> 5000 万）**自动开启** —— 这是用户要的
+    // "不同等级采取不同策略"里性能那一半：代理层只在相机远离到阈值之外才会接管
+    // （`lod.allowProxy` 还要求"没选中、没在拖、没在撤销"），近距离仍是全分辨率。
+    // 关掉的办法：设置面板里的 Runtime LOD 开关，或 `window.__SPLATROOM_TIER_LOD__ = false`。
     events.on('scene.elementAdded', (element: Element) => {
-        if (!autoEnabled) return;
         if (element.type !== ElementType.splat) return;
         const scene = getScene();
         if (!scene) return;
         const splats = scene.getElementsByType(ElementType.splat) as Splat[];
         if (splats.length > 1) return; // not the fresh single-splat load
         const splat = element as unknown as Splat;
-        if (!splat?.splatData || splat.splatData.numSplats < LOD_GENERATE_MIN) return;
+        if (!splat?.splatData) return;
+
+        // 分级决定要不要自动开（A 档不动 —— 小模型不需要代理层）
+        const tierAuto = (globalThis as any).__SPLATROOM_TIER_LOD__ !== false;
+        const numSplats = splat.splatData.numSplats;
+        if (tierAuto && splatTier(numSplats) !== 'A' && !autoEnabled) {
+            autoEnabled = true;
+            events.fire('lod.autoChanged', autoEnabled);
+        }
+
+        if (!autoEnabled) return;
+        if (numSplats < LOD_GENERATE_MIN) return;
         // defer until the scene is interactive (focus/import done)
         setTimeout((): void => {
             void generateForSplat(splat);

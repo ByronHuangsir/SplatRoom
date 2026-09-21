@@ -175,12 +175,15 @@ foreach ($s in $suites) {
 }
 ```
 
-`docs/verify/` 里现在有 **53 个 `verify-*.cjs`**，批量脚本（`_tmp\run-batch.ps1`）跑 **44 个**
+`docs/verify/` 里现在有 **55 个 `verify-*.cjs`**，批量脚本（`_tmp\run-batch.ps1`）跑 **46 个**
 （排除的 9 个：`verify-measure-online*` 3 个、`verify-blackscreen.cjs`、`verify-large-model-backend.cjs`、
 `verify-webgpu-fallback.cjs`、`verify-load-worker.cjs`、`verify-selection-responsiveness.cjs`、
 `verify-large-model-ui.cjs`）。
-**双后端**：webgl2 侧跑**同一份 44 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
-**最近一轮实测（第十一轮，3.23.18）：webgpu 44 套 `TOTAL FAILED: 0`、webgl2 同 44 套 `TOTAL FAILED: 0`**，
+另有 **5 个 `.mts` 纯 node 套件**（`node --experimental-strip-types docs/verify/<x>.mts`）：
+`verify-index-ranges`（18 项）、`verify-motion-quality-policy`（13 项）、`verify-render-diagnostics`、
+`verify-splat-tier`（**21 项**，模型/设备分级与导入预算）、`verify-color-curves`（**11 项**，曲线采样与插值）。
+**双后端**：webgl2 侧跑**同一份 46 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
+**最近一轮实测（第十二轮，3.23.19）：webgpu 46 套 `TOTAL FAILED: 0`、webgl2 同 46 套 `TOTAL FAILED: 0`**，
 两边各有 1 个 `UNPARSED`（`verify-merge-ui.cjs`，既有输出形状问题，不是失败）。
 
 **UNPARSED 是既有输出形状问题、不是失败**：`verify-merge-ui.cjs`（根本没有 `failed` 字段，看 `pageerrors: []`）、
@@ -809,6 +812,51 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     **线索本身**：合成 `PointerEvent` 用 `dispatchEvent` 会**绕过命中测试**（所以它能"拖成功"），
     真实 `page.mouse` 不会 —— 两者表现不一致，就说明问题在"能不能被点到"，不在事件处理逻辑。
     另外 `document.body.style.cursor` 是个廉价可靠的"处理器是否真的跑到了"探针。
+43. **单块 `ArrayBuffer` 的墙在 1.5 GB 可以 / 2 GB 失败**（2026-09-22 新增，第十二轮，实测）：
+    `docs/probes/alloc-wall.cjs`：0.25/0.5/1/1.5 GB 都能分配并真写一遍，**2 GB 直接
+    `RangeError: Array buffer allocation failed`**（渲染进程 `jsHeapSizeLimit` 报 4192 MB）。
+    后果：`fetch(url).arrayBuffer()` 读 7.02 GB 的 PLY 会抛 `TypeError: Failed to fetch`
+    （**连 4.72 GB 的 20M 夹具也失败**）。而"分块取（`Range` + `blob()`）拼成多块 `File`"能通
+    （7.54 GB / 9.6 s / 88k 块）。
+    ⇒ **任何"把整个文件读进一个 ArrayBuffer"的路径在 5 GB 以上都不可靠**：应用主路径本来就是流式
+    （`file-systems.ts` 的 `BlobReadStream` 按 4 MB `slice()`），但 `file-handler.ts:404` 的
+    **URL 分支**、以及 `load-worker-client.ts` 的 `readFileBytes()`（整块读再 transfer）都还是整体读。
+44. **1.35 亿高斯"打不开"的真因是物化 7 GiB 列，不是读取**（2026-09-22 新增）：
+    `src/io/read/loader.ts` 的 `materializeToDataTable()` 会给**每一列**分配
+    `Float32Array(134,652,397)`（14 列 × 538 MB = **7.02 GiB**），随后还有 morton 索引 + permute
+    另开缓冲，引擎侧再叠加纹理 CPU 镜像与 centers。实测**900 秒仍未完成**、渲染进程工作集 10.9 GB。
+    修法：在**惰性 `ChunkSource` 上先降行数**（`src/io/read/strided-source.ts` 的"抽稀视口"：
+    对外宣称 `numGaussians = target`，内部把 chunk 读翻译成对底层源的 gather 读，
+    行号 `floor(i × total / target)`）⇒ 1.35 亿 → 6000 万时 7.02 GiB → 3.1 GiB，导入 87 s。
+    **不要**用 `decimateSourceAdaptive` 做导入期抽稀：本仓库 `lod.ts:87-94` 已有结论 ——
+    它需要完整工作副本，"for tens of millions of splats the copy alone would freeze the UI for minutes"。
+45. **分级（按点数 × 设备）的两条护栏**（2026-09-22 新增，`src/core/splat-tier.ts`）：
+    ① **硬上限永远生效**（WebGPU 的排序结果是一个 u32/点的存储缓冲 ⇒
+    `maxStorageBufferBindingSize/4`；纹理要 `ceil(sqrt(N))²`），默认 128 MB ⇒ 约 3350 万点；
+    ② **"舒适上限"只对 C 档（> 5000 万点）生效** —— A/B 档的模型今天本来就能打开
+    （用户自己的 2000 万点扫描件就是 B 档），为了"更快"把它们悄悄抽稀会直接改掉用户看到的画质。
+    实测四件真实扫描件（3.36M / 6.56M / 10.46M / 20M）**全部 `reduction = null`**。
+    排障开关：`window.__SPLATROOM_IMPORT_FULL__`（强制全量）、`__SPLATROOM_IMPORT_BUDGET__`
+    （手动预算）、`__SPLATROOM_DEVICE_CLASS__`（在一台机器上模拟三档设备）。
+46. **曲线插值必须单调保形**（2026-09-22 新增）：Catmull-Rom 会过冲（暗部出负值、亮部冲出去），
+    摄影曲线的正确做法是 Fritsch–Carlson 单调三次（`src/core/color-curves.ts`）。
+    另外**恒等曲线要短路成"不设曲线"**（`isIdentityCurve`）：既省掉着色器开销，也避免
+    1e-7 级量化把"看起来没动"的画面改掉。套件实测恒等曲线逐像素最大差 **0**。
+47. **着色器模板字符串里不能出现反引号**（2026-09-22 新增，踩得很值）：我在 GLSL/WGSL 注释里写了
+    “`uCurveEnabled = 0` 时跳过”，反引号把模板字符串**当场截断** ⇒ tsc 报
+    `TS1005: ',' expected`（指向注释那一行）。写这两个 shader 文件的注释时只用「」或纯文本。
+48. **顶点阶段 vs 片元阶段加纹理**（2026-09-22 新增）：本 fork 的**顶点** chunk 有现成纹理先例
+    （`splatState` / `splatTransform` / `transformPalette`，GLSL `texelFetch` / WGSL `textureLoad`），
+    而**片元** chunk 目前一个 sampler 都没有 ⇒ 第一次给片元加纹理的绑定风险更大。
+    曲线因此放在顶点阶段（紧跟 `color = color * clrScale + clrOffset`）。
+49. **"透明 MOV"卡在编码器，不是卡在封装**（2026-09-22 新增，实测）：
+    `docs/probes/video-alpha-support.cjs` —— 本机 Chromium 对 vp8/vp9/av1/h264 一律
+    `alpha: 支持 'discard'、拒绝 'keep'`（h265 两者都不支持），
+    `MediaRecorder.isTypeSupported('video/quicktime') === false`；
+    mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 都没有），
+    而 `@mediabunny/prores` 只是**解码器**。⇒ 透明视频只能走"**导出透明 PNG 序列 + 外部 ffmpeg
+    合成 ProRes 4444 MOV**"（`-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le`）。
+    抓透明帧本身是通的（预乘 RGBA + 透明清屏色 + PNG colorType 6 已有成品）。
 
 ---
 
@@ -856,6 +904,10 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `keyframe-marker.cjs` | **关键帧"位置不对"的三链路口径（第十轮）**：造关键帧 → 逐帧擦洗 → 同时量 ①元素世界坐标 vs 轨道求值 ②求值 vs 关键帧自身值（位置+target）③相机视图模式下的视口相机；含均匀/不均匀大跨距/插入后/含隐藏控制点/删光几个相位，以及 `_fixCameraPosition` 距离钳制诊断。用法：`node docs/probes/keyframe-marker.cjs "<url>" test-model.ply` |
 | `keyframe-marker-pixels.cjs` | 关键帧标记的**像素级**归属探针（第十轮，结论未依赖它）。两个坑：`onPreRender` 每帧重设实体 `enabled` ⇒ 手动启停无效、要改 `isVisible()`；224 档灰是无限网格线，白色判据要 ≥248 |
 | `grade-blackpoint.cjs` | **调色"黑场/白场"数值范围的口径（第十一轮）**：按滑块档位设 `blackPoint / whitePoint`（含 UI 够不到的 range 0、以及 `.ssproj` 可给出的交叉区间），读**真实视口材质**的 `clrScale / clrOffset`，抓画布统计平均亮度 / 冲白 / 纯黑，并同时打印导出侧公式的 `scale/offset` 做对照（改前视口 1000 vs 导出 2.5）；**黑场 / 白场两端各扫一遍**。用法：`node docs/probes/grade-blackpoint.cjs "<url>" test-model.ply` |
+| `huge-model-open.cjs` | **超大模型"能不能打开"的分阶段口径（第十二轮）**：`Range` 分块拼 `File`（与拖入真实文件等价）→ `import` → 逐阶段计时 + 画布亮像素 + 帧时间，并打印 `splat.importReduction` / `tier.policyChanged` / `lodAuto` / `lodAssets` / `motionQuality`。Node 侧每 3 s 快照 `window.__stages`，**渲染进程被 OOM 杀掉也能保住已走过的阶段**。第 6 参 `naive` 走 `fetch().arrayBuffer()` 对照；第 7 参强制导入预算。用法：`node docs/probes/huge-model-open.cjs "<url>" huge-134m.ply 240 0 256 6000000` |
+| `huge-io-wall.cjs` | **大文件 I/O 三层的墙（第十二轮）**：① 纯流式读完（`res.body.getReader()`，不进单块）② 页内单块分配上限（真写一遍）③ `Range` 切不同大小做 `arrayBuffer()`。结论：流式 7.5 GB 没问题；单块约 2 GB 就失败 |
+| `alloc-wall.cjs` | **干净的"单块 `ArrayBuffer` 上限"口径（第十二轮，不做任何 I/O）**：`new ArrayBuffer(n)` + 每 4 MB 真写一次。实测 1.5 GB 可以 / **2 GB 失败** |
+| `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
 | `ring-slider.cjs` / `ring-hide-bar.cjs` / `mode-selection.cjs` | 环模式下的滑块参与度 / 隐藏条 / 模式切换 |

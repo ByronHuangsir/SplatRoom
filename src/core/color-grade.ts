@@ -1,5 +1,6 @@
 import { Color } from 'playcanvas';
 
+import { evaluateCurveAt, isIdentityCurve } from './color-curves';
 import { toneRange } from './tone-range';
 
 const SH_C0 = 0.28209479177387814;
@@ -79,7 +80,9 @@ type GradeParams = {
     colorGradeEnabled?: boolean,
     hslHue?: ArrayLike<number>,
     hslSat?: ArrayLike<number>,
-    hslLum?: ArrayLike<number>
+    hslLum?: ArrayLike<number>,
+    /** 曲线采样表（33 点，见 color-curves.ts）；缺省/恒等 ⇒ 不施加 */
+    curve?: Float32Array | null
 };
 
 type RGB = { r: number, g: number, b: number };
@@ -95,6 +98,8 @@ class ColorGrade {
     private hslHue: number[];
     private hslSat: number[];
     private hslLum: number[];
+    /** 曲线调色采样表（33 点）；null = 恒等（与着色器同一套线性插值） */
+    private curve: Float32Array | null;
     readonly hasTint: boolean;
     readonly hasHsl: boolean;
 
@@ -121,6 +126,8 @@ class ColorGrade {
         this.hslHue = p.hslHue ? Array.from(p.hslHue) : [0, 0, 0, 0, 0, 0, 0, 0];
         this.hslSat = p.hslSat ? Array.from(p.hslSat) : [0, 0, 0, 0, 0, 0, 0, 0];
         this.hslLum = p.hslLum ? Array.from(p.hslLum) : [0, 0, 0, 0, 0, 0, 0, 0];
+        // 曲线：与视口同一条表（恒等 ⇒ null ⇒ 完全跳过）
+        this.curve = enabled && p.curve && !isIdentityCurve(p.curve) ? p.curve : null;
 
         this.hasTint = enabled && (
             !p.tintClr.equals(Color.WHITE) ||
@@ -131,7 +138,9 @@ class ColorGrade {
             p.whitePoint !== 1 ||
             this.highlights !== 0 ||
             this.shadows !== 0 ||
-            this.contrast !== 0
+            this.contrast !== 0 ||
+            // 曲线也算"有调色"：否则导出会跳过烘焙，导出图与视口不一致
+            !!this.curve
         );
 
         this.hasHsl = enabled && (
@@ -146,6 +155,13 @@ class ColorGrade {
         c.r = offset + c.r * this.s.r;
         c.g = offset + c.g * this.s.g;
         c.b = offset + c.b * this.s.b;
+
+        // 曲线（与着色器里同一位置：分级 scale/offset 之后、饱和度之前）
+        if (this.curve) {
+            c.r = evaluateCurveAt(this.curve, c.r);
+            c.g = evaluateCurveAt(this.curve, c.g);
+            c.b = evaluateCurveAt(this.curve, c.b);
+        }
 
         // saturation (luma-based, matches vertex shader)
         const grey = c.r * 0.299 + c.g * 0.587 + c.b * 0.114;

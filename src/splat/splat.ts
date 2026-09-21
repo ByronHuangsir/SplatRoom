@@ -3,6 +3,7 @@ import {
     FILTER_NEAREST,
     PIXELFORMAT_R8,
     PIXELFORMAT_R16U,
+    PIXELFORMAT_R32F,
     PROJECTION_ORTHOGRAPHIC,
     Asset,
     BoundingBox,
@@ -20,6 +21,7 @@ import {
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
+import { CURVE_SAMPLES, identityCurveSamples, isIdentityCurve } from '../core/color-curves';
 import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -119,6 +121,11 @@ class Splat extends Element {
     lodEnabled = false;
     /** -1 = full-resolution base asset; otherwise index into lodAssets. */
     lodLevel = -1;
+    /**
+     * 导入时按设备预算抽稀过的信息（`src/core/splat-tier.ts`）。`null` = 原样导入。
+     * 保留下来是为了让 UI / 探针能说清"你现在看到的不是全部点"。
+     */
+    importReduction: { from: number; to: number; tier: string; device: string; reason: string } | null = null;
     _lodBaseAsset: Asset | null = null;
     _lodLastSwitchAt = 0;
     // 娑撯偓濞嗏剝鈧冩啞鐠€锔界垼鐠佸府绱版稉鑽ゆ祲閺堝搫绱╅悽銊у繁婢舵唻绱欓幒鎺戠碍閸忔粌绨抽弮鐘崇《閸欐牜娴夐張鍝勑幀渚婄礆閸欘亝褰佺粈杞扮濞嗏槄绱?
@@ -129,6 +136,10 @@ class Splat extends Element {
     // all writes go through state.setBits/clearBits/toggleBits, then flush().
     state: SplatState;
     transformTexture: Texture;
+    /** 曲线调色 LUT（33×1 R32F；见 src/core/color-curves.ts） */
+    curveTexture: Texture;
+    /** 当前曲线采样表（33 点）；`null` = 恒等（画面零改动） */
+    private _curveSamples: Float32Array | null = null;
     selectionBoundStorage: BoundingBox;
     localBoundStorage: BoundingBox;
 
@@ -289,6 +300,8 @@ class Splat extends Element {
 
             // 缁帒鐡欓崠鏍ㄦ殠鐏?uniform閿涘牓绮拋?0 = 鐎瑰本鏆ｅΟ鈥崇€烽敍?
             this.ensureScatterParams();
+            // 曲线 LUT 纹理（内容随曲线就地更新，绑定一次即可）
+            material.setParameter('uCurve', this.curveTexture);
             material.setParameter('uScatterProgress', this._scatterProgress);
             material.setParameter('uScatterRadius', this._scatterRadius);
             material.setParameter('uScatterCenter', [this._scatterCenter.x, this._scatterCenter.y, this._scatterCenter.z]);
@@ -308,6 +321,32 @@ class Splat extends Element {
         if (!bound || !bound.center) return;
         this._scatterCenter.copy(bound.center);
         this._scatterRadius = Math.max(0.01, bound.halfExtents.length() * 1.2);
+    }
+
+    /**
+     * 设置曲线调色表（33 点，见 `src/core/color-curves.ts`）。
+     *
+     * 传 `null` 或恒等曲线 = 关闭：着色器里 `uCurveEnabled = 0` 整段跳过，
+     * 画面与"没有曲线功能"逐位一致（这是默认状态，也是本仓库对观感类改动的硬要求）。
+     *
+     * @param samples - 33 点采样表（更长也可以，只取前 `CURVE_SAMPLES` 个）；null = 恒等
+     */
+    setCurve(samples: Float32Array | null) {
+        const next = samples && !isIdentityCurve(samples) ? samples : null;
+        this._curveSamples = next;
+        const data = this.curveTexture.lock() as Float32Array;
+        if (next) {
+            data.set(next.subarray(0, CURVE_SAMPLES));
+        } else {
+            data.set(identityCurveSamples());
+        }
+        this.curveTexture.unlock();
+        this.scene.events.fire('splat.curve', this);
+    }
+
+    /** 当前曲线采样表（`null` = 恒等）。名字与 `ColorGrade` 的入参一致：导出镜像直接读它。 */
+    get curve() {
+        return this._curveSamples;
     }
 
     /**
@@ -416,6 +455,26 @@ class Splat extends Element {
         this.stateTexture = createTexture('splatState', PIXELFORMAT_R8);
         this.state = new SplatState(splatData.getProp('state') as Uint8Array, this.stateTexture);
         this.transformTexture = createTexture('splatTransform', PIXELFORMAT_R16U);
+
+        // 曲线调色 LUT（33×1，R32F）。默认是恒等曲线 + `uCurveEnabled = 0`，
+        // 所以不设曲线时着色器整段跳过、画面与之前逐位一致（见 src/core/color-curves.ts）。
+        this.curveTexture = new Texture(device, {
+            name: 'uCurve',
+            width: CURVE_SAMPLES,
+            height: 1,
+            format: PIXELFORMAT_R32F,
+            mipmaps: false,
+            minFilter: FILTER_NEAREST,
+            magFilter: FILTER_NEAREST,
+            addressU: ADDRESS_CLAMP_TO_EDGE,
+            addressV: ADDRESS_CLAMP_TO_EDGE
+        });
+        {
+            const ident = identityCurveSamples();
+            const data = this.curveTexture.lock() as Float32Array;
+            data.set(ident);
+            this.curveTexture.unlock();
+        }
 
         this.localBoundStorage = instance.resource.aabb;
         // keep a pristine copy of the engine's CPU-computed AABB: localBoundStorage is
@@ -1380,6 +1439,8 @@ class Splat extends Element {
             material.setParameter('hslSatB', [this._hslSat[4], this._hslSat[5], this._hslSat[6], this._hslSat[7]]);
             material.setParameter('hslLumA', [this._hslLum[0], this._hslLum[1], this._hslLum[2], this._hslLum[3]]);
             material.setParameter('hslLumB', [this._hslLum[4], this._hslLum[5], this._hslLum[6], this._hslLum[7]]);
+            // 曲线调色：没有曲线时开关为 0，着色器整段跳过（画面零改动）
+            material.setParameter('uCurveEnabled', this._curveSamples ? 1 : 0);
         } else {
             // bypass all color grading 閳?neutral values
             material.setParameter('clrOffset', [0, 0, 0]);
@@ -1395,6 +1456,8 @@ class Splat extends Element {
             material.setParameter('hslSatB', [0, 0, 0, 0]);
             material.setParameter('hslLumA', [0, 0, 0, 0]);
             material.setParameter('hslLumB', [0, 0, 0, 0]);
+            // 调色整体关闭 ⇒ 曲线也一起关（与"关掉调色"的语义一致）
+            material.setParameter('uCurveEnabled', 0);
         }
         material.setParameter('transformPalette', this.transformPalette.texture);
 

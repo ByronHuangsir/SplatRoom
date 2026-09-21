@@ -193,6 +193,7 @@
     "popup.gpu-backend-restart.message": "图形后端在启动时确定，改动将在下次打开应用后生效。",
     "popup.load-options-header": "加载选项",
     "popup.lod-select-message": "此文件包含多个细节层级。请选择要加载的层级。",
+    "popup.import-simplify-progress": "正在按本机图形能力抽稀导入…",
     "popup.lod-select-splats": "高斯点",
     "popup.lod-upload-note": "注意：包含多个细节层级的场景可直接上传至",
     "popup.giant-splat-header": "检测到异常高斯",

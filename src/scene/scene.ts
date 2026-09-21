@@ -28,10 +28,12 @@ import { CameraPathControl } from '../camera/camera-path-control';
 import { CameraPreview } from '../camera/camera-preview';
 import { CameraMotion } from '../core/camera-motion';
 import { CommandQueue } from '../core/command-queue';
+import { readDeviceFacts } from '../core/device-facts';
 import { Events } from '../core/events';
 import { GpuFrameTiming } from '../core/gpu-frame-timing';
 import { MotionOpaque, applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { MotionQuality } from '../core/motion-quality';
+import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePolicy } from '../core/splat-tier';
 import { DataProcessor } from '../data-processor/index';
 import { PCApp } from '../pc-app';
 import { GroupRenderer } from '../splat/group-renderer';
@@ -136,6 +138,11 @@ class Scene {
     readonly gpuFrameTiming: GpuFrameTiming;
     // 交互期降级策略（运动时降渲染分辨率，停手恢复）。见 src/core/motion-quality.ts。
     readonly motionQuality = new MotionQuality();
+
+    /** 设备事实缓存（分级用；适配器不会中途变化） */
+    private _deviceFacts: DeviceFacts | null = null;
+    /** 上一次应用的分级键（`tier|device`），避免每帧重算策略 */
+    private _tierPolicyKey = '';
     // 运动期"不依赖顺序"的渲染（不透明 + 深度写 + alpha 下限）。见 src/core/motion-opaque.ts。
     readonly motionOpaque = new MotionOpaque();
     // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
@@ -690,6 +697,42 @@ class Scene {
         return total;
     }
 
+    /**
+     * 分级策略接线（2026-09-22）：模型规模档位或设备档位一变，就按 `runtimePolicy()` 重设
+     * 交互期降级的阶梯与门槛。设备事实只读一次（适配器不会中途变），档位用"键"比较避免每帧重算。
+     */
+    private applyTierPolicy() {
+        const info = this.tierPolicy();
+        const key = `${info.tier}|${info.device}`;
+        if (key === this._tierPolicyKey) {
+            return;
+        }
+        this._tierPolicyKey = key;
+        this.motionQuality.applyPolicy(info.policy);
+        this.events.fire('tier.policyChanged', info);
+    }
+
+    /**
+     * 当前分级（模型规模档位 × 设备档位）与对应策略。
+     * 既能给 UI 显示，也能给探针/套件断言（`scene.events.invoke('tier.policy')`）。
+     *
+     * @returns 点数、模型档位、设备档位与完整运行时策略
+     */
+    tierPolicy(): { numSplats: number; tier: string; device: string; policy: RuntimePolicy } {
+        // 设备事实缓存：只有"强制档位"这个开关变化时才重读（真机上适配器不会变）
+        const forced = (globalThis as any).__SPLATROOM_DEVICE_CLASS__ ?? null;
+        if (!this._deviceFacts || this._deviceFacts.forcedClass !== forced) {
+            this._deviceFacts = readDeviceFacts(this.app.graphicsDevice);
+        }
+        const numSplats = this.splatCount();
+        return {
+            numSplats,
+            tier: splatTier(numSplats),
+            device: deviceClass(this._deviceFacts),
+            policy: runtimePolicy(numSplats, this._deviceFacts)
+        };
+    }
+
     private onPreRenderInner() {
         // P2 主渲染前校验：PiP 的 sorter/orderTexture swap 只在 onPostRender 的
         // try/finally 窗口内存在，正常时主渲染永远看不到 PiP 状态。若上一帧
@@ -828,6 +871,9 @@ class Scene {
         }
 
         this.gpuFrameTiming.noteFrame(this.cameraMotion.moving);
+
+        // 分级策略：模型规模/设备档位变了才重设阶梯与门槛（见 src/core/splat-tier.ts）
+        this.applyTierPolicy();
 
         const qualityChanged = this.motionQuality.update(
             this.cameraMotion.moving,

@@ -193,6 +193,7 @@
     "popup.gpu-backend-restart.message": "グラフィックスバックエンドは起動時に決定されるため、変更は次回起動時から有効になります。",
     "popup.load-options-header": "読み込みオプション",
     "popup.lod-select-message": "このファイルには複数の詳細レベルが含まれています。読み込むレベルを選択してください。",
+    "popup.import-simplify-progress": "このデバイス向けにモデルを間引いています…",
     "popup.lod-select-splats": "スプラット",
     "popup.lod-upload-note": "注: LODを含むシーンは次の場所から直接アップロードできます:",
     "popup.giant-splat-header": "異常なスプラットを検出",

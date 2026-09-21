@@ -3,6 +3,11 @@ const vertexShader = /* glsl*/`
 
 uniform sampler2D splatState;
 
+// 曲线调色 LUT（33×1 R32F；见 src/core/color-curves.ts）。
+// uCurveEnabled = 0 时下面整段跳过 ⇒ 不设曲线时对画面**零改动**。
+uniform sampler2D uCurve;
+uniform float uCurveEnabled;
+
 uniform vec4 selectedClr;
 uniform vec4 lockedClr;
 
@@ -60,6 +65,20 @@ uniform float saturation;
 vec3 applySaturation(vec3 color) {
     vec3 grey = vec3(dot(color, vec3(0.299, 0.587, 0.114)));
     return grey + (color - grey) * saturation;
+}
+
+// ---- 曲线调色（与 WGSL 侧、CPU 侧逐位同一套：33 点线性插值）----
+float curveLookup(float xIn) {
+    float t = clamp(xIn, 0.0, 1.0) * 32.0;
+    int i0 = int(floor(t));
+    int i1 = min(i0 + 1, 32);
+    float a = texelFetch(uCurve, ivec2(i0, 0), 0).r;
+    float b = texelFetch(uCurve, ivec2(i1, 0), 0).r;
+    return mix(a, b, t - float(i0));
+}
+
+vec3 applyCurve(vec3 color) {
+    return vec3(curveLookup(color.r), curveLookup(color.g), curveLookup(color.b));
 }
 
 void main(void) {
@@ -303,6 +322,11 @@ void main(void) {
 
         // apply tint/brightness
         color = color * clrScale + vec4(clrOffset, 0.0);
+
+        // 曲线调色（恒等时 uCurveEnabled = 0，整段跳过 ⇒ 对现有画面零改动）
+        if (uCurveEnabled > 0.5) {
+            color = vec4(applyCurve(color.xyz), color.a);
+        }
 
         // ===== 特效颜色/透明度（SplatRoom）=====
         #ifndef PICK_PASS

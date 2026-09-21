@@ -44,6 +44,11 @@ const vertexShaderWGSL = /* wgsl */`
 // per-splat edit state (R8): bit0 selected, bit1 locked, bit2 deleted
 var splatState: texture_2d<f32>;
 
+// 曲线调色 LUT（33×1 R32F；见 src/core/color-curves.ts）。
+// uCurveEnabled = 0 时下面整段跳过 ⇒ 不设曲线时对画面**零改动**。
+var uCurve: texture_2d<f32>;
+uniform uCurveEnabled: f32;
+
 uniform selectedClr: vec4f;
 uniform lockedClr: vec4f;
 
@@ -99,6 +104,20 @@ const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
 fn applySaturationToColor(c: vec3f) -> vec3f {
     let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
     return grey + (c - grey) * uniform.saturation;
+}
+
+// ---- 曲线调色（与 GLSL 侧、CPU 侧逐位同一套：33 点线性插值）----
+fn curveLookup(xIn: f32) -> f32 {
+    let t: f32 = clamp(xIn, 0.0, 1.0) * 32.0;
+    let i0: i32 = i32(floor(t));
+    let i1: i32 = min(i0 + 1, 32);
+    let a: f32 = textureLoad(uCurve, vec2i(i0, 0), 0).r;
+    let b: f32 = textureLoad(uCurve, vec2i(i1, 0), 0).r;
+    return mix(a, b, t - f32(i0));
+}
+
+fn applyCurveToColor(c: vec3f) -> vec3f {
+    return vec3f(curveLookup(c.x), curveLookup(c.y), curveLookup(c.z));
 }
 
 // per-splat hashed random numbers, shared with the modify hook
@@ -331,6 +350,11 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
         // apply tint/brightness
         clr = clr * uniform.clrScale + vec4f(uniform.clrOffset, 0.0);
+
+        // 曲线调色（恒等时 uCurveEnabled = 0，整段跳过）
+        if (uniform.uCurveEnabled > 0.5) {
+            clr = vec4f(applyCurveToColor(clr.xyz), clr.w);
+        }
 
         // ===== effect colour / opacity (SplatRoom) =====
         if (uniform.uEffectMode == 1) {

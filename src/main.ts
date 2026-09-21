@@ -175,6 +175,10 @@ const main = async () => {
     registerCropBoxEvents(events, getScene);
     registerSurfaceRefineEvents(events, editHistory, getScene);
     registerLodEvents(events, editHistory, getScene);
+
+    // 分级策略查询（模型规模 × 设备档位；见 src/core/splat-tier.ts）。
+    // 给 UI 显示与探针/套件断言用；策略变化时 scene 会 fire('tier.policyChanged', …)。
+    events.function('tier.policy', () => getScene()?.tierPolicy() ?? null);
     registerSnapshotEvents(events, () => editorUI.canvas, () => document.getElementById('right-toolbar-snapshot'),
         () => {
             const s = getScene(); if (s) s.forceRender = true;

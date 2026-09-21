@@ -23,6 +23,8 @@
 // into a saved .ssproj, the settings slider or the export dialog (all of which read `view.bands` —
 // see docs/perf/P0-3-交互期降级-前置侦察.md §1/§5.1).
 
+import type { RuntimePolicy } from './splat-tier';
+
 type QualityLevel = {
     /**
      * Render-target scale for the viewport while moving (1 = full resolution). The frame is blitted
@@ -92,6 +94,26 @@ class MotionQuality {
 
     /** force engagement on/off regardless of the measurement (probes and regression suites) */
     forceEngaged: boolean | null = null;
+
+    /**
+     * 按分级策略（`src/core/splat-tier.ts`）重设阶梯与门槛。
+     *
+     * 为什么需要：`levels` / `engageGpuMs` 原来是一组**与模型规模、机器快慢都无关**的常数
+     * （0.7 / 0.5 是在 RTX 5090 上按 2000 万点填充受限夹具量出来的）。
+     * 小模型不该被降级、1.3 亿点或集显上这一档远远不够 —— 分级策略把这三档分开。
+     *
+     * @param policy - 运行时策略（阶梯、启用门槛、目标预算、无计时兜底）
+     */
+    applyPolicy(policy: RuntimePolicy) {
+        this.levels = policy.motionLevels.map(l => ({ renderScale: l.renderScale, pixelSize: l.pixelSize }));
+        this.engageGpuMs = policy.engageGpuMs;
+        this.budgetMs = policy.budgetMs;
+        this.minSplatsWithoutTiming = policy.minSplatsWithoutTiming;
+        const maxLevel = this.levels.length - 1;
+        if (this._level > maxLevel) {
+            this._level = Math.max(0, maxLevel);
+        }
+    }
 
     private _level = 0;
     private _engaged = false;

@@ -440,6 +440,8 @@ class SingleSplat {
                         }
                     });
 
+                    // 曲线（33 点采样表）由 `Splat.curve` getter 提供给 ColorGrade，
+                    // 否则导出会漏掉曲线、导出图与视口不一致
                     const grade = new ColorGrade(splat);
 
                     cacheEntry = { splat, transformCache, srcProps, grade };

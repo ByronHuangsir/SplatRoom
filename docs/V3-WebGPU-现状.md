@@ -3563,6 +3563,76 @@ UI 极限位置 `range = 0.05 / scale = 20 / offset = −20`，纯黑 **96.17%**
 
 **产物**：`release\SplatRoom-3.23.18.exe`；提交见 `docs/进度存档.md` 第十一轮。
 
+---
+
+### 6.58 第十二轮：按高斯数量分级 + 1.35 亿高斯可打开 + 曲线调色（引擎侧）+ 透明 MOV 结论
+
+用户休息前给了四件事。完整数字见 `docs/按高斯数量分级与1亿高斯可打开-实现与实测-2026-09-22.md`、
+`docs/曲线调色-实现与设计-2026-09-22.md`、`docs/旋转台透明背景视频-探索结论-2026-09-22.md`。
+
+#### ① 分级：模型三档 × 设备三档（`src/core/splat-tier.ts`）
+
+原来所有策略都是**一条固定的线**，与模型规模、与机器快慢都无关：导入不管多少点都全列物化；
+交互期降级的 `levels` 只有 0.7/0.5 两档（是 2000 万点夹具在 RTX 5090 上量出来的）；
+运行时 LOD 默认关闭；排序/预测、SH 波段、`minPixelSize` 全都没有规模维度。
+
+现在：`splatTier`（A < 500 万 / B 500 万~5000 万 / C > 5000 万） ×
+`deviceClass`（high/mid/low：集显字符串、`maxStorageBufferBindingSize`、内存、核数）⇒
+`importBudget`（导入预算）+ `runtimePolicy`（LOD 自动与比例、降级阶梯、启用门槛、目标预算）。
+两条护栏：**硬上限永远生效**（排序缓冲 u32/点 ⇒ `maxStorageBufferBindingSize/4`；
+纹理 `ceil(sqrt(N))²`）；**舒适上限只对 C 档生效**（A/B 档今天本来就能打开，抽稀会改掉画质）。
+
+**实测（用户 `output` 里的真实扫描件 / WebGPU / RTX 5090）**：
+
+| 文件 | 高斯数 | 档位 | 抽稀 | fetch+解析 | 亮像素 | 帧 p50 | LOD 自动 |
+|---|---|---|---|---|---|---|---|
+| `point_cloud_30000.ply` | 3,355,656 | A | 无 | 8.9 s | 97.0% | 18 ms | 否 |
+| `splat_70452.ply` | 6,559,584 | B | 无 | 19.3 s | 99.3% | 18 ms | 是（656k+2.30M） |
+| `splat_91648.ply` | 10,458,856 | B | 无 | 33.0 s | 93.4% | 18 ms | 是（1.05M+3.66M） |
+| `splat_138762.ply` | 20,000,000 | B | 无 | 60.3 s | 86.2% | 18 ms | 是 |
+
+帧 p50 全是 **18 ms** = 60 Hz 地板；四件全部 `reduction = null`（没偷偷降质）。
+
+#### ② 1.35 亿高斯《1亿gs.ply》：改前打不开 → 改后 87 秒
+
+| | 改前 | 改后（默认预算） | 低配模拟（600 万） |
+|---|---|---|---|
+| 导入 | ❌ > 900 s 未完成 | ✅ **87.2 s** | ✅ **44.6 s** |
+| 高斯数 | 0 | 60,000,000 | 6,000,000 |
+| 亮像素 / 帧 p50 | — | 91.6% / 18 ms | 86.2% / 18 ms |
+| JS 堆 | 工作集 10.9 GB | 6.9 GB | 727 MB |
+
+根因两条：**不是读取**（应用本来就是 4 MB 分块流式），而是 `materializeToDataTable()` **物化
+7.02 GiB 列**（14 × 538 MB）+ morton/permute；以及**单块 `ArrayBuffer` 的墙实测在 1.5 GB 可以 /
+2 GB 失败**（所以 `fetch().arrayBuffer()` 读 7 GB 直接 `Failed to fetch`，连 4.72 GB 夹具也失败）。
+修法：`src/io/read/strided-source.ts` 的"抽稀视口"——惰性源上先降行数，
+chunk 读翻译成 gather 读（`floor(i × total / target)`），峰值内存 7.02 GiB → 3.1 GiB / 320 MB。
+
+#### ③ 曲线调色：引擎侧落地（面板 UI 下一轮）
+
+`src/core/color-curves.ts`（33 点采样表、**Fritsch–Carlson 单调保形**、恒等短路）+
+33×1 R32F LUT 纹理 + GLSL/WGSL **顶点**阶段曲线段 + CPU 导出镜像（并入 `hasTint`）。
+**默认零改动**：`uCurveEnabled = 0` 整段跳过；恒等曲线逐像素差 **0**。
+实测（双后端 8 项）：抬亮 meanLum 0.4197 → 0.6234、压暗 → 0.2801、S 曲线展布 0.0333 → 0.0350、
+清空逐像素回基线、无 pageerror。**面板 UI / `.ssproj` 持久化 / 直方图与范围选择通路**未做（清单见文档）。
+
+#### ④ 透明背景 MOV：做不到（编码器这一层）
+
+实测（`docs/probes/video-alpha-support.cjs`）：vp8/vp9/av1/h264 一律
+`alpha:'discard'` 支持、**`'keep'` 被拒**，h265 两者都不支持；
+`MediaRecorder.isTypeSupported('video/quicktime') === false`；
+mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 都没有），
+`@mediabunny/prores` **只是解码器**。⇒ 走"导出透明 PNG 序列 + 外部 ffmpeg 合成 ProRes 4444 MOV"
+（`-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le`）；抓透明帧本身是通的（已有 PNG RGBA 通路）。
+
+#### 新坑（HANDOFF 43~49）
+
+单块 ArrayBuffer ~2 GB 的墙；大模型打不开的真因是"物化列数"；分级的两条护栏；
+曲线必须单调插值且恒等要短路；**着色器模板字符串里不能出现反引号**（注释里写 `uCurveEnabled`
+直接把模板截断 ⇒ `TS1005`）；顶点 vs 片元加纹理的风险差；透明 MOV 卡在编码器。
+
+**产物**：`release\SplatRoom-3.23.19.exe`；提交见 `docs/进度存档.md` 第十二轮。
+
 
 
 

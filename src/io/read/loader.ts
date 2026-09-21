@@ -20,9 +20,32 @@ import {
 } from '@playcanvas/splat-transform';
 import { GSplatData } from 'playcanvas';
 
+import { makeStridedSource } from './strided-source';
+import { importBudget, type DeviceFacts, type ImportBudget } from '../../core/splat-tier';
+
 type LoadResult = {
     gsplatData: GSplatData;
     transform: Transform;
+    /** 导入时是否按设备预算抽稀过（`undefined` = 没抽稀） */
+    reduction?: {
+        from: number;
+        to: number;
+        tier: string;
+        device: string;
+        reason: 'within-budget' | 'over-hard-limit' | 'over-device-cap' | 'forced-budget';
+    };
+};
+
+// 导入选项（都可选；不传 = 今天的原样行为）
+type LoadOptions = {
+    /** 设备事实：给了就按 `importBudget()` 决定是否抽稀 */
+    deviceFacts?: DeviceFacts;
+    /** 预算算出来时回调一次（无论是否抽稀），供 UI 决定要不要显示进度条 */
+    onBudget?: (budget: ImportBudget) => void;
+    /** 抽稀进度（0..1）；只在真的抽稀时调用 */
+    onDecimateProgress?: (fraction: number) => void;
+    /** 强制不抽稀（探针/回归对照：`window.__SPLATROOM_IMPORT_FULL__ = true`） */
+    ignoreBudget?: boolean;
 };
 
 // invoked when a file contains multiple LODs. returns the LOD index to load,
@@ -108,8 +131,16 @@ const dataTableToGSplatData = (dataTable: DataTable): GSplatData => {
  * reduced to a single LOD before materializing - chosen by the pickLod
  * callback when supplied, otherwise the most detailed level with a
  * reasonable splat count. Returns null if pickLod cancels the load.
+ *
+ * Before materializing, the row count is optionally reduced to the device's
+ * import budget (see `src/core/splat-tier.ts`): the source stays lazy, so the
+ * columns are allocated at the reduced size instead of the full 7 GiB.
  */
-const materializeFirst = async (sources: ChunkSource[], pickLod?: PickLod): Promise<DataTable | null> => {
+const materializeFirst = async (
+    sources: ChunkSource[],
+    pickLod?: PickLod,
+    options?: LoadOptions
+): Promise<{ table: DataTable; reduction?: LoadResult['reduction'] } | null> => {
     const source = sources[0];
     const pool = createChunkDataPool({ chunkSize: source.meta.chunkSize });
     try {
@@ -122,7 +153,35 @@ const materializeFirst = async (sources: ChunkSource[], pickLod?: PickLod): Prom
             }
             single = selectLod(source, lod);
         }
-        return await materializeToDataTable(single, pool);
+
+        // 导入预算：只看数量与设备能力，预算之内一个点都不动
+        let reduction: LoadResult['reduction'];
+        const numGaussians = single.meta.numGaussians;
+        if (options?.deviceFacts && !options.ignoreBudget && Number.isFinite(numGaussians)) {
+            const budget = importBudget(numGaussians, options.deviceFacts);
+            // 运行时覆盖（探针/套件/想手动试的用户）：`window.__SPLATROOM_IMPORT_BUDGET__ = 6000000`
+            const forced = Number((globalThis as any).__SPLATROOM_IMPORT_BUDGET__ ?? 0);
+            const forcedOverride = Number.isFinite(forced) && forced > 0;
+            const target = forcedOverride ? Math.min(forced, numGaussians) : budget.budget;
+            const mustReduce = numGaussians > target;
+            const reason = mustReduce ?
+                (forcedOverride && target !== budget.budget ? 'forced-budget' : budget.reason) :
+                'within-budget';
+            options.onBudget?.({ ...budget, budget: target, reduced: mustReduce, reason });
+            if (mustReduce) {
+                single = makeStridedSource(single, target, options.onDecimateProgress);
+                reduction = {
+                    from: numGaussians,
+                    to: target,
+                    tier: budget.tier,
+                    device: budget.device,
+                    reason
+                };
+            }
+        }
+
+        const table = await materializeToDataTable(single, pool);
+        return { table, reduction };
     } finally {
         for (const s of sources) {
             await s.close();
@@ -138,8 +197,15 @@ const materializeFirst = async (sources: ChunkSource[], pickLod?: PickLod): Prom
  * @param fileSystem - The file system to read from
  * @param skipReorder - Skip morton reordering (for files already in morton order or animation playback)
  * @param pickLod - Invoked when the file contains multiple LODs to choose which to load
+ * @param options - 导入选项（设备预算 / 抽稀进度 / 强制全量）
  */
-const loadGSplatData = async (filename: string, fileSystem: ReadFileSystem, skipReorder?: boolean, pickLod?: PickLod): Promise<LoadResult | null> => {
+const loadGSplatData = async (
+    filename: string,
+    fileSystem: ReadFileSystem,
+    skipReorder?: boolean,
+    pickLod?: PickLod,
+    options?: LoadOptions
+): Promise<LoadResult | null> => {
     const inputFormat = getInputFormat(filename);
     const lowerFilename = filename.toLowerCase();
 
@@ -155,11 +221,15 @@ const loadGSplatData = async (filename: string, fileSystem: ReadFileSystem, skip
                 params: [],
                 fileSystem: zipFs
             });
-            const dataTable = await materializeFirst(sources, pickLod);
-            if (!dataTable) {
+            const materialized = await materializeFirst(sources, pickLod, options);
+            if (!materialized) {
                 return null;
             }
-            return { gsplatData: dataTableToGSplatData(dataTable), transform: dataTable.transform };
+            return {
+                gsplatData: dataTableToGSplatData(materialized.table),
+                transform: materialized.table.transform,
+                reduction: materialized.reduction
+            };
         } finally {
             zipFs.close();
         }
@@ -174,10 +244,11 @@ const loadGSplatData = async (filename: string, fileSystem: ReadFileSystem, skip
         fileSystem
     });
 
-    const dataTable = await materializeFirst(sources, pickLod);
-    if (!dataTable) {
+    const materialized = await materializeFirst(sources, pickLod, options);
+    if (!materialized) {
         return null;
     }
+    const dataTable = materialized.table;
 
     // Reorder data into morton order for better render performance.
     // Skip reordering for:
@@ -195,7 +266,11 @@ const loadGSplatData = async (filename: string, fileSystem: ReadFileSystem, skip
     }
 
     // Convert to GSplatData
-    return { gsplatData: dataTableToGSplatData(dataTable), transform: dataTable.transform };
+    return {
+        gsplatData: dataTableToGSplatData(dataTable),
+        transform: dataTable.transform,
+        reduction: materialized.reduction
+    };
 };
 
 /**
@@ -219,5 +294,7 @@ export {
     dataTableToGSplatData,
     defaultLodIndex,
     loadGSplatData,
-    validateGSplatData
+    validateGSplatData,
+    type LoadOptions,
+    type LoadResult
 };

@@ -17,10 +17,15 @@ import { getInputFormat } from '@playcanvas/splat-transform';
 import {
     loadGSplatData,
     dataTableToGSplatData,
-    defaultLodIndex
+    defaultLodIndex,
+    type LoadOptions
 } from './read/loader';
 
-type LoadResult = { gsplatData: any; transform: any };
+type LoadResult = {
+    gsplatData: any;
+    transform: any;
+    /** 导入时按设备预算抽稀过才有（见 src/core/splat-tier.ts） */
+    reduction?: { from: number; to: number; tier: string; device: string; reason: string };};
 
 type Pending = {
     resolve: (r: LoadResult | null) => void;
@@ -145,15 +150,20 @@ const handleWorkerMessage = async (e: MessageEvent) => {
 /**
  * Async, worker-backed replacement for `loadGSplatData`. Same signature.
  * Returns null when the user cancels LOD selection (multi-LOD files).
+ *
+ * `options` (设备预算 / 抽稀进度) 只在**主线程降级路径**里生效：worker 分支会把整个文件
+ * 读成一个 ArrayBuffer 再 transfer，几 GB 的模型根本走不通（见文件顶部说明），
+ * 所以这里不把预算传给 worker，保持原行为。
  */
 export const loadGSplatDataAsync = async (
     filename: string,
     fileSystem: any,
     skipReorder?: boolean,
-    pickLod?: (lodCounts: readonly number[]) => Promise<number | null>
+    pickLod?: (lodCounts: readonly number[]) => Promise<number | null>,
+    options?: LoadOptions
 ): Promise<LoadResult | null> => {
     if (!USE_LOAD_WORKER) {
-        return loadGSplatData(filename, fileSystem, skipReorder, pickLod);
+        return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
     }
 
     let buffer: ArrayBuffer;
@@ -161,7 +171,7 @@ export const loadGSplatDataAsync = async (
         buffer = await readFileBytes(fileSystem, filename);
     } catch {
         // Reading the bytes failed (unsupported FS, etc.) — fall back.
-        return loadGSplatData(filename, fileSystem, skipReorder, pickLod);
+        return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
     }
 
     const inputFormat = getInputFormat(filename);
@@ -177,7 +187,7 @@ export const loadGSplatDataAsync = async (
         } catch {
             pending.delete(id);
             // Transfer failed — fall back to main-thread decode.
-            loadGSplatData(filename, fileSystem, skipReorder, pickLod)
+            loadGSplatData(filename, fileSystem, skipReorder, pickLod, options)
             .then(resolve)
             .catch(reject);
         }
@@ -199,6 +209,6 @@ export const loadGSplatDataAsync = async (
         return await result;
     } catch {
         // Worker path failed — last-resort main-thread decode.
-        return loadGSplatData(filename, fileSystem, skipReorder, pickLod);
+        return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
     }
 };

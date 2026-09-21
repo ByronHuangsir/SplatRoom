@@ -1,7 +1,9 @@
 import { ReadFileSystem } from '@playcanvas/splat-transform';
 import { AppBase, Asset, GSplatData, GSplatResource } from 'playcanvas';
 
+import { readDeviceFacts } from '../core/device-facts';
 import { Events } from '../core/events';
+import { describeBudget, type ImportBudget } from '../core/splat-tier';
 import { defaultLodIndex, loadGSplatDataAsync, validateGSplatData } from '../io/index';
 import { Splat } from '../splat/splat';
 import { detectGiantGreySplats, removeGiantGreySplats, shrinkGiantGreySplats } from '../splat/splat-sanitize';
@@ -38,6 +40,10 @@ class AssetLoader {
             this.events.fire('startSpinner');
         }
 
+        // 导入预算相关状态（在 try 外声明，`finally` 也要清理）
+        let reduced: ImportBudget | null = null;
+        let progressShown = false;
+
         try {
             // ask the user which LOD to load when the file contains multiple,
             // pausing the spinner while the popup is up. the editor loads a
@@ -70,10 +76,43 @@ class AssetLoader {
             };
 
             // Skip reordering for animation frames (speed) or when explicitly requested (already ordered)
-            let result = await loadGSplatDataAsync(filename, fileSystem, skipReorder || animationFrame, animationFrame ? undefined : pickLod);
+            //
+            // 导入预算（2026-09-22）：模型远超本机能力时（例：1.35 亿点 / 7.02 GiB 的 PLY），
+            // 在物化之前按等距抽样把行数降到设备预算，否则主线程会花几分钟把 7 GiB 列全部分配出来
+            // —— 用户看到的就是"打不开"。预算之内一个点都不动。
+            const fullImport = (globalThis as any).__SPLATROOM_IMPORT_FULL__ === true; // 逃生开关（探针对照用）
+            const loadOptions = {
+                deviceFacts: fullImport ? undefined : readDeviceFacts(this.app.graphicsDevice),
+                onBudget: (budget: ImportBudget) => {
+                    console.info(`[import-tier] ${describeBudget(budget)}`);
+                    if (budget.reduced) {
+                        reduced = budget;
+                        // 抽稀要好几秒到几分钟：把不定量 spinner 换成带文字的进度条
+                        this.events.fire('stopSpinner');
+                        progressShown = true;
+                        this.events.fire('progressStart', i18n.t('popup.import-simplify-progress'), false);
+                        this.events.fire('progressUpdate', { text: describeBudget(budget) });
+                    }
+                },
+                onDecimateProgress: (fraction: number) => {
+                    this.events.fire('progressUpdate', { progress: Math.round(fraction * 100) });
+                }
+            };
+
+            let result = await loadGSplatDataAsync(
+                filename, fileSystem, skipReorder || animationFrame,
+                animationFrame ? undefined : pickLod, loadOptions
+            );
             if (!result) {
                 // user cancelled LOD selection
                 return null;
+            }
+            if (progressShown) {
+                this.events.fire('progressEnd');
+                progressShown = false;
+                if (!animationFrame) {
+                    this.events.fire('startSpinner');
+                }
             }
             const { gsplatData, transform } = result;
             validateGSplatData(gsplatData);
@@ -118,8 +157,20 @@ class AssetLoader {
 
             const asset = this.createGSplatAsset(result.gsplatData, filename);
 
-            return new Splat(asset, transform.rotation);
+            const splat = new Splat(asset, transform.rotation);
+            if (reduced) {
+                // 让 UI / 探针能看到"这个模型是按预算抽稀过的"
+                const info = { from: reduced.numSplats, to: reduced.budget, tier: reduced.tier, device: reduced.device, reason: reduced.reason };
+                splat.importReduction = info;
+                this.events.fire('import.reduced', { filename, ...info });
+                console.info(`[import-tier] 导入完成：${info.from.toLocaleString()} → ${info.to.toLocaleString()} 点（${info.reason}）`);
+            }
+            return splat;
         } finally {
+            if (progressShown) {
+                this.events.fire('progressEnd');
+                progressShown = false;
+            }
             if (!animationFrame) {
                 this.events.fire('stopSpinner');
             }
