@@ -858,10 +858,16 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     `docs/probes/video-alpha-support.cjs` —— 本机 Chromium 对 vp8/vp9/av1/h264 一律
     `alpha: 支持 'discard'、拒绝 'keep'`（h265 两者都不支持），
     `MediaRecorder.isTypeSupported('video/quicktime') === false`；
+    **"也许只是特性开关挡住"这条假设也测了：`--enable-features=WebCodecsAlphaEncoder` /
+    `AlphaEncoderWrapper` / `--enable-blink-features=WebCodecsAlphaEncoding` 三个候选都不放行**
+    （探针第 2 个参数可追加开关，方便换版本重测）；
     mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 都没有），
     而 `@mediabunny/prores` 只是**解码器**。⇒ 透明视频只能走"**导出透明 PNG 序列 + 外部 ffmpeg
-    合成 ProRes 4444 MOV**"（`-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le`）。
+    合成 ProRes 4444 MOV**"（`-c:v prores_ks -profile:v 4444 -pix_fmt yuva444p10le`）；
     抓透明帧本身是通的（预乘 RGBA + 透明清屏色 + PNG colorType 6 已有成品）。
+    **两个"以后能编 alpha 也会踩"的坑**：① splat 输出是**预乘 RGBA**，WebM/Matroska 惯例是非预乘
+    ⇒ 不 un-premultiply 会让半透明边缘发暗；② ISOBMFF muxer 会**静默吞掉** alpha
+    ⇒ UI 必须按容器禁用透明选项，否则产出"看着正常但没 alpha"的文件。
 
 ---
 
