@@ -93,6 +93,7 @@
     "panel.colors.category.white-balance": "ホワイトバランス",
     "panel.colors.category.tone": "トーン",
     "panel.colors.category.blend": "ブレンド",
+    "panel.colors.category.curve": "トーンカーブ",
     "panel.colors.category.color": "カラー",
     "panel.colors.hsl.hue": "色相",
     "panel.colors.hsl.saturation": "彩度",

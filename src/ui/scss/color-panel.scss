@@ -253,6 +253,68 @@
         }
     }
 
+    // ---- 曲线调色（Curves）----
+    // 方框高度固定、宽度自适应；viewBox 100×100 + preserveAspectRatio=none，
+    // 所以"数据坐标 = 归一化坐标 × 100"，命中测试与控件实际宽高无关。
+    .curve-section {
+        .color-panel-category-content {
+            padding: 6px 10px 8px;
+        }
+    }
+
+    .curve-editor {
+        width: 100%;
+        height: 132px;
+        padding: 0;
+
+        .curve-editor-svg {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background-color: $bcg-dark;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+            cursor: crosshair;
+            touch-action: none;
+            overflow: visible;
+        }
+
+        .curve-guides {
+            line {
+                stroke: rgba(255, 255, 255, 0.07);
+                stroke-width: 0.4;
+            }
+
+            .curve-diagonal {
+                stroke: rgba(255, 255, 255, 0.18);
+                stroke-width: 0.5;
+                stroke-dasharray: 3 3;
+            }
+
+            &.curve-guides-hidden .curve-diagonal {
+                stroke: rgba(255, 255, 255, 0.10);
+            }
+        }
+
+        .curve-line {
+            fill: none;
+            stroke: $clr-hilight;
+            stroke-width: 1.2;
+            vector-effect: non-scaling-stroke;
+        }
+
+        .curve-dot {
+            fill: $clr-default;
+            stroke: $bcg-dark;
+            stroke-width: 0.8;
+            vector-effect: non-scaling-stroke;
+
+            &.active {
+                fill: $clr-hilight;
+            }
+        }
+    }
+
     .hidden {
         display: none !important;
     }

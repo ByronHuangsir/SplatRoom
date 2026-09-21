@@ -595,7 +595,12 @@ class DataPanel extends Container {
         const colorEvents = [
             'splat.tintClr', 'splat.temperature', 'splat.saturation',
             'splat.brightness', 'splat.blackPoint', 'splat.whitePoint',
-            'splat.transparency'
+            'splat.transparency',
+            // 下面这些原来漏了：改了它们直方图/数值不重算（做曲线时一并补齐）
+            'splat.highlights', 'splat.shadows', 'splat.contrast',
+            'splat.colorGradeEnabled',
+            'splat.hslHue', 'splat.hslSat', 'splat.hslLum',
+            'splat.curve'
         ];
         colorEvents.forEach((name) => {
             events.on(name, (splat_: Splat) => {

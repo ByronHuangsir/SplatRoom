@@ -21,7 +21,7 @@ import {
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
-import { CURVE_SAMPLES, identityCurveSamples, isIdentityCurve } from '../core/color-curves';
+import { CURVE_SAMPLES, identityCurveSamples, isIdentityCurve, normalizeCurvePoints, sampleCurve, type CurvePoint } from '../core/color-curves';
 import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -140,6 +140,8 @@ class Splat extends Element {
     curveTexture: Texture;
     /** 当前曲线采样表（33 点）；`null` = 恒等（画面零改动） */
     private _curveSamples: Float32Array | null = null;
+    /** 曲线控制点（面板的真相源；文档保存/回填用） */
+    private _curvePoints: CurvePoint[] | null = null;
     selectionBoundStorage: BoundingBox;
     localBoundStorage: BoundingBox;
 
@@ -330,10 +332,14 @@ class Splat extends Element {
      * 画面与"没有曲线功能"逐位一致（这是默认状态，也是本仓库对观感类改动的硬要求）。
      *
      * @param samples - 33 点采样表（更长也可以，只取前 `CURVE_SAMPLES` 个）；null = 恒等
+     * @param points - 可选的**控制点**（面板的真相源；给了就一起记下来，供文档保存/UI 回填）
      */
-    setCurve(samples: Float32Array | null) {
+    setCurve(samples: Float32Array | null, points?: CurvePoint[] | null) {
         const next = samples && !isIdentityCurve(samples) ? samples : null;
         this._curveSamples = next;
+        this._curvePoints = next && points && points.length >= 2 ?
+            points.map(p => ({ x: p.x, y: p.y })) :
+            null;
         const data = this.curveTexture.lock() as Float32Array;
         if (next) {
             data.set(next.subarray(0, CURVE_SAMPLES));
@@ -344,9 +350,28 @@ class Splat extends Element {
         this.scene.events.fire('splat.curve', this);
     }
 
+    /**
+     * 用**控制点**设置曲线（面板走这条）：内部采样成 33 点表再写纹理。
+     *
+     * @param points - 控制点（x/y 都在 0..1）；`null` 或不足 2 个 ⇒ 关闭曲线
+     */
+    setCurvePoints(points: CurvePoint[] | null) {
+        if (!points || points.length < 2) {
+            this.setCurve(null, null);
+            return;
+        }
+        const norm = normalizeCurvePoints(points);
+        this.setCurve(sampleCurve(norm), norm);
+    }
+
     /** 当前曲线采样表（`null` = 恒等）。名字与 `ColorGrade` 的入参一致：导出镜像直接读它。 */
     get curve() {
         return this._curveSamples;
+    }
+
+    /** 当前曲线控制点（`null` = 恒等）；文档保存与面板回填用 */
+    get curvePoints() {
+        return this._curvePoints ? this._curvePoints.map(p => ({ ...p })) : null;
     }
 
     /**
@@ -831,6 +856,12 @@ class Splat extends Element {
         serializer.packa(Array.from(this._hslHue));
         serializer.packa(Array.from(this._hslSat));
         serializer.packa(Array.from(this._hslLum));
+        // 曲线：把控制点展平进 hash（数据面板靠它判断"要不要重算直方图"）
+        const curveFlat: number[] = [];
+        for (const p of this._curvePoints ?? []) {
+            curveFlat.push(p.x, p.y);
+        }
+        serializer.packa(curveFlat);
     }
 
     // WebGPU only: upload the camera matrices as material parameters (see the call
@@ -2026,12 +2057,14 @@ class Splat extends Element {
             colorGradeEnabled: this.colorGradeEnabled,
             hslHue: Array.from(this._hslHue),
             hslSat: Array.from(this._hslSat),
-            hslLum: Array.from(this._hslLum)
+            hslLum: Array.from(this._hslLum),
+            // 曲线调色：存**控制点**（3~8 个数字对），比存 33 个采样值短、可读，也便于以后加通道
+            curve: this._curvePoints ? this._curvePoints.map(p => [p.x, p.y]) : null
         };
     }
 
     docDeserialize(doc: any) {
-        const { name, position, rotation, scale, visible, tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum } = doc;
+        const { name, position, rotation, scale, visible, tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curve } = doc;
 
         this.name = name;
         this.move(new Vec3(position), new Quat(rotation), new Vec3(scale));
@@ -2050,6 +2083,10 @@ class Splat extends Element {
         if (hslHue) this.hslHue = hslHue;
         if (hslSat) this.hslSat = hslSat;
         if (hslLum) this.hslLum = hslLum;
+        // 曲线：可选字段（旧 .ssproj 没有 ⇒ 保持恒等），格式 `[[x, y], …]`
+        if (Array.isArray(curve) && curve.length >= 2) {
+            this.setCurvePoints(curve.map((p: number[]) => ({ x: p[0], y: p[1] })));
+        }
     }
 }
 

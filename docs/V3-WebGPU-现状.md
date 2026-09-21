@@ -3633,6 +3633,48 @@ mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 
 
 **产物**：`release\SplatRoom-3.23.19.exe`；提交见 `docs/进度存档.md` 第十二轮。
 
+---
+
+### 6.59 第十三轮：曲线调色补上面板 UI（拖控件即所见即所得）
+
+第十二轮把曲线做到了引擎侧（33 点采样表 + GLSL/WGSL 顶点查表 + CPU 导出镜像 + 默认零改动），
+但没有任何 UI 能驱动它。这一轮补完：**可以在调色面板里直接拖曲线了**。
+
+#### 做了什么
+
+- **新增 `src/ui/curve-editor.ts`**（SVG 控件）：空白处按下=新增控制点并拖动、拖端点=抬黑/压白
+  （x 锁定）、双击中间点=删除；内部用 `sampleCurve()` 画折线 ⇒ **控件画的曲线就是着色器用的那张表**；
+  整段拖动发 `gestureStart`/`gestureEnd`。
+- **面板**（`color-panel.ts`）：新增"曲线"分类 + 分类复位按钮；拖动过程只写
+  `op.newState.curve` 并 `op.do()`（实时跟手），松手才 `end()` ⇒ **一次拖动 = 一条撤销**。
+- **撤销与持久化**：`ColorAdjustment.curve`（`undefined`=不碰 / `null`=清空，**必须区分**）；
+  `Splat.curvePoints` + `setCurvePoints()`；`docSerialize()` 存控制点 `[[x,y],…]`、
+  `docDeserialize()` 可选读（旧 `.ssproj` 保持恒等）；`serialize()` 把控制点并进变更 hash。
+- **顺手修一个既有小 bug**：`data-panel.ts` 的 `colorEvents` 只列了 7 个事件 ⇒ 改
+  `highlights/shadows/contrast/colorGradeEnabled/hslHue/hslSat/hslLum` 后直方图与数值面板**不刷新**，
+  已补齐（含 `splat.curve`）。
+- 9 语言新增 `panel.colors.category.curve`（各 691 键）。
+
+#### 实测（`docs/verify/verify-color-curve.cjs`，14 项，webgpu / webgl2 均 0 失败）
+
+| 项 | 数字 |
+|---|---|
+| 控件在面板里可见可命中 | 302×134；中心 `elementFromPoint` 命中控件本身（面板需先滚到 `scrollTop=407`） |
+| **真实鼠标拖拽** | 新增控制点 `(0.00,0.00) (0.50,0.72) (1.00,1.00)`；`uCurveEnabled=1`；平均亮度 **0.4197 → 0.5611** |
+| **一次拖动一条撤销** | `edit.undo` 后 `curvePoints=null`、亮度回 **0.4197**（= 基线） |
+| 分类复位按钮 | 清空曲线、控件回到 2 个端点、亮度回基线 |
+| 文档往返 | `doc.curve=[[0,0.05],[0.45,0.55],[1,0.98]]`，往返后控制点一致、33 个采样点最大差 **0** |
+| 默认零改动 | 不设曲线 / 恒等曲线逐像素差 **0**（第十二轮已钉） |
+
+#### 还没做（下一轮）
+
+① `.sscg` sidecar 的曲线字段（`.ssproj` 已支持）；
+② **直方图 / 范围选择的曲线镜像**（现状：曲线只影响视口与导出，不影响"按范围选择"）；
+③ 分通道曲线（LUT 扩成 33×4 + 通道页签）；
+④ 分组渲染的中性分支。
+
+**产物**：`release\SplatRoom-3.23.20.exe`；提交见 `docs/进度存档.md` 第十三轮。
+
 
 
 

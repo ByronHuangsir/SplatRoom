@@ -93,6 +93,7 @@
     "panel.colors.category.white-balance": "화이트 밸런스",
     "panel.colors.category.tone": "톤",
     "panel.colors.category.blend": "블렌드",
+    "panel.colors.category.curve": "커브",
     "panel.colors.category.color": "색상",
     "panel.colors.hsl.hue": "색조",
     "panel.colors.hsl.saturation": "채도",

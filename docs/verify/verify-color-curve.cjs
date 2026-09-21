@@ -201,6 +201,150 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('no page errors (shader compilation / binding failures would surface here)',
         errors.length === 0, errors.slice(0, 3).join(' | ') || 'none');
 
+    // ---- 6：面板 UI（真实鼠标拖曲线编辑器）----
+    // 曲线功能默认是"关"的，所以先确认控件真的在面板里、能被鼠标打到（行重叠那类坑的守卫）。
+    await page.evaluate(() => {
+        window.scene.events.fire('colorPanel.toggleVisible');
+        window.scene.events.fire('selection.changed', window.__splat);
+    });
+    await sleep(700);
+
+    const uiReady = await page.evaluate(async () => {
+        await window.__render(2);
+        const editor = document.querySelector('.curve-editor-svg');
+        if (!editor) {
+            return { ok: false, reason: 'curve editor not in DOM' };
+        }
+        // 面板是可以纵向滚动的（第十二轮修的"行重叠"就是把它改成滚动），
+        // 曲线分类在底部 ⇒ 先像用户那样滚到可见位置再量命中测试。
+        const section = document.querySelector('.curve-section');
+        if (section && section.scrollIntoView) {
+            section.scrollIntoView({ block: 'center' });
+        }
+        await window.__render(2);
+        const r = editor.getBoundingClientRect();
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        const hit = document.elementFromPoint(cx, cy);
+        return {
+            ok: true,
+            rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+            // 控件中心点命中的应该是控件本身（或它的子元素）
+            hitInside: !!(hit && (hit === editor || editor.contains(hit) || hit.contains(editor))),
+            hitCls: hit ? String(hit.className) : null,
+            dots: document.querySelectorAll('.curve-dot').length,
+            center: { x: cx, y: cy },
+            panelScrollTop: (document.querySelector('#color-panel') || {}).scrollTop ?? null
+        };
+    });
+
+    check('the curve editor is in the panel, visible and hit-testable',
+        uiReady.ok && uiReady.rect.w > 40 && uiReady.rect.h > 40 && uiReady.hitInside && uiReady.dots === 2,
+        uiReady.ok
+            ? `控件 ${Math.round(uiReady.rect.w)}×${Math.round(uiReady.rect.h)}；中心命中=${uiReady.hitInside}（${uiReady.hitCls}）；` +
+              `控制点 ${uiReady.dots} 个（恒等 = 两个端点）；面板 scrollTop=${uiReady.panelScrollTop}`
+            : uiReady.reason);
+
+    // 真实鼠标：在控件中上方按下并往上拖 ⇒ 新增一个控制点并把中间调抬亮
+    let uiDrag = null;
+    if (uiReady.ok) {
+        const startX = uiReady.center.x;
+        const startY = uiReady.center.y;
+        await page.mouse.move(startX, startY);
+        await page.mouse.down();
+        await page.mouse.move(startX, startY - 30, { steps: 8 });
+        await page.mouse.up();
+        await sleep(400);
+        uiDrag = await page.evaluate(async () => {
+            const g = await window.__grab();
+            return {
+                points: window.__splat.curvePoints,
+                hasCurve: !!window.__splat.curve,
+                enabled: window.__curveEnabled(),
+                meanLum: g.meanLum,
+                dots: document.querySelectorAll('.curve-dot').length
+            };
+        });
+    }
+
+    check('dragging inside the curve editor adds a control point and brightens the image',
+        !!uiDrag && Array.isArray(uiDrag.points) && uiDrag.points.length === 3 &&
+        uiDrag.hasCurve && uiDrag.enabled === 1 && uiDrag.meanLum > baseline.meanLum + 0.005,
+        uiDrag
+            ? (Array.isArray(uiDrag.points)
+                ? `控制点 ${uiDrag.points.length} 个（${uiDrag.points.map(p => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`).join(' ')}）；`
+                : '控制点 = null（拖拽没被接住）；') +
+              `控件里画了 ${uiDrag.dots} 个点；uCurveEnabled=${uiDrag.enabled}；` +
+              `meanLum ${baseline.meanLum.toFixed(4)} → ${uiDrag.meanLum.toFixed(4)}`
+            : 'drag not attempted');
+
+    // 撤销：整段拖动应该只产生**一条**撤销记录
+    const afterUndo = await page.evaluate(async () => {
+        window.scene.events.fire('edit.undo');
+        const g = await window.__grab();
+        return { points: window.__splat.curvePoints, hasCurve: !!window.__splat.curve, meanLum: g.meanLum };
+    });
+    check('one drag = one undo step (undo removes the whole curve)',
+        !afterUndo.hasCurve && afterUndo.points === null &&
+        Math.abs(afterUndo.meanLum - baseline.meanLum) < 0.002,
+        `undo 后 curvePoints=${JSON.stringify(afterUndo.points)}；meanLum ${afterUndo.meanLum.toFixed(4)}` +
+        `（基线 ${baseline.meanLum.toFixed(4)}）`);
+
+    // 分类复位按钮：把曲线清掉
+    const afterReset = await page.evaluate(async () => {
+        // 先造一条曲线（走 splat API，等价于拖控件），再点"曲线"分类的复位按钮
+        window.__splat.setCurvePoints([{ x: 0, y: 0 }, { x: 0.5, y: 0.7 }, { x: 1, y: 1 }]);
+        await window.__render(2);
+        const curveSection = document.querySelector('.curve-section');
+        const btn = curveSection && curveSection.querySelector('.category-reset-btn');
+        if (!btn) {
+            return { ok: false, reason: 'reset button not found' };
+        }
+        btn.dispatchEvent(new PointerEvent('click', { bubbles: true }));
+        const g = await window.__grab();
+        return {
+            ok: true,
+            hasCurve: !!window.__splat.curve,
+            points: window.__splat.curvePoints,
+            dots: document.querySelectorAll('.curve-dot').length,
+            meanLum: g.meanLum
+        };
+    });
+    check('the curve category reset button clears the curve back to identity',
+        afterReset.ok && !afterReset.hasCurve && afterReset.points === null &&
+        Math.abs(afterReset.meanLum - baseline.meanLum) < 0.002,
+        afterReset.ok
+            ? `复位后 curvePoints=${JSON.stringify(afterReset.points)}；控件回到 ${afterReset.dots} 个点；` +
+              `meanLum ${afterReset.meanLum.toFixed(4)}（基线 ${baseline.meanLum.toFixed(4)}）`
+            : afterReset.reason);
+
+    // ---- 7：文档往返（.ssproj 用的就是这条）----
+    const roundTrip = await page.evaluate(() => {
+        const s = window.__splat;
+        s.setCurvePoints([{ x: 0, y: 0.05 }, { x: 0.45, y: 0.55 }, { x: 1, y: 0.98 }]);
+        const before = { points: s.curvePoints, samples: Array.from(s.curve || []) };
+        const doc = s.docSerialize();
+        s.setCurvePoints(null);
+        s.docDeserialize(doc);
+        const after = { points: s.curvePoints, samples: Array.from(s.curve || []) };
+        return {
+            docCurve: doc.curve,
+            before,
+            after,
+            samePoints: JSON.stringify(before.points) === JSON.stringify(after.points),
+            maxSampleDiff: after.samples.length === before.samples.length ?
+                before.samples.reduce((m, v, i) => Math.max(m, Math.abs(v - after.samples[i])), 0) : 1
+        };
+    });
+    check('docSerialize/docDeserialize round-trips the curve (control points as [x, y] pairs)',
+        Array.isArray(roundTrip.docCurve) && roundTrip.docCurve.length === 3 &&
+        roundTrip.samePoints && roundTrip.maxSampleDiff < 1e-9,
+        `doc.curve=${JSON.stringify(roundTrip.docCurve)}；` +
+        `往返后控制点一致=${roundTrip.samePoints}；33 个采样点最大差 ${roundTrip.maxSampleDiff.toExponential(2)}`);
+
+    check('no page errors after driving the panel UI', errors.length === 0,
+        errors.slice(0, 3).join(' | ') || 'none');
+
     console.log(JSON.stringify({ model: MODEL, url: URL, checks, failed: checks.filter(c => !c.pass).length }, null, 1));
     await browser.close();
     process.exit(0);

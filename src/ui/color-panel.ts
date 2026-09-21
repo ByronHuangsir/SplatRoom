@@ -1,8 +1,10 @@
 import { Button, Container, Label, SliderInput } from '@playcanvas/pcui';
 import { Color } from 'playcanvas';
 
+import { CurveEditor } from './curve-editor';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
+import { type CurvePoint } from '../core/color-curves';
 import { SetSplatColorAdjustmentOp, type ColorAdjustment } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { MIN_TONE_RANGE } from '../core/tone-range';
@@ -59,7 +61,8 @@ class ColorPanel extends Container {
             colorGradeEnabled: tgt.colorGradeEnabled,
             hslHue: Array.from(tgt.hslHue),
             hslSat: Array.from(tgt.hslSat),
-            hslLum: Array.from(tgt.hslLum)
+            hslLum: Array.from(tgt.hslLum),
+            curve: tgt.curvePoints
         });
 
         const resetSingleParam = (newState: Partial<ColorAdjustment>) => {
@@ -186,6 +189,18 @@ class ColorPanel extends Container {
             resetSingleParam({ transparency: 1 });
         });
         blendContent.append(transparencyRow);
+
+        // ---- Curves 曲线（RGB 主曲线）----
+        // 引擎侧：33 点采样表 → 一张 33×1 R32F LUT 纹理（GLSL/WGSL 顶点阶段查表）。
+        // 默认恒等 + 着色器开关关闭 ⇒ 不动这里的控件时画面**逐像素不变**。
+        const curveEditor = new CurveEditor();
+        const { section: curveSection, content: curveContent } = makeCategorySection(
+            'panel.colors.category.curve',
+            undefined,
+            () => resetSingleParam({ curve: null })
+        );
+        curveContent.append(curveEditor);
+        curveSection.class.add('curve-section');
 
         // ---- HSL Color Section (Lightroom-style) ----
 
@@ -315,6 +330,7 @@ class ColorPanel extends Container {
         this.append(toneSection);
         this.append(blendSection);
         this.append(colorSection);
+        this.append(curveSection);
 
         // ---- Control Row ----
 
@@ -390,9 +406,11 @@ class ColorPanel extends Container {
                 }
             }
 
+            // 曲线编辑器回填（silent：回填不触发 change，避免自己把自己写回去的死循环）
+            curveEditor.setPoints(tgt ? tgt.curvePoints : null, true);
+
             // Update grade toggle visual state
-            const gradeEnabled = tgt ? tgt.colorGradeEnabled : true;
-            if (gradeEnabled) {
+            const gradeEnabled = tgt ? tgt.colorGradeEnabled : true; if (gradeEnabled) {
                 gradeToggle.class.add('on');
                 this.class.remove('color-grade-off');
             } else {
@@ -450,6 +468,16 @@ class ColorPanel extends Container {
         allSliders.forEach((slider) => {
             slider.on('slide:start', start);
             slider.on('slide:end', end);
+        });
+
+        // 曲线编辑器：整段拖动合并成**一次**撤销（按下 start / 松开 end），
+        // 拖动过程持续写 op.newState.curve 并 do() ⇒ 画面实时跟手。
+        curveEditor.on('gestureStart', start);
+        curveEditor.on('gestureEnd', end);
+        curveEditor.on('change', (points: CurvePoint[]) => {
+            updateOp((o) => {
+                o.newState.curve = points.map(p => ({ x: p.x, y: p.y }));
+            });
         });
 
         // ---- Drag-to-scrub on parameter labels ----
@@ -634,7 +662,7 @@ class ColorPanel extends Container {
         // Reset button
         reset.on('click', () => {
             if (selected) {
-                const neutral = {
+                const neutral: Partial<ColorAdjustment> = {
                     tintClr: new Color(1, 1, 1),
                     temperature: 0,
                     saturation: 1,
@@ -647,7 +675,8 @@ class ColorPanel extends Container {
                     transparency: 1,
                     hslHue: [0, 0, 0, 0, 0, 0, 0, 0],
                     hslSat: [0, 0, 0, 0, 0, 0, 0, 0],
-                    hslLum: [0, 0, 0, 0, 0, 0, 0, 0]
+                    hslLum: [0, 0, 0, 0, 0, 0, 0, 0],
+                    curve: null
                 };
                 const oldState = buildState(selected);
                 const resetOp = new SetSplatColorAdjustmentOp({
@@ -726,6 +755,7 @@ class ColorPanel extends Container {
         events.on('splat.hslHue', updateUIFromState);
         events.on('splat.hslSat', updateUIFromState);
         events.on('splat.hslLum', updateUIFromState);
+        events.on('splat.curve', updateUIFromState);
 
         // Tooltip for reset
         tooltips.register(reset, () => i18n.t('panel.colors.reset'), 'bottom');

@@ -35,6 +35,28 @@ export const identityCurveSamples = (): Float32Array => {
 };
 
 /**
+ * 归一化控制点：夹到 [0,1]、按 x 排序、去掉重复 x（后者优先）。
+ * 面板编辑器与采样共用同一套规则，避免"UI 里的点"和"算出来的表"不一致。
+ *
+ * @param points - 原始控制点
+ * @returns 归一化后的新数组（不改原数组）
+ */
+export const normalizeCurvePoints = (points: CurvePoint[]): CurvePoint[] => {
+    const sorted = points
+    .map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }))
+    .sort((a, b) => a.x - b.x);
+    const out: CurvePoint[] = [];
+    for (const p of sorted) {
+        if (out.length > 0 && Math.abs(p.x - out[out.length - 1].x) < 1e-6) {
+            out[out.length - 1] = p;
+        } else {
+            out.push(p);
+        }
+    }
+    return out;
+};
+
+/**
  * 把控制点采样成 `CURVE_SAMPLES` 个点（单调保形三次插值）。
  *
  * @param points - 控制点列表（至少 2 个；不足 2 个时返回恒等曲线）
@@ -50,19 +72,9 @@ export const sampleCurve = (points: CurvePoint[], out?: Float32Array): Float32Ar
     }
 
     // 1) 归一化：夹到 [0,1]，按 x 排序，去掉重复 x（后者优先 —— 拖到同一个 x 时以最后一次为准）
-    const sorted = points
-    .map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }))
-    .sort((a, b) => a.x - b.x);
-    const xs: number[] = [];
-    const ys: number[] = [];
-    for (const p of sorted) {
-        if (xs.length > 0 && Math.abs(p.x - xs[xs.length - 1]) < 1e-6) {
-            ys[ys.length - 1] = p.y;
-        } else {
-            xs.push(p.x);
-            ys.push(p.y);
-        }
-    }
+    const norm = normalizeCurvePoints(points);
+    const xs: number[] = norm.map(p => p.x);
+    const ys: number[] = norm.map(p => p.y);
     const n = xs.length;
     if (n < 2) {
         dst.set(identityCurveSamples());

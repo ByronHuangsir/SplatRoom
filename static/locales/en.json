@@ -93,6 +93,7 @@
     "panel.colors.category.white-balance": "White Balance",
     "panel.colors.category.tone": "Tone",
     "panel.colors.category.blend": "Blend",
+    "panel.colors.category.curve": "Curves",
     "panel.colors.category.color": "Color",
     "panel.colors.hsl.hue": "Hue",
     "panel.colors.hsl.saturation": "Saturation",

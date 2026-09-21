@@ -854,8 +854,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     （`splatState` / `splatTransform` / `transformPalette`，GLSL `texelFetch` / WGSL `textureLoad`），
     而**片元** chunk 目前一个 sampler 都没有 ⇒ 第一次给片元加纹理的绑定风险更大。
     曲线因此放在顶点阶段（紧跟 `color = color * clrScale + clrOffset`）。
-49. **"透明 MOV"卡在编码器，不是卡在封装**（2026-09-22 新增，实测）：
-    `docs/probes/video-alpha-support.cjs` —— 本机 Chromium 对 vp8/vp9/av1/h264 一律
+49. **"透明 MOV"卡在编码器，不是卡在封装**（2026-09-22 新增，实测）：    `docs/probes/video-alpha-support.cjs` —— 本机 Chromium 对 vp8/vp9/av1/h264 一律
     `alpha: 支持 'discard'、拒绝 'keep'`（h265 两者都不支持），
     `MediaRecorder.isTypeSupported('video/quicktime') === false`；
     **"也许只是特性开关挡住"这条假设也测了：`--enable-features=WebCodecsAlphaEncoder` /
@@ -868,6 +867,21 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     **两个"以后能编 alpha 也会踩"的坑**：① splat 输出是**预乘 RGBA**，WebM/Matroska 惯例是非预乘
     ⇒ 不 un-premultiply 会让半透明边缘发暗；② ISOBMFF muxer 会**静默吞掉** alpha
     ⇒ UI 必须按容器禁用透明选项，否则产出"看着正常但没 alpha"的文件。
+50. **面板可滚动之后，新加的控件要先滚进可视区才测得到**（2026-09-22 新增，第十三轮，踩了一次）：
+    第十二轮把 `#color-panel` 改成 `overflow-y: auto` 修"行重叠"，第十三轮往面板**底部**加"曲线"分类后，
+    套件里对曲线控件做 `elementFromPoint` 命中测试 / 真实鼠标拖拽都失败 —— 因为控件在可视区之外
+    （`getBoundingClientRect()` 照样有值，但 `elementFromPoint` 落到别的元素上，真实鼠标打不到）。
+    规矩：**驱动面板里靠下的新控件前，先 `scrollIntoView({ block: 'center' })` 再量**。
+    这与坑 41（行重叠导致命中到相邻分区）是同一类问题的另一面。
+51. **撤销要"一次手势一条记录"**（2026-09-22 新增，第十三轮）：曲线编辑器是连续拖动，
+    如果每次 `pointermove` 都走 `updateOp()`（无 op 时 start→do→end）会产生几十条撤销记录。
+    正确做法是把拖动包在 `gestureStart`/`gestureEnd` 里，复用面板已有的 `start()`/`end()`：
+    中途只写 `op.newState.curve = points` 并 `op.do()`，松手时才 `end()` 提交一条。
+    套件断言：拖一次 → `edit.undo` 一次 ⇒ 曲线整体消失（实测 `curvePoints=null`、画面逐像素回基线）。
+52. **`ColorAdjustment` 这类可选字段要区分 `undefined` 与 `null`**（2026-09-22 新增）：
+    曲线用 `undefined` 表示"本次操作不碰曲线"、`null` 表示"清空曲线"；
+    如果写成 `if (curve) splat.setCurvePoints(curve)`（像 `hslHue` 那样），
+    点"复位"或撤销到"无曲线"的状态就永远清不掉（`null` 是 falsy）。
 
 ---
 

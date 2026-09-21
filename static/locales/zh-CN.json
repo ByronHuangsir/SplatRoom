@@ -93,6 +93,7 @@
     "panel.colors.category.white-balance": "白平衡",
     "panel.colors.category.tone": "影调",
     "panel.colors.category.blend": "混合",
+    "panel.colors.category.curve": "曲线",
     "panel.colors.category.color": "颜色",
     "panel.colors.hsl.hue": "色相",
     "panel.colors.hsl.saturation": "饱和度",
