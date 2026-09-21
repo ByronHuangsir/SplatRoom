@@ -57,6 +57,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.waitForFunction('!!window.scene', { timeout: 120000, polling: 500 });
     await sleep(1500);
 
+    // 本套件测的是这条路**本身**的机制，而它**默认关闭**（用户 2026-09-21 反馈观感太难受，
+    // 见 src/core/motion-opaque.ts 文件头）⇒ 显式打开，别把"默认关闭"当成功能坏掉。
+    await page.evaluate(() => { window.__SPLATROOM_MOTION_OPAQUE__ = true; });
+
     await page.evaluate(async (m) => {
         const buf = await (await fetch('./' + m)).arrayBuffer();
         window.__loadErr = null;
@@ -177,8 +181,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         window.__orderTest = async () => {
             const scene2 = window.scene;
             const wasEnabled = scene2.motionOpaque.enabled;
+            const wasHatch = window.__SPLATROOM_MOTION_OPAQUE__;
             const measure = async (mode) => {
+                // 策略默认 + 逃生开关**两处都要控**：只改 `enabled` 时，先前的 `hatch = true`
+                // 依然会让 active 为真（第一版就是这么让"alpha 基准"跑在不透明路径上的）。
                 scene2.motionOpaque.enabled = mode === 'opaque';
+                window.__SPLATROOM_MOTION_OPAQUE__ = mode === 'opaque';
                 if (mode === 'opaque') {
                     await window.__jiggle(0.05);
                 } else {
@@ -213,6 +221,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const alpha = await measure('alpha');
             const opaque = await measure('opaque');
             scene2.motionOpaque.enabled = wasEnabled;
+            if (wasHatch === undefined) {
+                delete window.__SPLATROOM_MOTION_OPAQUE__;
+            } else {
+                window.__SPLATROOM_MOTION_OPAQUE__ = wasHatch;
+            }
 
             return {
                 alpha,
@@ -265,6 +278,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         check('settled: alpha blending, no depth write, uMotionOpaque = 0',
             settled.transparent === true && settled.depthWrite === false && settled.uniform === 0,
             `transparent=${settled.transparent} depthWrite=${settled.depthWrite} uMotionOpaque=${settled.uniform}`);
+        // 默认必须是关的：用户 2026-09-21 反馈观感太难受 ⇒ 没有显式打开时不得进入不透明路径
+        const defaultOff = await page.evaluate(() => {
+            const s = window.scene.getElementsByType('splat').slice(-1)[0];
+            delete window.__SPLATROOM_MOTION_OPAQUE__;
+            return { policyDefault: window.scene.motionOpaque.enabled, hatch: window.__SPLATROOM_MOTION_OPAQUE__ };
+        });
+        check('default is OFF (the opaque look needs an explicit opt-in)',
+            defaultOff.policyDefault === false && defaultOff.hatch === undefined,
+            `motionOpaque.enabled=${defaultOff.policyDefault} hatch=${defaultOff.hatch}`);
+        await page.evaluate(() => { window.__SPLATROOM_MOTION_OPAQUE__ = true; });
+        await sleep(300);
 
         // ---- 运动帧：切到不透明 ----
         const spin = rotate(1200);
@@ -286,7 +310,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const countPosts = async (opaqueOn) => {
             await page.evaluate((on) => {
                 if (on) {
-                    delete window.__SPLATROOM_MOTION_OPAQUE__;
+                    window.__SPLATROOM_MOTION_OPAQUE__ = true;
                 } else {
                     window.__SPLATROOM_MOTION_OPAQUE__ = false;
                 }
@@ -375,15 +399,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             `moving=${disabled.moving} transparent=${disabled.transparent} uMotionOpaque=${disabled.uniform}`);
         await page.evaluate(() => { delete window.__SPLATROOM_MOTION_OPAQUE__; });
 
-        // ---- alpha 下限覆盖 ----
-        await page.evaluate(() => { window.__SPLATROOM_MOTION_ALPHA_CLIP__ = 0.7; });
+        // ---- alpha 下限覆盖（先把开关开回来：本特性默认关闭）----
+        await page.evaluate(() => {
+            window.__SPLATROOM_MOTION_OPAQUE__ = true;
+            window.__SPLATROOM_MOTION_ALPHA_CLIP__ = 0.7;
+        });
         const spin3 = rotate(1000);
         await sleep(300);
         const clipped = await state();
         await spin3;
         check('window.__SPLATROOM_MOTION_ALPHA_CLIP__ overrides the shader alpha floor',
-            clipped.motionOpaque === true && Math.abs(clipped.alphaClip - 0.7) < 1e-3,
-            `uMotionAlphaClip=${clipped.alphaClip} (expected 0.7)`);
+            Math.abs(clipped.alphaClip - 0.7) < 1e-3,
+            `uMotionAlphaClip=${clipped.alphaClip} (expected 0.7) applied=${clipped.motionOpaque} moving=${clipped.moving}`);
         await page.evaluate(() => { delete window.__SPLATROOM_MOTION_ALPHA_CLIP__; });
 
         // ---- 不动用户设置 ----

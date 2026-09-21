@@ -16,9 +16,14 @@
 // （引擎拿它做 `clipCorner`，而我们替换了那个顶点入口），见 docs/perf/交互期降级-实现与实测.md §2。
 //
 // 三个开关（都不写偏好、不进 `.ssproj`、不影响导出，纯渲染期行为）：
-//   window.__SPLATROOM_MOTION_OPAQUE__ = false       整体关掉，回到"顺序 + alpha 混合"
-//   window.__SPLATROOM_MOTION_ALPHA_CLIP__ = 0.5     调 alpha 下限（0.37 ≈ 保留整个足迹，越大越稀）
-//   motionOpaque.enabled                            同一开关的程序入口（套件用）
+//   window.__SPLATROOM_MOTION_OPAQUE__ = true        强制打开（A/B 用，不用重新打包）
+//   window.__SPLATROOM_MOTION_OPAQUE__ = false       强制关掉
+//   motionOpaque.enabled                            程序入口（套件用）
+//
+// **默认关闭**（2026-09-21 用户反馈"看着太难受了"）：这条路运动帧失去半透明与软边，
+// 硬边在运动时还会闪（时间走样），观感代价太大，不该由我替用户默认开启。
+// 想要"猛甩时顺序也不错"这条收益时再开；更好的做法是**按转速门限**只在甩得很快时才切
+// （见 docs/perf/交互期降级-实现与实测.md §6.13 末尾）。
 
 import { BLEND_NONE, BLEND_PREMULTIPLIED } from 'playcanvas';
 
@@ -30,8 +35,8 @@ const DEFAULT_ALPHA_CLIP = 0.5;
  * 高于它才会真正把高斯缩小。0.5 对应半径 ≈ 0.83 倍，是"保覆盖 + 硬边"的折中。
  */
 class MotionOpaque {
-    /** master switch（逃生开关 `window.__SPLATROOM_MOTION_OPAQUE__ = false` 也走这里） */
-    enabled = true;
+    /** 默认**关闭**：观感代价大，要用户自己点头（见文件头说明） */
+    enabled = false;
 
     /** alpha 下限（见上面的取值说明） */
     alphaClip = DEFAULT_ALPHA_CLIP;
@@ -45,9 +50,21 @@ class MotionOpaque {
         return typeof override === 'number' && Number.isFinite(override) ? override : this.alphaClip;
     }
 
-    /** 当前是否允许启用（含逃生开关） */
+    /**
+     * 当前是否允许启用。语义是**三态**：
+     *   `__SPLATROOM_MOTION_OPAQUE__ === true`  → 强制开（覆盖 `enabled`）
+     *   `__SPLATROOM_MOTION_OPAQUE__ === false` → 强制关（覆盖 `enabled`）
+     *   未设置 → 用 `enabled`（默认 false）
+     */
     get active() {
-        return this.enabled && (globalThis as any).__SPLATROOM_MOTION_OPAQUE__ !== false;
+        const hatch = (globalThis as any).__SPLATROOM_MOTION_OPAQUE__;
+        if (hatch === true) {
+            return true;
+        }
+        if (hatch === false) {
+            return false;
+        }
+        return this.enabled;
     }
 }
 
