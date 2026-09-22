@@ -94,7 +94,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         `快捷控件 [${(layout.quickBox ?? []).join(', ')}]；右侧工具栏 [${(layout.rightToolbar ?? []).join(', ')}]` +
         ` ⇒ 重叠=${hitRight}；底部工具栏 [${(layout.bottomToolbar ?? []).join(', ')}] ⇒ 重叠=${hitBottom}`);
 
-    // 用户报的第二个 bug（2026-09-22）：调色面板打开后，被这块盖住 ⇒ 两种面板可见时必须让位到面板列左边
+    // 用户报的第二个 bug（2026-09-22）：调色面板打开后被这块挡住 ⇒ 用户选定"面板打开时把我藏起来"
+    //（另一方案是挪到面板列左边，但那就不在坐标轴正下方了，用户没选）。
     const panels = await page.evaluate(async () => {
         const scene = window.scene;
         const boxOf = (sel) => {
@@ -118,14 +119,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         out.restored = boxOf('#view-quick-controls');
         return out;
     });
-    const hitColor = overlaps(panels.color.quick, panels.color.panel);
-    const hitSettings = overlaps(panels.settings.quick, panels.settings.panel);
-    check('it steps aside when a right-side panel (color / settings) is open (the second reported bug)',
+    const hiddenWhileColor = panels.color.quick === null;
+    const hiddenWhileSettings = panels.settings.quick === null;
+    check('it hides itself while a right-side panel (color / settings) is open, and comes back after (the second reported bug)',
         panels.color.opened && panels.settings.opened && !!panels.color.panel && !!panels.settings.panel &&
-        !hitColor && !hitSettings,
-        `调色面板 [${(panels.color.panel ?? []).join(', ')}] vs 快捷控件 [${(panels.color.quick ?? []).join(', ')}] ⇒ 重叠=${hitColor}；` +
-        `设置面板 [${(panels.settings.panel ?? []).join(', ')}] vs [${(panels.settings.quick ?? []).join(', ')}] ⇒ 重叠=${hitSettings}；` +
-        `关闭后回到 [${(panels.restored ?? []).join(', ')}]`);
+        hiddenWhileColor && hiddenWhileSettings && !!panels.restored,
+        `调色面板 [${(panels.color.panel ?? []).join(', ')}] 打开时快捷面板 = ${panels.color.quick ? '[' + panels.color.quick.join(', ') + ']' : '隐藏'}；` +
+        `设置面板 [${(panels.settings.panel ?? []).join(', ')}] 打开时 = ${panels.settings.quick ? '[' + panels.settings.quick.join(', ') + ']' : '隐藏'}；` +
+        `两个都关掉后回到 [${(panels.restored ?? []).join(', ')}]`);
 
     // 用户要求：视野角**不要输入框**、滑轨**要长**
     check('the FOV control has no input box and its track is long',

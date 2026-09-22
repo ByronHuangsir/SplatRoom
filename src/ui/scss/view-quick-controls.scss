@@ -24,13 +24,14 @@
         display: flex;
     }
 
-    // 右侧面板（调色 / 设置）打开时**让位**：它们是 `#canvas-container` 的兄弟节点，
-    // 用 `:has()` 就能表达"只要那两种面板可见，我就挪到面板列左边"，
-    // 不需要监听面板可见性事件（面板列 = right:102 + 宽 320 + 12 余量 ⇒ 434）。
-    // 用户反馈（2026-09-22）：调色面板打开后被这块挡住。
+    // 右侧面板（调色 / 设置）打开时**隐藏**：它们是 `#canvas-container` 的兄弟节点，
+    // 用 `:has()` 就能表达"只要那两种面板可见，我就让位"，不需要监听可见性事件、也不留第二份状态。
+    // 用户反馈（2026-09-22）：先报"调色面板被这块挡住"，在"挪到左边 / 直接隐藏"之间**选了隐藏**
+    //（挪过去就不在坐标轴下方了，两者只能选一个）。
+    // 特异性 (3,1,0) > 上面的 `#view-quick-controls:not(.pcui-hidden)` (1,1,0) ⇒ 不依赖书写顺序。
     @at-root #canvas-container:has(#color-panel:not(.pcui-hidden)) #view-quick-controls,
     #canvas-container:has(#settings-panel:not(.pcui-hidden)) #view-quick-controls {
-        right: 434px;
+        display: none;
     }
 
     // 视野角：**单行**（用户要求"滑轨直接跟在视角那三个字后面，不要另起一行"）——
