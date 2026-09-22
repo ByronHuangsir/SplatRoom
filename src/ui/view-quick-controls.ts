@@ -35,6 +35,18 @@ class ViewQuickControls extends Container {
 
         super(args);
 
+        // **必须**拦下指针事件，否则这块面板的开关根本点不动（用户 2026-09-22 报的"点击没反应"）。
+        // 真凶不是 z-index、也不是 pointer-events：面板挂在 `#canvas-container` 里，而相机控制器
+        // 在 `#canvas-container` 上监听 `pointerdown` 并 `target.setPointerCapture(pointerId)`。
+        // 于是 pointerdown 一冒泡上去就被相机抢走指针捕获，**pointerup / mouseup / click 全部被改派到
+        // `#canvas-container`**（实测：pointerdown 的 target 是开关本身，pointerup 和 click 的 target 变成了
+        // `#canvas-container`）⇒ PCUI 的 `BooleanInput` 靠 `click` 才翻转，自然永远收不到。
+        // 副作用还有：在面板上点击/拖动会被当成相机拖动。
+        // 其它面板（scene-panel / settings-panel / color-panel …）都是这么处理的，这里补齐。
+        ['pointerdown', 'pointerup', 'pointermove', 'wheel', 'dblclick'].forEach((eventName) => {
+            this.dom.addEventListener(eventName, (event: Event) => event.stopPropagation());
+        });
+
         // ---- 视野角（第一行）----
         // 用户反馈（2026-09-22）：① 不要输入框；② 滑轨要长；③ **滑轨就跟在"视野角"三个字后面，
         // 不要另起一行**（另起一行太占纵向空间）。

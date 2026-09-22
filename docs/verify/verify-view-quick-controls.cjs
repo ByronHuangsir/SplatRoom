@@ -75,7 +75,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             sliderInputWidth: sliderNum ? Math.round(sliderNum.getBoundingClientRect().width) : null,
             sliderInputHidden: !!sliderNum && getComputedStyle(sliderNum).display === 'none',
             sliderTrackWidth: track ? Math.round(track.getBoundingClientRect().width) : null,
-            sliderBarWidth: bar ? Math.round(bar.getBoundingClientRect().width) : null
+            sliderBarWidth: bar ? Math.round(bar.getBoundingClientRect().width) : null,
+            // 版式细节（用户第二轮追加要求）：`显示` 与 `视野角` 左对齐；第二行撑满到与第一行同一右边缘
+            labelLefts: Array.from(qc.querySelectorAll('.vqc-row .vqc-label')).map(el => Math.round(el.getBoundingClientRect().left)),
+            fovRowRight: Math.round(qc.querySelector('.vqc-row').getBoundingClientRect().right),
+            displayRowRight: (() => {
+                const groups = qc.querySelectorAll('.vqc-display-row .vqc-group');
+                const last = groups[groups.length - 1];
+                return last ? Math.round(last.getBoundingClientRect().right) : null;
+            })()
         };
     });
     // ---- 1. 位置：必须在**菜单栏右侧**、贴着菜单栏右边缘、且不压其他东西 ----
@@ -176,76 +184,119 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         rowTexts[0].includes('视野角') && row2.includes('显示') && row2.includes('边界') && row2.includes('网格'),
         `行=${JSON.stringify(rowTexts)}；滑杆=${layout.slider}；开关=${layout.toggles}`);
 
+    // 用户第二轮追加要求：`显示` 和 `视野角` 左对齐；`边界` / `网格` 两组往右推开、撑满整行
+    check('显示 is left-aligned with 视野角 and the switch groups fill the row to the right edge',
+        (layout.labelLefts ?? []).length >= 4 && layout.labelLefts[0] === layout.labelLefts[1] &&
+        !!layout.fovRowRight && !!layout.displayRowRight && Math.abs(layout.displayRowRight - layout.fovRowRight) <= 2,
+        `标签左边缘=${JSON.stringify(layout.labelLefts)}（前两个分别是「视野角…」与「显示」，必须相等）；` +
+        `第一行右端=${layout.fovRowRight}、第二行最右=${layout.displayRowRight}` +
+        `（差 ${Math.abs((layout.displayRowRight ?? 0) - (layout.fovRowRight ?? 0))}px；滑轨自身还有 6px 内边距，` +
+        `所以不能拿滑轨右端比）`);
+
     // ---- 2. 功能：三个控件都要改到真实状态 ----
-    const wired = await page.evaluate(async () => {
-        const qc = document.querySelector('#view-quick-controls');
-        const findInstance = (root, predicate) => {
-            for (const el of Array.from(root.querySelectorAll('*'))) {
-                const inst = el.ui;
-                if (inst && typeof inst.on === 'function' && predicate(inst)) {
-                    return inst;
-                }
-            }
-            return null;
-        };
-        const events = window.scene.events;
-        const before = {
-            fov: events.invoke('camera.fov'),
-            grid: events.invoke('grid.visible'),
+    // ⚠️ 这里**必须用真鼠标事件**（page.mouse），不能用 dispatchEvent：
+    // 用户报过"开关点了没反应"，而合成事件在元素上直接派发会**绕过指针捕获**，测不出这个 bug
+    // （真凶是相机控制器在 #canvas-container 上 setPointerCapture，把 pointerup/click 改派走了）。
+    const geometry = await page.evaluate(() => ({
+        toggleCenters: Array.from(document.querySelectorAll('#view-quick-controls .vqc-toggle')).map((el) => {
+            const r = el.getBoundingClientRect();
+            return [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)];
+        }),
+        sliderTrack: (() => {
+            const t = document.querySelector('#view-quick-controls .vqc-slider .pcui-slider-container');
+            const r = t.getBoundingClientRect();
+            return [Math.round(r.left), Math.round(r.top + r.height / 2), Math.round(r.right), Math.round(r.height)];
+        })(),
+        before: {
+            fov: window.scene.events.invoke('camera.fov'),
+            grid: window.scene.events.invoke('grid.visible'),
             bound: (() => {
                 try {
-                    return events.invoke('camera.bound');
+                    return window.scene.events.invoke('camera.bound');
                 } catch {
                     return null;
                 }
             })()
-        };
+        },
+        userDragging: !!window.scene.camera?.userDragging
+    }));
 
-        // 视野角：滑杆拉到 95 度
-        const slider = findInstance(qc, i => typeof i.value === 'number' && i.min === 10 && i.max === 120);
-        const canSlider = !!slider;
-        if (slider) {
-            slider.value = 95;
-        }
-        await new Promise(r => setTimeout(r, 600));
+    // 视野角：真拖动滑轨（两段式方向测试，比"拖到某个像素必须等于某个角度"稳得多——
+    // 滑轨内部还有 padding，像素→角度的映射不该写死在断言里）。
+    // ⚠️ 每次拖动前**必须重新量滑轨**：角度读数并进标签文本里，标签宽度随位数变化
+    //（"视野角 75°" → "视野角 117°"），滑轨的 left 会跟着挪几个像素，用旧坐标会按到标签上
+    // ——这正是我第一版"第二次拖拽不生效"的原因（PCUI 收不到 pointerdown，值自然不动）。
+    const dragTo = async (frac) => {
+        const track = await page.evaluate(() => {
+            const t = document.querySelector('#view-quick-controls .vqc-slider .pcui-slider-container');
+            const r = t.getBoundingClientRect();
+            return [r.left, r.top + r.height / 2, r.right];
+        });
+        const [left, y, right] = track;
+        await page.mouse.move(Math.round(left + (right - left) * 0.5), y);
+        await page.mouse.down();
+        await page.mouse.move(Math.round(left + (right - left) * frac), y, { steps: 8 });
+        await page.mouse.up();
+        await sleep(600);
+        return page.evaluate(() => window.scene.events.invoke('camera.fov'));
+    };
+    const fovHigh = await dragTo(0.92);
+    const fovLow = await dragTo(0.08);
 
-        // 两个开关：各点一次。PCUI 的 BooleanInput 在 `pointerdown` 上不一定翻，
-        // 所以**两种手势都试**（真实 pointerdown，再补一次 click），并记录各自的实效
-        const toggles = Array.from(qc.querySelectorAll('.vqc-toggle'))
-            .map(el => el.ui)
-            .filter(i => i && typeof i.on === 'function');
-        const gestures = [];
-        for (const t of toggles) {
-            const before = t.value;
-            t.dom.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-            t.dom.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-            gestures.push({ before, after: t.value });
-        }
-        await new Promise(r => setTimeout(r, 800));
+    // 两个开关：各来一次**真点击**
+    const clickResults = [];
+    for (const [cx, cy] of geometry.toggleCenters) {
+        const beforeValue = await page.evaluate(([x, y]) => {
+            const el = document.elementFromPoint(x, y);
+            const toggle = el && el.closest ? el.closest('.vqc-toggle') : null;
+            return { hitToggle: !!toggle, value: toggle && toggle.ui ? toggle.ui.value : null };
+        }, [cx, cy]);
+        await page.mouse.click(cx, cy);
+        await sleep(600);
+        const afterValue = await page.evaluate(([x, y]) => {
+            const el = document.elementFromPoint(x, y);
+            const toggle = el && el.closest ? el.closest('.vqc-toggle') : null;
+            return { value: toggle && toggle.ui ? toggle.ui.value : null };
+        }, [cx, cy]);
+        clickResults.push({ center: [cx, cy], hitToggle: beforeValue.hitToggle, before: beforeValue.value, after: afterValue.value });
+    }
 
-        const after = {
-            fov: events.invoke('camera.fov'),
-            grid: events.invoke('grid.visible'),
+    const wired = await page.evaluate((before) => ({
+        before,
+        after: {
+            fov: window.scene.events.invoke('camera.fov'),
+            grid: window.scene.events.invoke('grid.visible'),
             bound: (() => {
                 try {
-                    return events.invoke('camera.bound');
+                    return window.scene.events.invoke('camera.bound');
                 } catch {
                     return null;
                 }
             })()
-        };
-        return { before, after, canSlider, toggleCount: toggles.length, gestures };
-    });
+        },
+        userDragging: !!window.scene.camera?.userDragging
+    }), geometry.before);
+    wired.clickResults = clickResults;
+    wired.canSlider = true;
+    wired.toggleCount = clickResults.length;
+    wired.fovHigh = fovHigh;
+    wired.fovLow = fovLow;
 
-    check('the FOV slider really drives the camera (camera.setFov)',
-        wired.canSlider && Math.abs(wired.after.fov - 95) < 1.5 && wired.before.fov !== wired.after.fov,
-        `fov ${wired.before.fov} → ${wired.after.fov}（滑杆设 95）`);
+    check('the FOV slider really drives the camera with a real mouse drag (camera.setFov)',
+        Math.abs(fovHigh - 120) < 12 && Math.abs(fovLow - 10) < 12 && fovHigh - fovLow > 60 && wired.before.fov !== fovHigh,
+        `初始 fov ${wired.before.fov}；真拖到最右 ${fovHigh}（上限 120）、真拖到最左 ${fovLow}（下限 10）`);
 
-    check('the two toggles really flip grid visibility and bounding-box visibility',
+    check('a real mouse click flips both switches (the reported "click does nothing" bug)',
+        clickResults.length === 2 && clickResults.every(r => r.hitToggle && r.before !== null && r.after === !r.before) &&
         wired.after.grid !== wired.before.grid &&
         (wired.before.bound === null || wired.after.bound !== wired.before.bound),
-        `网格 ${wired.before.grid} → ${wired.after.grid}；边界 ${wired.before.bound} → ${wired.after.bound}` +
-        `（点了 ${wired.toggleCount} 个开关）`);
+        `开关点击结果=${JSON.stringify(clickResults)}；网格 ${wired.before.grid} → ${wired.after.grid}；` +
+        `边界 ${wired.before.bound} → ${wired.after.bound}`);
+
+    check('clicking the panel does not hand the pointer to the camera controller (pointer capture)',
+        wired.userDragging === false,
+        `点完面板后 camera.userDragging=${wired.userDragging}（若为 true 说明 pointerdown 冒泡到了 #canvas-container，` +
+        `相机抢走指针捕获 ⇒ click 被改派、开关失灵）`);
 
     // ---- 3. 反向：设置面板里的三份还在，而且与新面板同步 ----
     const legacy = await page.evaluate(() => {
