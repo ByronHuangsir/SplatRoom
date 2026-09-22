@@ -3745,6 +3745,11 @@ mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 
 残留的 11.6 s 是**逐行主线程工作**（`GSplatData` 组装 + 每个高斯的 state/transform 通道 + 首次 GPU 上传），
 不在本轮范围，已列为下一轮目标。
 
+**第二组（20M 夹具 `test-20m-fill.ply` 4.4 GB，`docs/verify/verify-load-worker.cjs`）**：
+主线程最长阻塞 **30,271 → 9,780 ms（−67.7%）**，两臂列哈希一致、导入墙钟都是 ~42 s。
+（该套件的取文件方式也修了：4.4 GB 走 `fetch().arrayBuffer()` 会撞 HANDOFF 43 那条 2 GB 墙，
+现在按 `Range` 64 MB 分块拼 `File`。）
+
 **为什么历史上一开 worker 就坏（真凶）**：worker 回传的 `Transform` 经结构化克隆**丢掉 `Quat` 原型**，
 而引擎 `GraphNode.setLocalRotation()` 用 `if (x instanceof Quat)` 分流 ⇒ 普通对象走
 `localRotation.set(obj, undefined, undefined, undefined)` ⇒ **旋转矩阵 3×3 整块 NaN**（平移正常）。
@@ -3762,7 +3767,12 @@ mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 
 另修：`window.__SPLATROOM_IMPORT_BUDGET__` 由主线程读出后随消息带进 worker（`budgetOverride`），
 worker 在抽稀前补发 `type:'budget'` ⇒ UI 的"正在简化导入"进度条与 `splat.importReduction` 两条路径一致。
 
-**产物**：`release\SplatRoom-3.23.23.exe`；提交见 `docs/进度存档.md` 第十六轮。
+**全量回归（冻结构建 `dist/index.js` SHA256 前缀 `39CD3439`）**：webgpu 49 套 `TOTAL FAILED: 0`、
+webgl2 同 49 套 `TOTAL FAILED: 0`（各 1 个既有 `UNPARSED`：`verify-merge-ui.cjs` 输出形状问题）；
+`npm run check` 0、`npx tsc --noEmit` 0。
+⚠️ 批量跑动期间不要 `npm run build`：套件按需从 `dist/` 取页面，中途换构建会让结果变成"两个构建混着跑"。
+
+**产物**：`release\SplatRoom-3.23.23.exe`（122.09 MB）;提交见 `docs/进度存档.md` 第十六轮。
 
 
 

@@ -185,7 +185,12 @@ foreach ($s in $suites) {
 `verify-index-ranges`（18 项）、`verify-motion-quality-policy`（13 项）、`verify-render-diagnostics`、
 `verify-splat-tier`（**21 项**，模型/设备分级与导入预算）、`verify-color-curves`（**15 项**，曲线采样与插值）。
 **双后端**：webgl2 侧跑**同一份 49 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
-**最近一轮实测（第十六轮，3.23.23）：webgpu 49 套 / webgl2 49 套，`TOTAL FAILED` 见 `_tmp\batch-*-16.txt`**。
+**最近一轮实测（第十六轮，3.23.23，冻结构建 `dist/index.js` SHA256 前缀 `39CD3439`）：
+webgpu 49 套 `TOTAL FAILED: 0`、webgl2 同 49 套 `TOTAL FAILED: 0`**，
+两边各有 1 个 `UNPARSED`（`verify-merge-ui.cjs`，既有输出形状问题，不是失败）；
+日志在 `_tmp\batch-webgpu-16f.txt` / `_tmp\batch-webgl2-16f.txt`。
+⚠️ **批量跑动期间不要 `npm run build`** —— 套件是按需从 `dist/` 取页面的，中途换构建会让这批结果
+变成"两个构建混着跑"（第十六轮踩过一次，所以重跑了一遍）。
 
 **UNPARSED 是既有输出形状问题、不是失败**：`verify-merge-ui.cjs`（根本没有 `failed` 字段，看 `pageerrors: []`）、
 `verify-sphere-brush.cjs`（单独跑 **6/6**，退出码 0）、`verify-edit-grade-crop.cjs`（单独跑 **4/4**，`failed` 字段在批量里没被解析出来）。
