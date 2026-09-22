@@ -3846,6 +3846,40 @@ webgl2 同 49 套 `TOTAL FAILED: 0`（各 1 个既有 `UNPARSED`：`verify-merge
 
 **产物**：`release\SplatRoom-3.23.25.exe`；提交见 `docs/进度存档.md` 第十八轮。
 
+### 6.64 第十九轮：导入残留阻塞的归因（profiler）+ LOD 代理层时机修正
+
+完整记录见 **`docs/导入残留阻塞-归因与LOD时机-2026-09-22.md`**。
+
+**归因**（新增 `docs/probes/import-profile.cjs`：CDP 采样 profiler + 自时间聚合 + **调用链**）：
+1.35 亿那只（预算后 6000 万行）最长阻塞 11.8 s 里 **约 11.3 s 在引擎内部**，
+全部挂在 `load ← createGSplatAsset ← GSplatResource 构造` 下：
+
+| 自时间 | 项 |
+| --- | --- |
+| 5.1 s | `SplatIterator.read` 闭包（每高斯 10 次类型化数组读 + 3 次 `Math.exp`） |
+| 2.2 s | `calcAabb` |
+| 1.75 s | `updateColorData` |
+| 1.8 s | `updateTransformData`（含 `float2Half` / `normalize`） |
+| 0.38 s | `writeTexture` |
+
+⇒ **本质是四趟 6000 万次的逐行 CPU 循环（≈190 ns/高斯）**。用户建议的
+"`state`/`transform` 通道懒分配 + 首次上传分批"实测只对 0.4 s 量级有意义
+（通道是一次性 malloc+清零；`writeTexture` 只有 0.38 s），如实改口径。
+
+**本轮真正削掉的**：`editor-lod.ts` 原来在 `scene.elementAdded` 后**写死 400 ms** 就建 LOD 代理层，
+正好砸在引擎 11.8 s 冻结刚结束的那一刻。改成 `requestIdleCallback`（8 s 兜底）+
+`buildLodAssets()` 逐层创建、层间让出宏任务：
+
+| 阶段 | 改前 | 改后 |
+| --- | --- | --- |
+| resolve **前**最长阻塞 | 11,716 ms | 11,804 ms（引擎，未变） |
+| resolve **后**最长阻塞 | **4,982 ms**（一段） | **3,824 ms + 1,327 ms**（两段） |
+
+**顺带修了口径**：`import-stall.cjs` 原来只采样到 `import resolve`，这段 5.0 s 的尾巴一直被漏掉；
+现在延长到 resolve 后 20 s，并把 >1 s 阻塞按 `before/after-resolve` 归类。
+
+**产物**：`release\SplatRoom-3.23.26.exe`；提交见 `docs/进度存档.md` 第十九轮。
+
 
 
 

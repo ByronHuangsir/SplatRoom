@@ -1024,6 +1024,16 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     （顺带：数进度别包 `OffscreenCanvas.prototype.convertToBlob` —— PNG 编码不走那条路；
     数 `URL.createObjectURL` 调用更稳，`downloadFile` 每帧一次。)
 
+67. **测"导入卡多久"别只采样到 `import resolve`**（2026-09-22 新增，第十九轮）：
+    第十六轮报的"1.35 亿那档 11.6 s"只是**前半段**。真正让用户难受的是"模型已经出现、但界面又冻了"的
+    那一段 —— 实测 **4,982 ms**，起因是 `editor-lod.ts` 在 `scene.elementAdded` 之后**写死 400 ms**
+    就去建 LOD 代理层，而那 400 ms 正好落在引擎 11.8 s 打包冻结结束之后。
+    `import-stall.cjs` 现在**采样到 resolve 后 20 s**，并把 >1 s 的阻塞按 `before-resolve` /
+    `after-resolve` 归类。规矩：任何"导入/导出耗时"的口径都要包含**收尾阶段**（自动 LOD、
+    首帧排序、代理层上传），否则会系统性低估。
+    顺带两条归因经验：① "哪一段占多久"用阶段打点，"占在哪一行"必须上
+    `docs/probes/import-profile.cjs`（CDP profiler + 调用链）；② 调用链要自己用 `children`
+    反向建表（profiler 节点没有 `parent`），否则链是空的，认不出压缩后的 `H_.read` 是谁。
 ---
 
 ## 8. 和用户配合的方式（很重要）
@@ -1075,7 +1085,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `alloc-wall.cjs` | **干净的"单块 `ArrayBuffer` 上限"口径（第十二轮，不做任何 I/O）**：`new ArrayBuffer(n)` + 每 4 MB 真写一次。实测 1.5 GB 可以 / **2 GB 失败** |
 | `import-stall.cjs` | **"导入把主线程占了多久"的口径（第十六轮）**：同一台机器、同一个 7 GB 文件，导入 worker **关 / 开**各跑一次；页内 25 ms 心跳量 `maxBlockMs` / >1 s / >5 s 次数 + `PerformanceObserver('longtask')` 总时长与条数，另给 `importMs`（含分块 fetch）。开关用 `page.evaluateOnNewDocument` 注入（见坑 60）。用法：`node docs/probes/import-stall.cjs "<url>" huge-134m.ply 256 0 900` |
 | `export-8k.cjs` | **8K 导出四个墙的口径（第十八轮）**：设备 `maxTextureSize` / WebGPU limits、`VideoEncoder.isConfigSupported` 矩阵（**用应用真实的 codec 字符串**）+ **真编一帧**（`configure/encode/flush`）、`render.offscreen` 在各尺寸的耗时/字节/亮像素、`render.image` 的 PNG 字节与耗时。用法：`node docs/probes/export-8k.cjs "<url>" test-model.ply` |
-| `background-export.cjs` | **"后台导出"能不能跑的口径（第十八轮）**：起**打包版** → 8K 旋转台 PNG 序列 → `ShowWindow(SW_MINIMIZE)` 最小化主窗口 → 每 4 s 采样 `document.hidden` / rAF 频率 / 定时器间隔 / 已写出帧数；`attach` 模式可连一个已经在跑的应用（用 `npx electron .` 起开发版测 `electron-main.js` 的改动，不必重新打包）。用法：`node docs/probes/background-export.cjs release\SplatRoom-3.23.25.exe 12 7680 4320`；坑见 HANDOFF 65/66 |
+| `background-export.cjs` | **"后台导出"能不能跑的口径（第十八轮）**：起**打包版** → 8K 旋转台 PNG 序列 → `ShowWindow(SW_MINIMIZE)` 最小化主窗口 → 每 4 s 采样 `document.hidden` / rAF 频率 / 定时器间隔 / 已写出帧数；`attach` 模式可连一个已经在跑的应用（用 `npx electron .` 起开发版测 `electron-main.js` 的改动，不必重新打包）。用法：`node docs/probes/background-export.cjs release\SplatRoom-3.23.26.exe 12 7680 4320`；坑见 HANDOFF 65/66 |
+| `import-profile.cjs` | **"这段阻塞到底花在哪一行"的口径（第十九轮）**：CDP `Profiler` 采样（200 µs）+ **自时间聚合 + 调用链**（CDP 给的是 `children`，要自己反向建表），导入 1.35 亿那只后可点名到引擎函数（`updateTransformData` / `calcAabb` / `updateColorData` / `writeTexture`）。用法：`node docs/probes/import-profile.cjs "<url>" huge-134m.ply 256 0` |
 | `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg。**第 2 个参数可追加 Chromium 开关（逗号分隔）**，用来验证"alpha 编码是不是被特性开关挡住"——实测 `WebCodecsAlphaEncoder` / `AlphaEncoderWrapper` / `WebCodecsAlphaEncoding` 三个候选都不放行 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |
