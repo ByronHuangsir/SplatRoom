@@ -1357,7 +1357,19 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
     // mode 'orbit' = camera orbits around the focal point (环绕);
     // mode 'look'  = camera stays put and looks around (环视).
     // ----------------------------------------------------------------
-    events.function('render.turntableVideo', (settings: { frameRate: number; width: number; height: number; bitrate: number; format: string; codec: string; mode?: 'orbit' | 'look' }, fileStream: FileSystemWritableFileStream) => {
+    // 旋转台导出。
+    //
+    // `format === 'png'` 是**帧序列**（不是视频）：逐帧写 PNG（RGBA，带 alpha）到目录，
+    // 配合外部 ffmpeg 合成透明 MOV（本机 Chromium 对所有 codec 都拒绝 `alpha: 'keep'`，
+    // 详见 docs/旋转台透明背景视频-探索结论-2026-09-22.md）。此时：
+    //   • 不建 muxer/编码器、不混音；
+    //   • **不铺背景色**（清屏色保持透明）⇒ 输出帧的背景是 alpha=0；
+    //   • `baseDir` 是目标目录（原生路径字符串或 FileSystemDirectoryHandle）。
+    events.function('render.turntableVideo', (
+        settings: { frameRate: number; width: number; height: number; bitrate: number; format: string; codec: string; mode?: 'orbit' | 'look' },
+        fileStream: FileSystemWritableFileStream,
+        baseDir?: FileSystemDirectoryHandle | string
+    ) => {
         const renderImpl = async () => {
             events.fire('progressStart', i18n.t('menu.render.turntable'), true);
 
@@ -1414,31 +1426,38 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                 const durationSec = 360 / speed;
                 const totalFrames = Math.round(durationSec * frameRate);
 
+                // 帧序列（PNG）：不建 muxer / 编码器 / 音轨
+                const isSequence = format === 'png';
                 const target = fileStream ? new StreamTarget(fileStream) : new BufferTarget();
 
                 const formatConfig = FORMAT_CONFIG[format] ?? FORMAT_CONFIG.mp4;
-                const outputFormat = formatConfig.create(!!fileStream);
-                const fileExtension = formatConfig.extension;
+                const outputFormat = isSequence ? null : formatConfig.create(!!fileStream);
+                const fileExtension = isSequence ? 'png' : formatConfig.extension;
 
                 const codecConfig = CODEC_CONFIG[codecChoice] ?? CODEC_CONFIG.h264;
                 const codecType = codecConfig.type;
                 const codec = codecConfig.codec(height);
 
-                const output = new Output({
-                    format: outputFormat,
+                const output = isSequence ? null : new Output({
+                    format: outputFormat!,
                     target
                 });
 
-                const videoSource = new EncodedVideoPacketSource(codecType);
-                output.addVideoTrack(videoSource, {
-                    rotation: 0,
-                    frameRate
-                });
+                const videoSource = isSequence ? null : new EncodedVideoPacketSource(codecType);
+                if (output && videoSource) {
+                    output.addVideoTrack(videoSource, {
+                        rotation: 0,
+                        frameRate
+                    });
+                }
 
-                // 若有音频 clips，添加音频轨（混音）；旋转台按总时长混音
-                const closeAudio = await addOutputAudioTrack(output, events, durationSec);
+                // 若有音频 clips，添加音频轨（混音）；旋转台按总时长混音。
+                // 帧序列没有容器可混音 ⇒ 跳过。
+                const closeAudio = isSequence ? null : await addOutputAudioTrack(output!, events, durationSec);
 
-                await output.start();
+                if (output) {
+                    await output.start();
+                }
 
                 // audioSource.add() must run after output.start() — writing
                 // samples to a pending output is rejected and would yield a
@@ -1452,7 +1471,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     const enc = new VideoEncoder({
                         output: async (chunk, meta) => {
                             const encodedPacket = EncodedPacket.fromEncodedChunk(chunk);
-                            await videoSource.add(encodedPacket, meta);
+                            await videoSource!.add(encodedPacket, meta);
                         },
                         error: (error) => {
                             encoderError = error;
@@ -1462,18 +1481,23 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     return enc;
                 };
 
-                const support = await VideoEncoder.isConfigSupported({ codec, width, height, bitrate });
-                if (!support.supported) {
-                    throw new Error(`Unsupported video configuration (${codecChoice} @ ${width}x${height})`);
-                }
+                if (!isSequence) {
+                    const support = await VideoEncoder.isConfigSupported({ codec, width, height, bitrate });
+                    if (!support.supported) {
+                        throw new Error(`Unsupported video configuration (${codecChoice} @ ${width}x${height})`);
+                    }
 
-                encoder = createEncoder();
+                    encoder = createEncoder();
+                }
 
                 // Start offscreen rendering
                 scene.camera.startOffscreenMode(width, height);
                 scene.camera.renderOverlays = false;
                 scene.gizmoLayer.enabled = false;
-                scene.camera.clearPass.setClearColor(events.invoke('bgClr'));
+                if (!isSequence) {
+                    // 视频：铺背景色（帧序列相反 —— 保持清屏透明，输出带 alpha 的帧）
+                    scene.camera.clearPass.setClearColor(events.invoke('bgClr'));
+                }
                 scene.lockedRenderMode = true;
 
                 // CPU-side buffer
@@ -1556,6 +1580,39 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data, immediate: true });
 
                     flipReadbackIfNeeded(data, width, height, scene.app.graphicsDevice);
+
+                    if (isSequence) {
+                        // 帧序列：直接编 PNG（RGBA，保留 alpha）并写到目录。
+                        // 三条落盘通路与 render.keyframes 完全一致：
+                        //   ① Electron 原生目录对话框给的路径 → splatroomFS.writeFile（不经 File System Access 权限）
+                        //   ② File System Access 的目录句柄
+                        //   ③ 兜底：逐个下载
+                        const bytes = await encodePng(data, width, height);
+                        const base = sanitizeFilename(events.invoke('render.baseFilename') as string);
+                        const fname = `${base}_turntable_${mode}_${String(frameIndex).padStart(4, '0')}.png`;
+                        if (typeof baseDir === 'string') {
+                            const fsApi = window.splatroomFS;
+                            if (fsApi?.writeFile) {
+                                await fsApi.writeFile(baseDir, fname, bytes);
+                            } else {
+                                downloadFile(bytes, fname, 'image/png');
+                            }
+                        } else if (baseDir) {
+                            const fileHandle = await (baseDir as FileSystemDirectoryHandle).getFileHandle(fname, { create: true });
+                            const writable = await fileHandle.createWritable();
+                            await writable.write(bytes);
+                            await writable.close();
+                        } else {
+                            downloadFile(bytes, fname, 'image/png');
+                        }
+                        // 进度
+                        events.fire('progressUpdate', {
+                            text: i18n.t('panel.render.rendering', { ellipsis: true }),
+                            progress: 100 * (frameIndex + 1) / totalFrames
+                        });
+                        return;
+                    }
+
                     // Create VideoFrame and encode
                     const videoFrame = new VideoFrame(
                         new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
@@ -1587,10 +1644,12 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     await encodeFrame(i);
                 }
 
-                // Finalize
-                await encoder.flush();
+                // Finalize（帧序列没有编码器/容器/音轨要收尾）
+                if (encoder) {
+                    await encoder.flush();
+                }
                 if (closeAudio) await closeAudio.done;
-                await output.finalize();
+                if (output) await output.finalize();
 
                 scene.camera.setAzimElev(startAzim, startElev, 0);
                 scene.camera.setFocalPoint(savedFocalPoint, 0);
@@ -1601,7 +1660,7 @@ const registerRenderEvents = (scene: Scene, events: Events) => {
                     return `${sanitizeFilename(base)}_turntable_${mode}.${fileExtension}`;
                 };
 
-                if (!fileStream && !cancelled) {
+                if (!fileStream && !cancelled && !isSequence) {
                     downloadFile((target as BufferTarget).buffer, filename());
                 }
 

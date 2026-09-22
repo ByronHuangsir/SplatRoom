@@ -280,6 +280,7 @@
     "popup.render-video.projection.equirectangular": "360° 등장방형",
     "popup.render-video.resolution": "해상도",
     "popup.render-video.format": "형식",
+    "popup.render-video.format-png": "PNG 프레임 시퀀스(투명 배경)",
     "popup.render-video.codec": "코덱",
     "popup.render-video.frame-rate": "프레임 속도",
     "popup.render-video.bitrate": "비트 전송률",

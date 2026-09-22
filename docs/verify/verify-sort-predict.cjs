@@ -163,14 +163,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const checks = [];
     const check = (name, pass, detail) => checks.push({ name, pass, detail });
 
-    // 旋转并采集派发证据（最多 3 次、每次 4 s；拿不到也要留下可诊断的细节）
+    // 旋转并采集派发证据（最多 4 次、每次 4 s；拿不到也要留下可诊断的细节）
+    //
+    // 采样窗从 500 ms 提到 1500 ms（2026-09-22，第十五轮）：派发间隔本来就 150~200 ms，
+    // 但**全量批量里连跑到这一套时**（前面 40 多套刚跑完）首次派发可能晚一点，
+    // 500 ms 的窗口偶尔读到 posts=0 ⇒ 判据 `maxOff < 1.0` 变成"maxOff = null"的假红
+    // （诊断里 lastDispatchAge≈500 ms 却一个都没记到，就是这个原因）。
+    // 判据本身没动 —— 只是把"有没有采到样"这件事做稳。
     const collectRotating = async (ms = 4000) => {
         let posts = [];
         let diag = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
             await page.evaluate(() => { window.__posts.length = 0; });
             const spin = rotate(ms);
-            await sleep(500);
+            await sleep(1500);
             posts = await page.evaluate(() => window.__posts.slice());
             diag = await page.evaluate(() => window.__diag());
             await spin;

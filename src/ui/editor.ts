@@ -484,6 +484,32 @@ class EditorUI {
 
             if (settings) {
                 try {
+                    // 帧序列（PNG）：没有容器文件，只要一个**目录**（与关键帧导出同一套目录选择逻辑）
+                    if (settings.format === 'png') {
+                        let baseDir: FileSystemDirectoryHandle | string | undefined;
+                        const fsApi = window.splatroomFS;
+                        if (fsApi?.pickDirectory) {
+                            try {
+                                const dirPath = await fsApi.pickDirectory();
+                                baseDir = typeof dirPath === 'string' && dirPath.length > 0 ? dirPath : undefined;
+                            } catch (e) {
+                                // 落到 File System Access
+                            }
+                        }
+                        if (!baseDir && typeof window !== 'undefined' && 'showDirectoryPicker' in window) {
+                            try {
+                                baseDir = await (window as any).showDirectoryPicker({
+                                    id: 'SplatRoomTurntableSequenceExport',
+                                    mode: 'readwrite'
+                                });
+                            } catch (e) {
+                                // 用户取消 ⇒ 交给 render.turntableVideo 的下载兜底
+                            }
+                        }
+                        await events.invoke('render.turntableVideo', settings, undefined, baseDir);
+                        return;
+                    }
+
                     let fileExtension: string;
                     let filePickerTypes: FilePickerAcceptType[];
 

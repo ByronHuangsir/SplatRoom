@@ -17,7 +17,7 @@ export type TurntableVideoSettings = {
     width: number;
     height: number;
     bitrate: number;
-    format: 'mp4' | 'webm' | 'mov' | 'mkv';
+    format: 'mp4' | 'webm' | 'mov' | 'mkv' | 'png';
     codec: 'h264' | 'h265' | 'vp9' | 'av1';
     mode: 'orbit' | 'look';   // 环绕（绕焦点） / 环视（原地转头）
 };
@@ -80,7 +80,11 @@ class TurntableVideoDialog extends Container {
                 { v: 'mp4', t: 'MP4' },
                 { v: 'webm', t: 'WebM' },
                 { v: 'mov', t: 'MOV' },
-                { v: 'mkv', t: 'MKV' }
+                { v: 'mkv', t: 'MKV' },
+                // 帧序列：逐帧 PNG（RGBA，带 alpha=透明背景）写到目录，
+                // 交给外部 ffmpeg 合成透明 MOV（本机 Chromium 编不了带 alpha 的视频，
+                // 见 docs/旋转台透明背景视频-探索结论-2026-09-22.md）
+                { v: 'png', t: i18n.t('popup.render-video.format-png') }
             ]
         });
         const formatRow = new Container({ class: 'row' });
@@ -133,6 +137,11 @@ class TurntableVideoDialog extends Container {
             } else {
                 codecSelect.value = 'h264';
             }
+
+            // 帧序列没有编码器/码率概念：把这两行藏起来，避免误导
+            const isSequence = format === 'png';
+            codecRow.hidden = isSequence;
+            bitrateRow.hidden = isSequence;
         });
 
         // framerate
@@ -446,7 +455,7 @@ class TurntableVideoDialog extends Container {
                         width,
                         height,
                         bitrate,
-                        format: formatSelect.value as 'mp4' | 'webm' | 'mov' | 'mkv',
+                        format: formatSelect.value as 'mp4' | 'webm' | 'mov' | 'mkv' | 'png',
                         codec: codecSelect.value as 'h264' | 'h265' | 'vp9' | 'av1',
                         mode
                     };

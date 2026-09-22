@@ -280,6 +280,7 @@
     "popup.render-video.projection.equirectangular": "360° 等距柱状",
     "popup.render-video.resolution": "分辨率",
     "popup.render-video.format": "格式",
+    "popup.render-video.format-png": "PNG 帧序列（透明背景）",
     "popup.render-video.codec": "编解码器",
     "popup.render-video.frame-rate": "帧率",
     "popup.render-video.bitrate": "比特率",

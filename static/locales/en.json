@@ -280,6 +280,7 @@
     "popup.render-video.projection.equirectangular": "360° Equirectangular",
     "popup.render-video.resolution": "Resolution",
     "popup.render-video.format": "Format",
+    "popup.render-video.format-png": "PNG frame sequence (transparent)",
     "popup.render-video.codec": "Codec",
     "popup.render-video.frame-rate": "Frame Rate",
     "popup.render-video.bitrate": "Bitrate",

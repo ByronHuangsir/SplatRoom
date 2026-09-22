@@ -895,6 +895,18 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     PCUI 把 `'a b'` 当成**一个** token ⇒ `DOMTokenList.add` 抛 `InvalidCharacterError`，
     页面在启动阶段就死掉；探针看到的现象只是 `window.scene` 等不到（超时），很容易误判成"服务挂了"。
     多类名必须 `container.class.add('b')`。诊断手法：`_tmp/boot-diag.cjs` 那种"抓 pageerror"的小脚本。
+56. **旋转台导出的两种形态共用一条函数，切换时容易漏掉"视频专属"的东西**（2026-09-22 新增，第十五轮）：
+    `render.turntableVideo` 现在有 `format === 'png'`（帧序列）分支 —— 建 muxer / `EncodedVideoPacketSource` /
+    音轨 / `VideoEncoder.isConfigSupported` / `setClearColor(bgClr)` / 最后 `downloadFile(buffer)`
+    **全都是视频专属**，帧序列必须逐项跳过（清屏色尤其要注意：**不铺**才能得到 alpha=0 的背景）。
+    规矩：改这类"共用函数 + 模式分支"时，配套加一条**反向保护**断言（本轮加的是
+    "同一路径的 WebM/VP9 导出仍能出片"），否则很容易在改 A 的时候悄悄废掉 B。
+57. **无头浏览器里验证"导出到磁盘"要把下载重定向**（2026-09-22 新增）：
+    应用在没有目录句柄时走 `downloadFile()`（blob + `<a download>`），无头模式下默认不落盘。
+    用 CDP 指一个临时目录即可拿到真文件再验：
+    `const c = await page.createCDPSession(); await c.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true })`
+    —— `verify-turntable-png.cjs` 就是这么验 PNG 帧序列的（数量 / IHDR / **alpha 统计** / 帧间差异）。
+    验证"透明"最省事的办法：把 PNG 读回页面（base64 → `Image` → canvas）再统计 `getImageData` 的 alpha。
 
 ---
 

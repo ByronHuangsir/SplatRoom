@@ -280,6 +280,7 @@
     "popup.render-video.projection.equirectangular": "Эквиректангулярная 360°",
     "popup.render-video.resolution": "Разрешение",
     "popup.render-video.format": "Формат",
+    "popup.render-video.format-png": "Последовательность PNG (прозрачный фон)",
     "popup.render-video.codec": "Кодек",
     "popup.render-video.frame-rate": "Частота кадров",
     "popup.render-video.bitrate": "Битрейт",
