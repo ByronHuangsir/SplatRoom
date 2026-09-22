@@ -907,6 +907,20 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     `const c = await page.createCDPSession(); await c.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir, eventsEnabled: true })`
     —— `verify-turntable-png.cjs` 就是这么验 PNG 帧序列的（数量 / IHDR / **alpha 统计** / 帧间差异）。
     验证"透明"最省事的办法：把 PNG 读回页面（base64 → `Image` → canvas）再统计 `getImageData` 的 alpha。
+58. **load worker 的历史与"把它重新打开"的正确姿势**（2026-09-22 新增，第十五轮的交接笔记，
+    第 ③ 件要做的事）：现状是**默认关闭**（`window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true` 才用），
+    两个硬伤：
+    ① `src/io/load-worker-client.ts` 的 `readFileBytes()` 把**整个文件读进一个 ArrayBuffer** 再 transfer
+    ⇒ 对 1.35 亿/7.02 GB 的模型根本不可能（先撞 HANDOFF 43 那条 ~2 GB 的墙，再回退主线程）；
+    ② 历史上默认打开过一次又回滚：**同一次框选手势会选满整模**（2000 点夹具实测 2000 vs 213），
+    列字节完全相同但行为不同 ⇒ 会静默破坏选择。**重开之前必须先定位这条差异**（怀疑点：
+    morton 重排 `skipReorder` 在各路径上的取值不同，或 `GSplatData` 重建后 `splatState`/选择映射
+    与列顺序的对应关系变了）。
+    **正确姿势**（下一步）：别传字节 —— `File`/`Blob` 是**可结构化克隆**的，
+    直接把 `File` + 设备事实 + 预算 postMessage 给 worker，让它自己做
+    `slice().arrayBuffer()` 分块读 + `makeStridedSource()` 抽稀 + `materializeToDataTable()`，
+    再把**列缓冲（Transferable ArrayBuffer）**传回主线程组装 `GSplatData`。
+    这样 1.35 亿那档的 57 秒主线程占用就能搬走，而且峰值内存还少一份整文件副本。
 
 ---
 
