@@ -1,40 +1,49 @@
-// Load worker A/B: does the import actually go through the worker, and does it help?
+// Load worker A/B: does the import go through the worker by default, does it produce the SAME
+// model, and does it actually shorten the main-thread freeze?
 //
-// Context (docs/audit/00-总结.md 高危 7): the load worker was explicitly opt-in via
-// `window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`, which nothing in the repo ever set, so
-// decode + morton sort + row reorder all ran on the main thread (the ~15s freeze on a 13M import).
-// The flag is now ON by default (`__SPLATROOM_NO_LOAD_WORKER__ = true` disables it).
+// Context: the load worker was opt-in via `window.__SPLATROOM_ENABLE_LOAD_WORKER__ === true`
+// (nothing set it, so decode + morton sort + row reorder ran on the main thread — the ~15 s freeze
+// on a 13M import). 第十六轮把它改成"默认打开、传 `Blob`、worker 自己分块读 + 抽稀 + 物化 + 重排"。
 //
-// This suite loads the same model twice in the same browser, once with the worker on and once
-// with it off, and asserts:
-//   1. the worker path reports worker dispatches > 0 (the old probe's false green: it compared
-//      the loader against itself and never checked that the worker ran)
-//   2. the disabled path reports 0 (proves the counter is a real signal, not always > 0)
-//   3. both paths produce the same gaussian count
-//   4. (informational) the import wall time of each path
+// 这条套件跑两次导入，只差一个开关：
+//   A. **默认**（不设任何开关）—— 必须走 worker；
+//   B. `window.__SPLATROOM_ENABLE_LOAD_WORKER__ = false` —— 回退主线程，必须一次 worker 都不用。
+// 断言：
+//   1. A 的 `__LW_WORKER_RESULTS__` > 0、B 的 = 0（只断言一边是抓不住"两次都走 worker"的假绿的，
+//      见 HANDOFF 坑 60：开关是模块顶层常量，必须用 evaluateOnNewDocument 注入）；
+//   2. 高斯数一致；
+//   3. `x/y/z/opacity/state/rot_0` 的 FNV 校验和逐列一致（行重排错位会保持数量却打乱每个属性）；
+//   4. **导入姿态一致且有限**（旋转是真 Quat：结构化克隆会丢原型 ⇒ NaN，HANDOFF 坑 59）；
+//   5. 主线程最长阻塞（20 ms 心跳 gap）：夹具够大（> 2M 高斯）时要求 worker 那边**至少减半**，
+//      小夹具上只打印数字（2000 点夹具本来就没有可测量的阻塞）。
 //
 // usage: node docs/verify/verify-load-worker.cjs [url] [model]
-//   the model must exist under dist/ — for the T1 fixture copy _tmp\scan.ply to dist\scan.ply
-//   and DELETE it afterwards (otherwise it ends up inside the packaged asar).
+//   model 默认 test-model.ply（`dist/` 下已有）。要量真实收益用 20M 夹具：
+//   node docs/verify/verify-load-worker.cjs "<url>" test-20m-fill.ply
 const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
 
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
-const MODEL = process.argv[3] || 'scan.ply';
+const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const modelPath = path.join(__dirname, '..', '..', 'dist', MODEL);
 
-const runOnce = async (browser, enableWorker) => {
+/** @param {'default'|'off'} mode */
+const runOnce = async (browser, mode) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     const errors = [];
     page.on('pageerror', e => errors.push('pageerror: ' + String(e).slice(0, 200)));
-    if (enableWorker) {
-        await page.evaluateOnNewDocument(() => { window.__SPLATROOM_ENABLE_LOAD_WORKER__ = true; });
-    }
+    // 必须在页面脚本执行前注入：`USE_LOAD_WORKER` 是模块顶层常量
+    await page.evaluateOnNewDocument((m) => {
+        window.__LW_WORKER_RESULTS__ = 0;
+        if (m === 'off') {
+            window.__SPLATROOM_ENABLE_LOAD_WORKER__ = false;
+        }
+    }, mode);
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
     await page.waitForFunction('!!window.scene', { timeout: 90000, polling: 500 });
     await sleep(1500);
@@ -91,36 +100,17 @@ const runOnce = async (browser, enableWorker) => {
             for (const name of ['x', 'y', 'z', 'opacity', 'state', 'rot_0']) {
                 res.checksums[name] = checksum(splats[0].splatData.getProp(name));
             }
+            // 导入姿态：结构化克隆会丢掉 `Quat`/`Vec3` 的原型，`setLocalRotation()` 按
+            // `instanceof Quat` 分流 ⇒ 普通对象会写出 NaN 旋转矩阵（HANDOFF 坑 59）。
+            const r = splats[0].entity.getLocalRotation();
+            const s = splats[0].entity.getLocalScale();
+            res.transform = {
+                rotProto: Object.getPrototypeOf(r) === Object.prototype ? 'plain' : 'class',
+                rot: [r.x, r.y, r.z, r.w].map(v => Number.isFinite(v) ? +v.toFixed(6) : String(v)),
+                scale: [s.x, s.y, s.z].map(v => Number.isFinite(v) ? +v.toFixed(6) : String(v))
+            };
         }
         res.workerResults = window.__LW_WORKER_RESULTS__ || 0;
-
-        // Behaviour, not just bytes: run the same rect gesture + depth push and count the selection.
-        // This is what caught the flag flip: with the worker enabled the same gesture selected the
-        // whole model (2000) instead of the ~10% inside the box (213 on the fixture).
-        const count = () => {
-            const st = splats[0].splatData.getProp('state');
-            let n = 0;
-            for (let i = 0; i < st.length; i++) if (st[i] & 1) n++;
-            return n;
-        };
-        if (splats[0] && splats[0].splatData.numSplats <= 200000) {
-            scene.events.fire('selection', splats[0]);
-            await sleep2(600);
-            scene.events.fire('camera.focus');
-            await sleep2(3000);
-            scene.events.fire('tool.rectSelection');
-            await sleep2(500);
-            scene.events.fire('selection.resetRange');
-            await sleep2(300);
-            await scene.events.invoke('select.rect', 'set', { start: { x: 0.35, y: 0.35 }, end: { x: 0.65, y: 0.65 } });
-            await sleep2(1200);
-            res.gestureSelected = count();
-            scene.events.fire('selection.resetRange');
-            await sleep2(400);
-            scene.events.fire('selection.setDepthRange', { far: 99 });
-            await sleep2(1500);
-            res.pushSelected = count();
-        }
         return res;
     }, MODEL);
     await page.close();
@@ -134,20 +124,22 @@ const runOnce = async (browser, enableWorker) => {
         return;
     }
     const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
-    const off = await runOnce(browser, false);
-    const on = await runOnce(browser, true);
+    const on = await runOnce(browser, 'default');
+    const off = await runOnce(browser, 'off');
     await browser.close();
 
+    // 夹具够大才要求"阻塞至少减半"：2000 点夹具上两次的 gap 都接近心跳粒度，比不出东西。
+    const big = (on.numSplats || 0) > 2000000;
     const checks = [
         {
-            name: 'default path does NOT use the worker (the flag stays opt-in)',
-            pass: off.workerResults === 0,
-            detail: `workerResults=${off.workerResults}, import ${off.importMs}ms`
+            name: 'the default path really uses the worker (no flag needed)',
+            pass: on.workerResults > 0,
+            detail: `默认 workerResults=${on.workerResults}（必须 >0）, import ${on.importMs}ms`
         },
         {
-            name: 'with the flag on, the worker really runs (fixed 假绿: workerResults > 0)',
-            pass: on.workerResults > 0,
-            detail: `workerResults=${on.workerResults}, import ${on.importMs}ms`
+            name: 'the opt-out flag really disables it (so the counter above is a real signal)',
+            pass: off.workerResults === 0,
+            detail: `__SPLATROOM_ENABLE_LOAD_WORKER__=false 时 workerResults=${off.workerResults}（必须 =0）, import ${off.importMs}ms`
         },
         {
             name: 'both paths load the same gaussian count',
@@ -160,14 +152,18 @@ const runOnce = async (browser, enableWorker) => {
             detail: JSON.stringify({ worker: on.checksums, main: off.checksums })
         },
         {
-            name: 'worker path blocks the main thread for less time (informational)',
-            pass: true,
-            detail: `max main-thread gap: worker ${on.maxGapMs}ms (${on.blocksOver100ms} blocks >100ms) vs default ${off.maxGapMs}ms (${off.blocksOver100ms} blocks >100ms); wall ${on.importMs} vs ${off.importMs}ms`
+            name: 'the import transform is a real Quat on both paths (no NaN rotation)',
+            pass: !!on.transform && !!off.transform &&
+                JSON.stringify(on.transform) === JSON.stringify(off.transform) &&
+                on.transform.rotProto === 'class',
+            detail: `worker ${JSON.stringify(on.transform)} vs main ${JSON.stringify(off.transform)}`
         },
         {
-            name: 'WHY THE FLAG IS STILL OFF (informational): the worker path changes selection results',
-            pass: true,
-            detail: `rect gesture selects: default ${off.gestureSelected} vs worker ${on.gestureSelected} (of ${off.numSplats}); depth push then: default ${off.pushSelected} vs worker ${on.pushSelected}. Byte-identical columns but different selection => the worker output differs in something the column hashes do not capture.`
+            name: big
+                ? 'the worker at least halves the longest main-thread block (>2M splats fixture)'
+                : 'longest main-thread block (informational: fixture too small to compare)',
+            pass: big ? on.maxGapMs * 2 <= off.maxGapMs : true,
+            detail: `worker ${on.maxGapMs}ms（>100ms 阻塞 ${on.blocksOver100ms} 次）vs main ${off.maxGapMs}ms（${off.blocksOver100ms} 次）; wall ${on.importMs} vs ${off.importMs}ms; numSplats=${on.numSplats}`
         },
         {
             name: 'no page errors on either path',
@@ -176,6 +172,6 @@ const runOnce = async (browser, enableWorker) => {
         }
     ];
 
-    console.log(JSON.stringify({ model: MODEL, worker: on, mainThread: off, checks, failed: checks.filter(c => !c.pass).length }, null, 2));
+    console.log(JSON.stringify({ model: MODEL, worker: on, mainThread: off, checks, failed: checks.filter(c => !c.pass).length }, null, 1));
     if (checks.some(c => !c.pass)) process.exitCode = 1;
-})().catch(e => { console.log(JSON.stringify({ fatal: String(e).slice(0, 500) })); process.exitCode = 1; });
+})().catch(e => { console.log(JSON.stringify({ fatal: String(e && e.stack || e).slice(0, 500) })); process.exitCode = 1; });

@@ -344,8 +344,15 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
                 mainFile.filename;
 
             // sanitize (giant-grey-splat popup) only for user-initiated imports,
-            // never for internal round-trips or animation frames
-            const model = await scene.assetLoader.load(filename, fileSystem, animationFrame, undefined, !animationFrame);
+            // never for internal round-trips or animation frames.
+            //
+            // `mainFile.contents` 是原始 `File`：第十五轮起交给导入 worker（结构化克隆，
+            // 不复制字节），让"分块读 + 抽稀 + 物化 + morton 重排"整段离开主线程 ——
+            // 1.35 亿高斯那档原本要占主线程 50+ 秒（见 HANDOFF 58）。
+            const model = await scene.assetLoader.load(
+                filename, fileSystem, animationFrame, undefined, !animationFrame,
+                mainFile.contents ?? null
+            );
             if (!model) {
                 // user cancelled the load
                 return null;

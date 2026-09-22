@@ -35,7 +35,7 @@ class AssetLoader {
      * (duplicate / separate / paste / document load / animation frames) would
      * otherwise pop the dialog repeatedly and interrupt editing.
      */
-    async load(filename: string, fileSystem: ReadFileSystem, animationFrame?: boolean, skipReorder?: boolean, sanitize = false) {
+    async load(filename: string, fileSystem: ReadFileSystem, animationFrame?: boolean, skipReorder?: boolean, sanitize = false, contents?: Blob | null) {
         if (!animationFrame) {
             this.events.fire('startSpinner');
         }
@@ -101,7 +101,7 @@ class AssetLoader {
 
             let result = await loadGSplatDataAsync(
                 filename, fileSystem, skipReorder || animationFrame,
-                animationFrame ? undefined : pickLod, loadOptions
+                animationFrame ? undefined : pickLod, loadOptions, contents
             );
             if (!result) {
                 // user cancelled LOD selection

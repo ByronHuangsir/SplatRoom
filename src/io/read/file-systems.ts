@@ -141,6 +141,7 @@ class MappedReadFileSystem implements ReadFileSystem {
 }
 
 export {
+    BlobReadFileSystem,
     BlobReadSource,
     MappedReadFileSystem
 };

@@ -1,18 +1,25 @@
 /**
  * Main-thread client for the load worker.
  *
- * `loadGSplatDataAsync` is a drop-in replacement for `loadGSplatData`: it reads
- * the raw file bytes on the main thread (I/O only, async) and hands them to the
- * worker, which performs the CPU-bound decode + morton reorder. The result is
- * reconstructed into a PlayCanvas GSplatData on the main thread.
+ * `loadGSplatDataAsync` is a drop-in replacement for `loadGSplatData`: it hands the
+ * worker the raw `File`/`Blob` (structured clone — no byte copy) and the worker does
+ * the I/O, decode, optional strided decimation and morton reorder itself, posting the
+ * column buffers back as Transferables. The result is reconstructed into a PlayCanvas
+ * GSplatData here.
  *
- * Any failure (worker unavailable, transfer error, decode error) transparently
- * falls back to the original synchronous `loadGSplatData` so the feature is
- * safe to enable by default — set `window.__SPLATROOM_NO_LOAD_WORKER__ = true`
- * to disable for A/B testing / debugging.
+ * 两个必须记住的边界规矩：
+ *   • **类实例过不了结构化克隆**（只留自有属性、丢原型）。`Transform` 里的 `Quat`
+ *     到这里是普通对象，而 `setLocalRotation()` 用 `instanceof Quat` 分流 —— 必须
+ *     用 `rehydrateTransform()` 还原，否则旋转矩阵整块 NaN（模型不显示、体工具
+ *     体积 NaN、框选为空）。第十六轮的实测回归见 docs/verify/verify-import-worker.cjs。
+ *   • 任意失败（worker 不可用 / 传输失败 / 解码失败）都透明回退到同步的
+ *     `loadGSplatData`，所以默认打开是安全的；逃生开关是
+ *     `window.__SPLATROOM_ENABLE_LOAD_WORKER__ = false`（**模块顶层读一次**，
+ *     要在页面脚本执行前设好，探针用 `page.evaluateOnNewDocument`）。
  */
 
-import { getInputFormat } from '@playcanvas/splat-transform';
+import { getInputFormat, Transform } from '@playcanvas/splat-transform';
+import { Quat, Vec3 } from 'playcanvas';
 
 import {
     loadGSplatData,
@@ -31,25 +38,50 @@ type Pending = {
     resolve: (r: LoadResult | null) => void;
     reject: (e: any) => void;
     pickLod?: (lodCounts: readonly number[]) => Promise<number | null>;
+    /** 抽稀进度回调（worker 里逐块上报） */
+    onProgress?: (fraction: number) => void;
+    /** 导入预算判定回调（worker 在抽稀前上报，与主线程路径同一个形状） */
+    onBudget?: (budget: any) => void;
     filename: string;
     fileSystem: any;
     skipReorder?: boolean;
 };
 
-// Feature flag — still opt-in, and that is now a MEASURED requirement rather than an oversight.
+/**
+ * 把 worker 传回来的 `Transform` 还原成真正的类实例。
+ *
+ * **这是必须的，不是洁癖**：结构化克隆只保留自有属性、丢掉原型，所以到主线程的
+ * `transform.rotation` 是个普通对象。而 `GraphNode.setLocalRotation()` 用
+ * `x instanceof Quat` 分流，非 Quat 会走 `localRotation.set(obj, undefined, undefined, undefined)`
+ * ⇒ 四元数变成 (obj, NaN, NaN, NaN) ⇒ 旋转矩阵整块 NaN（第十六轮实测：模型不显示、
+ * 体工具体积 NaN、框选一个点都选不到）。`Vec3` 同理（`copy()` 会丢）。
+ */
+const rehydrateTransform = (t: any): any => {
+    if (!t) {
+        return t;
+    }
+    const tr = t.translation;
+    const ro = t.rotation;
+    if (!ro) {
+        return t;
+    }
+    return new Transform(
+        new Vec3(tr?.x ?? 0, tr?.y ?? 0, tr?.z ?? 0),
+        new Quat(ro.x ?? 0, ro.y ?? 0, ro.z ?? 0, ro.w ?? 1),
+        typeof t.scale === 'number' ? t.scale : 1
+    );
+};
+
+// Feature flag. 第十五轮起**默认开启**（worker 收 `Blob` 自己分块读，
+// 不再要主线程整块读文件），逃生开关：`window.__SPLATROOM_ENABLE_LOAD_WORKER__ = false`。
 //
-// docs/audit/00-总结.md 高危 7 pointed out that nothing in the repo sets
-// `__SPLATROOM_ENABLE_LOAD_WORKER__`, so the worker never ran and every import decoded on the main
-// thread (the ~15s freeze on 13M). Flipping it to "on by default" was tried and **reverted**:
-// with the worker enabled, the very same rect gesture selects the whole model instead of the ~10%
-// inside the box (measured on the 2000-splat fixture: 2000 selected vs 213, and a depth push then
-// yields 0 instead of 202), and the loaded columns are byte-identical either way — so the worker
-// output differs in something the column hashes do not capture (centres/sorting metadata). Until
-// that is found, enabling it silently corrupts selections, which is far worse than a slow import.
-// The 假绿 in lw-probe is fixed (it now requires workerResults > 0), so the worker can be
-// validated properly before it is ever turned on for real.
+// 历史（HANDOFF 58）：旧版默认开启过一次又回滚 —— 同一次框选手势会选满整模
+// （2000 点夹具实测 2000 vs 213，列字节完全相同）。那一版把整文件读成一个
+// ArrayBuffer 再 transfer，几 GB 的模型根本走不通；本版改成传 Blob 之后
+// **必须重新验证**：`docs/verify/verify-import-worker.cjs` 会逐列比对
+// "worker 导入 vs 主线程导入"的字节，并各做一次框选手势比较选中集。
 const USE_LOAD_WORKER =
-    (typeof window !== 'undefined') && (window as any).__SPLATROOM_ENABLE_LOAD_WORKER__ === true;
+    (typeof window !== 'undefined') && (window as any).__SPLATROOM_ENABLE_LOAD_WORKER__ !== false;
 
 const ctorMap: Record<string, any> = {
     Int8Array,
@@ -119,7 +151,11 @@ const handleWorkerMessage = async (e: MessageEvent) => {
 
     if (msg.type === 'result') {
         pending.delete(msg.id);
+        // 两个探针可读的全局：走了几次 worker、worker 原样传回来的 transform
+        // （套件用后者证明"普通对象 → 还原成 Quat"这一步真的发生了）
         (window as any).__LW_WORKER_RESULTS__ = ((window as any).__LW_WORKER_RESULTS__ || 0) + 1;
+        (window as any).__LW_LAST_TRANSFORM__ = msg.transform;
+        const transform = rehydrateTransform(msg.transform);
         const dataTable = {
             columns: msg.columns.map((c: any) => ({
                 name: c.name,
@@ -127,10 +163,22 @@ const handleWorkerMessage = async (e: MessageEvent) => {
                 data: new ctorMap[c.ctorName](c.data)
             })),
             numRows: msg.numRows,
-            transform: msg.transform
+            transform
         };
         const gsplatData = dataTableToGSplatData(dataTable as any);
-        p.resolve({ gsplatData, transform: msg.transform });
+        p.resolve({ gsplatData, transform, reduction: msg.reduction ?? undefined });
+        return;
+    }
+
+    if (msg.type === 'budget') {
+        // worker 在开始抽稀前报上来的导入预算判定（与主线程路径同一个 `importBudget()`）：
+        // UI 靠它把 spinner 换成带文字的进度条、并记下 `splat.importReduction`
+        p.onBudget?.(msg.budget);
+        return;
+    }
+
+    if (msg.type === 'progress') {
+        p.onProgress?.(msg.fraction);
         return;
     }
 
@@ -148,29 +196,30 @@ const handleWorkerMessage = async (e: MessageEvent) => {
 };
 
 /**
- * Async, worker-backed replacement for `loadGSplatData`. Same signature.
+ * Async, worker-backed replacement for `loadGSplatData`.
  * Returns null when the user cancels LOD selection (multi-LOD files).
  *
- * `options` (设备预算 / 抽稀进度) 只在**主线程降级路径**里生效：worker 分支会把整个文件
- * 读成一个 ArrayBuffer 再 transfer，几 GB 的模型根本走不通（见文件顶部说明），
- * 所以这里不把预算传给 worker，保持原行为。
+ * 第十五轮起 worker 分支**不再整块读文件**：直接把 `Blob`/`File` 结构化克隆给 worker
+ * （不复制字节），worker 自己按 4 MB 分块读 + 抽稀 + 物化 + morton 重排，再把列缓冲
+ * Transferable 传回来。所以 `options`（设备预算 / 抽稀进度）**两条路径都生效**，
+ * 结果也逐步一致（列与顺序逐字节相同）。
+ *
+ * @param filename - 文件名（worker 内用它做 FS 的键，也是格式判定的依据）
+ * @param fileSystem - 主线程的 ReadFileSystem（**只在回退路径用**）
+ * @param skipReorder - 跳过 morton 重排（已在序的文件 / 动画帧）
+ * @param pickLod - 多 LOD 文件时询问主线程选哪一层
+ * @param options - 导入预算 / 抽稀进度 / 强制全量
+ * @param blob - 单文件导入时的原始 `File`/`Blob`；给了才走 worker（多文件容器没有它）
  */
 export const loadGSplatDataAsync = async (
     filename: string,
     fileSystem: any,
     skipReorder?: boolean,
     pickLod?: (lodCounts: readonly number[]) => Promise<number | null>,
-    options?: LoadOptions
+    options?: LoadOptions,
+    blob?: Blob | null
 ): Promise<LoadResult | null> => {
-    if (!USE_LOAD_WORKER) {
-        return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
-    }
-
-    let buffer: ArrayBuffer;
-    try {
-        buffer = await readFileBytes(fileSystem, filename);
-    } catch {
-        // Reading the bytes failed (unsupported FS, etc.) — fall back.
+    if (!USE_LOAD_WORKER || !blob) {
         return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
     }
 
@@ -178,15 +227,24 @@ export const loadGSplatDataAsync = async (
 
     const result = new Promise<LoadResult | null>((resolve, reject) => {
         const id = ++msgId;
-        pending.set(id, { resolve, reject, pickLod, filename, fileSystem, skipReorder });
+        pending.set(id, { resolve, reject, pickLod, filename, fileSystem, skipReorder, onProgress: options?.onDecimateProgress, onBudget: options?.onBudget });
         try {
-            getWorker().postMessage(
-                { id, type: 'load', filename, buffer, inputFormat, skipReorder },
-                [buffer]
-            );
+            // `Blob` 是结构化克隆的（引用传递，不复制字节）；transfer 列表为空。
+            // 手动预算覆盖在主线程读页面全局，随消息带进 worker（worker 读不到页面全局）。
+            getWorker().postMessage({
+                id,
+                type: 'load',
+                filename,
+                inputFormat,
+                skipReorder,
+                blob,
+                deviceFacts: options?.deviceFacts ?? null,
+                useBudget: !options?.ignoreBudget,
+                budgetOverride: Number((window as any).__SPLATROOM_IMPORT_BUDGET__ ?? 0) || 0
+            });
         } catch {
             pending.delete(id);
-            // Transfer failed — fall back to main-thread decode.
+            // 克隆失败 —— 回退主线程解码
             loadGSplatData(filename, fileSystem, skipReorder, pickLod, options)
             .then(resolve)
             .catch(reject);
@@ -202,7 +260,7 @@ export const loadGSplatDataAsync = async (
                 pending.delete(id);
                 entry.reject(new Error('load worker timed out'));
             }
-        }, 120000);
+        }, 600000);
     });
 
     try {
