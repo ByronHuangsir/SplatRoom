@@ -40,7 +40,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const checks = [];
     const check = (name, pass, detail) => checks.push({ name, pass, detail });
 
-    // ---- 1. 位置：必须在坐标轴正下方、同一右边缘 ----
     const layout = await page.evaluate(() => {
         const cube = document.querySelector('#view-cube-container');
         const qc = document.querySelector('#view-quick-controls');
@@ -65,6 +64,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             quickBox: [Math.round(q.left), Math.round(q.top), Math.round(q.right), Math.round(q.bottom)],
             rightToolbar: boxOf('#right-toolbar'),
             bottomToolbar: boxOf('#bottom-toolbar'),
+            menuBar: boxOf('#menu-bar'),
+            scenePanel: boxOf('#scene-panel'),
             gap: Math.round(q.top - c.bottom),
             rightGap: Math.round(c.right - q.right),
             pointerEvents: cs.pointerEvents,
@@ -77,25 +78,58 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             sliderBarWidth: bar ? Math.round(bar.getBoundingClientRect().width) : null
         };
     });
-    check('the quick controls sit directly under the view-cube axis (same right edge, small gap)',
-        layout.cube && layout.quick && layout.gap >= 0 && layout.gap <= 16 && Math.abs(layout.rightGap) <= 16,
-        layout.quick
-            ? `坐标轴 [${layout.cubeBox.join(', ')}]；快捷控件 [${layout.quickBox.join(', ')}] ⇒ 间隙 ${layout.gap}px、` +
-              `右边缘差 ${layout.rightGap}px（pointer-events=${layout.pointerEvents}，可点击）`
-            : `找不到元素（cube=${layout.cube} quick=${layout.quick}）`);
+    // ---- 1. 位置：必须在**菜单栏右侧**、贴着菜单栏右边缘、且不压其他东西 ----
+    const menuGap = layout.menuBar && layout.quickBox ? Math.round(layout.quickBox[0] - layout.menuBar[2]) : null;
+    check('the quick controls sit to the right of the menu bar (the requested position)',
+        layout.menuBar && layout.quickBox && menuGap >= 2 && menuGap <= 24 &&
+        layout.quickBox[0] > layout.menuBar[2] && layout.quickBox[1] >= 0 && layout.quickBox[1] <= 40,
+        layout.quickBox
+            ? `菜单栏 [${layout.menuBar.join(', ')}]；快捷控件 [${layout.quickBox.join(', ')}] ⇒ 水平间距 ${menuGap}px、` +
+              `顶边 ${layout.quickBox[1]}px（pointer-events=${layout.pointerEvents}，可点击）`
+            : `找不到元素（menu=${layout.menuBar} quick=${layout.quickBox}）`);
 
-    // 用户报的 bug：这块盖住了右侧工具栏最上面两个按钮 ⇒ 工具栏已下移，这里必须**不再重叠**
+    // 位置靠 JS 量菜单栏（不写死 left），所以**菜单栏变宽时面板必须跟着走**：
+    // 直接把菜单项文字拉长（等价于切到德语/日语那种更长的菜单栏），看面板是否重新贴上去。
+    const stress = await page.evaluate(async () => {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const box = (el) => {
+            const r = el.getBoundingClientRect();
+            return [Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)];
+        };
+        const bar = document.querySelector('#menu-bar');
+        const qc = document.querySelector('#view-quick-controls');
+        const options = Array.from(bar.querySelectorAll('.menu-option'));
+        const saved = options.map(o => o.textContent);
+        options.forEach((o) => { o.textContent = `${o.textContent}WWW`; });
+        await sleep(600);
+        const wide = { bar: box(bar), quick: box(qc) };
+        options.forEach((o, i) => { o.textContent = saved[i]; });
+        await sleep(600);
+        const back = { bar: box(bar), quick: box(qc) };
+        return { wide, back, optionCount: options.length };
+    });
+    const wideGap = Math.round(stress.wide.quick[0] - stress.wide.bar[2]);
+    check('it follows the menu bar when the menu gets wider (left is measured, not hard-coded)',
+        stress.wide.quick[0] > stress.wide.bar[2] && wideGap >= 2 && wideGap <= 24 &&
+        Math.abs(stress.back.quick[0] - stress.back.bar[2] - 12) <= 4,
+        `菜单项文字加长后：菜单栏 [${stress.wide.bar.join(', ')}] → 面板 [${stress.wide.quick.join(', ')}]（间距 ${wideGap}px）；` +
+        `还原后：菜单栏右 ${stress.back.bar[2]} → 面板左 ${stress.back.quick[0]}（${stress.optionCount} 个菜单项）`);
+
+    // 上一轮报的 bug：这块盖住了右侧工具栏最上面两个按钮；现在换到左上角，
+    // 右侧工具栏/底部工具栏/菜单栏/场景面板**一个都不能压**。
     const overlaps = (a, b) => !!a && !!b &&
         !(a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
     const hitRight = overlaps(layout.quickBox, layout.rightToolbar);
     const hitBottom = overlaps(layout.quickBox, layout.bottomToolbar);
-    check('the panel does not cover the right toolbar (the reported bug) nor the bottom toolbar',
-        layout.quickBox && !hitRight && !hitBottom,
+    const hitMenu = overlaps(layout.quickBox, layout.menuBar);
+    const hitScene = overlaps(layout.quickBox, layout.scenePanel);
+    check('the panel covers neither toolbar, nor the menu bar, nor the scene panel',
+        layout.quickBox && !hitRight && !hitBottom && !hitMenu && !hitScene,
         `快捷控件 [${(layout.quickBox ?? []).join(', ')}]；右侧工具栏 [${(layout.rightToolbar ?? []).join(', ')}]` +
-        ` ⇒ 重叠=${hitRight}；底部工具栏 [${(layout.bottomToolbar ?? []).join(', ')}] ⇒ 重叠=${hitBottom}`);
+        ` ⇒ 重叠=${hitRight}；底部工具栏 [${(layout.bottomToolbar ?? []).join(', ')}] ⇒ ${hitBottom}；` +
+        `菜单栏 [${(layout.menuBar ?? []).join(', ')}] ⇒ ${hitMenu}；场景面板 [${(layout.scenePanel ?? []).join(', ')}] ⇒ ${hitScene}`);
 
-    // 用户报的第二个 bug（2026-09-22）：调色面板打开后被这块挡住 ⇒ 用户选定"面板打开时把我藏起来"
-    //（另一方案是挪到面板列左边，但那就不在坐标轴正下方了，用户没选）。
+    // 用户报的第二个 bug（2026-09-22）：调色面板打开后被这块挡住；换到左上角后两者可以同屏共存。
     const panels = await page.evaluate(async () => {
         const scene = window.scene;
         const boxOf = (sel) => {
@@ -119,14 +153,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         out.restored = boxOf('#view-quick-controls');
         return out;
     });
-    const hiddenWhileColor = panels.color.quick === null;
-    const hiddenWhileSettings = panels.settings.quick === null;
-    check('it hides itself while a right-side panel (color / settings) is open, and comes back after (the second reported bug)',
+    const hitColorNow = overlaps(panels.color.quick, panels.color.panel);
+    const hitSettingsNow = overlaps(panels.settings.quick, panels.settings.panel);
+    check('a right-side panel can be open at the same time without overlapping it (the second reported bug, now solved by moving to the top-left)',
         panels.color.opened && panels.settings.opened && !!panels.color.panel && !!panels.settings.panel &&
-        hiddenWhileColor && hiddenWhileSettings && !!panels.restored,
-        `调色面板 [${(panels.color.panel ?? []).join(', ')}] 打开时快捷面板 = ${panels.color.quick ? '[' + panels.color.quick.join(', ') + ']' : '隐藏'}；` +
-        `设置面板 [${(panels.settings.panel ?? []).join(', ')}] 打开时 = ${panels.settings.quick ? '[' + panels.settings.quick.join(', ') + ']' : '隐藏'}；` +
-        `两个都关掉后回到 [${(panels.restored ?? []).join(', ')}]`);
+        !!panels.color.quick && !!panels.settings.quick && !hitColorNow && !hitSettingsNow,
+        `调色面板 [${(panels.color.panel ?? []).join(', ')}] 打开时快捷面板 [${(panels.color.quick ?? []).join(', ')}] ⇒ 重叠=${hitColorNow}；` +
+        `设置面板 [${(panels.settings.panel ?? []).join(', ')}] vs [${(panels.settings.quick ?? []).join(', ')}] ⇒ 重叠=${hitSettingsNow}；` +
+        `两个都关掉后 [${(panels.restored ?? []).join(', ')}]`);
 
     // 用户要求：视野角**不要输入框**、滑轨**要长**
     check('the FOV control has no input box and its track is long',
@@ -134,9 +168,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         `数字输入框 display=none 且宽 ${layout.sliderInputWidth}px；滑轨容器 ${layout.sliderTrackWidth}px、` +
         `bar ${layout.sliderBarWidth}px（改前轨道只有 18px）`);
 
-    check('it carries exactly the three requested controls (1 slider + 2 toggles)',
-        layout.slider === true && layout.toggles === 2 && (layout.rows ?? []).length === 3,
-        `行=${JSON.stringify(layout.rows)}；滑杆=${layout.slider}；开关=${layout.toggles}`);
+    // 用户第二轮要求：**两行** —— 第一行视野角，第二行「显示」+ 边界开关 + 网格开关
+    const rowTexts = layout.rows ?? [];
+    const row2 = rowTexts[1] ?? '';
+    check('it is laid out in two rows as requested (FOV on row 1; 显示 + 边界开关 + 网格开关 on row 2)',
+        rowTexts.length === 2 && layout.slider === true && layout.toggles === 2 &&
+        rowTexts[0].includes('视野角') && row2.includes('显示') && row2.includes('边界') && row2.includes('网格'),
+        `行=${JSON.stringify(rowTexts)}；滑杆=${layout.slider}；开关=${layout.toggles}`);
 
     // ---- 2. 功能：三个控件都要改到真实状态 ----
     const wired = await page.evaluate(async () => {
@@ -253,7 +291,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         try {
             await page.screenshot({
                 path: SHOT,
-                clip: { x: 900, y: 0, width: 380, height: 320 }
+                clip: { x: 0, y: 0, width: 780, height: 200 }   // 左上角：菜单栏 + 快捷面板
             });
         } catch (e) {
             errors.push('screenshot: ' + String(e).slice(0, 120));

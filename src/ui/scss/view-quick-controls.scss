@@ -1,13 +1,16 @@
 @use 'colors.scss' as *;
 
-// 视图快捷控件：右上角坐标轴（#view-cube-container，140×140、right:0/top:0）**正下方**。
-// 用户要求（2026-09-22）：视野角 / 显示边界 / 显示网格这三个高频开关要随手够到。
-// 坐标轴本身 pointer-events: none（只是指示器），这块要能点，所以自己开 pointer-events。
+// 视图快捷控件：**左上角、菜单栏右侧**（用户第二轮要求，2026-09-22）。
+// 之前贴在右上角坐标轴正下方，但那样会压住右侧调色面板；挪走后那两个面板的冲突自然消失。
+// `left` 由 JS 量 `#menu-bar` 的右边缘后写入（菜单栏宽度随语言/折叠变化，写死会错位），
+// 这里的 456px 只是**首帧兜底**（中文菜单栏 24→444 ⇒ 456 = 444 + 12 间距）。
+// 面板本身要能点（menu-bar 是兄弟节点），所以自己开 pointer-events。
 #view-quick-controls {
     position: absolute;
-    right: 12px;
-    top: 146px;                     // 坐标轴 140px 高 ⇒ 留 6px 间隙
-    width: 204px;
+    left: 456px;                    // 首帧兜底，随后由 JS 覆盖
+    right: auto;
+    top: 20px;                      // 菜单栏 24→74，面板两行约 66px 高 ⇒ 视觉上与之对齐
+    width: 236px;
     padding: 8px;
     display: flex;
     flex-direction: column;
@@ -24,14 +27,19 @@
         display: flex;
     }
 
-    // 右侧面板（调色 / 设置）打开时**隐藏**：它们是 `#canvas-container` 的兄弟节点，
-    // 用 `:has()` 就能表达"只要那两种面板可见，我就让位"，不需要监听可见性事件、也不留第二份状态。
-    // 用户反馈（2026-09-22）：先报"调色面板被这块挡住"，在"挪到左边 / 直接隐藏"之间**选了隐藏**
-    //（挪过去就不在坐标轴下方了，两者只能选一个）。
-    // 特异性 (3,1,0) > 上面的 `#view-quick-controls:not(.pcui-hidden)` (1,1,0) ⇒ 不依赖书写顺序。
-    @at-root #canvas-container:has(#color-panel:not(.pcui-hidden)) #view-quick-controls,
-    #canvas-container:has(#settings-panel:not(.pcui-hidden)) #view-quick-controls {
-        display: none;
+    // 右侧面板的冲突已经不存在（面板在左上角，右侧面板在右侧）⇒ 不需要 :has() 让位/隐藏规则。
+
+    // 第二行：「显示」+ 边界开关 + 网格开关（三个控件压成一行，共用一次「显示」前缀）
+    .vqc-display-row {
+        gap: 10px;
+
+        .vqc-group {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 4px;
+            flex: 0 0 auto;         // 标签和开关永远成组，不拆行
+        }
     }
 
     // 视野角：**单行**（用户要求"滑轨直接跟在视角那三个字后面，不要另起一行"）——

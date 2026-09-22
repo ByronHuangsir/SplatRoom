@@ -4,17 +4,27 @@ import { i18n } from './localization';
 import { Events } from '../core/events';
 
 /**
- * 视图快捷控件（右上角坐标轴正下方）—— 用户要求（2026-09-22）：
+ * 视图快捷控件（**左上角、菜单栏右侧**）—— 用户要求（2026-09-22）：
  * **视野角 / 显示边界 / 显示网格** 三个高频开关要能随手够到，
  * 设置面板里原有的那三份**保持不动**（这里只是同一套事件的第二个入口）。
+ *
+ * 版式（用户第二轮要求）：
+ *   • 第一行：「视野角 75°」+ 滑轨（滑轨紧跟在标签后面，不另起一行）
+ *   • 第二行：「显示」+「边界」开关 +「网格」开关（原来两行开关压成一行，
+ *     共用一次「显示」前缀 ⇒ 面板从 3 行 96px 降到 2 行）
+ *
+ * 位置：**菜单栏右侧**。菜单栏宽度随语言/折叠状态变化（中文 444px、德语更长），
+ * 所以 `left` **不写死**——量 `#menu-bar` 的右边缘 + 12px 间距，并用 `ResizeObserver`
+ * 跟着菜单栏变化重算（语言切换、菜单折叠都会触发）。
  *
  * 事件接线（与 `camera-panel` / `settings-panel` 完全一致，所以两边永远同步）：
  *   • 视野角：`camera.setFov` / 监听 `camera.fov`，初值 `invoke('camera.fov')`
  *   • 显示边界：`camera.setBound` / 监听 `camera.bound`
  *   • 显示网格：`grid.setVisible` / 监听 `grid.visible`，初值 `invoke('grid.visible')`
  *
- * 文案**复用设置面板已有的键**（`panel.camera.fov` / `panel.settings.show-bounding-box` /
- * `panel.settings.show-grid`）⇒ 不动 9 个语言包。
+ * 文案：视野角与开关沿用设置面板已有的键；「显示 / 边界 / 网格」三个短标签是
+ * `panel.settings.show` / `panel.settings.short-bounding-box` / `panel.settings.short-grid`
+ * （9 个语言包都补齐了——各语言「显示」前缀的位置不同，所以不能靠裁字符串生成）。
  */
 class ViewQuickControls extends Container {
     constructor(events: Events, args = {}) {
@@ -25,16 +35,7 @@ class ViewQuickControls extends Container {
 
         super(args);
 
-        const row = (labelKey: string) => {
-            const container = new Container({ class: 'vqc-row' });
-            const label = new Label({ class: 'vqc-label' });
-            i18n.bindText(label, labelKey);
-            container.append(label);
-            this.append(container);
-            return container;
-        };
-
-        // ---- 视野角 ----
+        // ---- 视野角（第一行）----
         // 用户反馈（2026-09-22）：① 不要输入框；② 滑轨要长；③ **滑轨就跟在"视野角"三个字后面，
         // 不要另起一行**（另起一行太占纵向空间）。
         // 所以：单行 =「视野角 75°」+ 滑轨（PCUI 自带的数字输入框在 CSS 里藏掉，
@@ -63,21 +64,28 @@ class ViewQuickControls extends Container {
             events.fire('camera.setFov', value);
         });
 
-        // ---- 显示边界 ----
-        const boundRow = row('panel.settings.show-bounding-box');
-        const boundToggle = new BooleanInput({ type: 'toggle', class: 'vqc-toggle', value: true });
-        boundRow.append(boundToggle);
-        boundToggle.on('change', () => {
-            events.fire('camera.setBound', boundToggle.value);
-        });
+        // ---- 第二行：「显示」+ 边界开关 + 网格开关 ----
+        const displayRow = new Container({ class: ['vqc-row', 'vqc-display-row'] });
+        const showLabel = new Label({ class: 'vqc-label' });
+        i18n.bindText(showLabel, 'panel.settings.show');
+        displayRow.append(showLabel);
 
-        // ---- 显示网格 ----
-        const gridRow = row('panel.settings.show-grid');
-        const gridToggle = new BooleanInput({ type: 'toggle', class: 'vqc-toggle', value: true });
-        gridRow.append(gridToggle);
-        gridToggle.on('change', () => {
-            events.fire('grid.setVisible', gridToggle.value);
-        });
+        // 每个开关 = 短标签 + 拨动开关，成组不换行（窄屏也不会把标签和开关拆开）
+        const group = (labelKey: string, onChange: (value: boolean) => void) => {
+            const wrap = new Container({ class: 'vqc-group' });
+            const label = new Label({ class: ['vqc-label', 'vqc-group-label'] });
+            i18n.bindText(label, labelKey);
+            const toggle = new BooleanInput({ type: 'toggle', class: 'vqc-toggle', value: true });
+            toggle.on('change', () => onChange(toggle.value));
+            wrap.append(label);
+            wrap.append(toggle);
+            displayRow.append(wrap);
+            return toggle;
+        };
+
+        const boundToggle = group('panel.settings.short-bounding-box', value => events.fire('camera.setBound', value));
+        const gridToggle = group('panel.settings.short-grid', value => events.fire('grid.setVisible', value));
+        this.append(displayRow);
 
         // 与设置面板 / 快捷键 / 文档加载保持同步（哪边改都更新这边，不回灌）
         try {
@@ -113,6 +121,36 @@ class ViewQuickControls extends Container {
                 boundToggle.value = visible;
             }
         });
+
+        // ---- 贴菜单栏右侧（宽度随语言/折叠变化 ⇒ 测量 + 跟随）----
+        // 注意：构造时菜单栏可能还没进 DOM（实测过：那会儿挂 ResizeObserver 挂了个 null，
+        // 面板就只会停在首帧位置、菜单栏变宽也不跟 —— 回归里那条"菜单栏变宽后必须跟着走"
+        // 正是这么抓出来的）。所以测量和挂观察器都放进 rAF 之后，并且在里面惰性挂载。
+        const MENU_GAP = 12;
+        let observer: ResizeObserver | null = null;
+        const stickToMenuBar = () => {
+            const bar = document.querySelector('#menu-bar') as HTMLElement | null;
+            if (!bar) {
+                return;
+            }
+            const rect = bar.getBoundingClientRect();
+            if (rect.width > 0) {
+                this.dom.style.left = `${Math.round(rect.right + MENU_GAP)}px`;
+            }
+            if (!observer && typeof ResizeObserver !== 'undefined') {
+                observer = new ResizeObserver(() => stickToMenuBar());
+                observer.observe(bar);
+                this.on('destroy', () => {
+                    try {
+                        observer?.disconnect();
+                    } catch {
+                        // 忽略
+                    }
+                });
+            }
+        };
+        requestAnimationFrame(stickToMenuBar);
+        window.addEventListener('resize', stickToMenuBar);
     }
 }
 
