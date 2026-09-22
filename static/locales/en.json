@@ -199,6 +199,7 @@
   "popup.load-options-header": "Load Options",
   "popup.lod-select-message": "This file contains multiple levels of detail. Select which one to load.",
   "popup.import-simplify-progress": "Simplifying this model for your device…",
+  "popup.import-gpu-prepare": "Uploading {{count}} gaussians to the GPU (a large model takes several seconds; the window will not respond during this step)…",
   "popup.lod-select-splats": "splats",
   "popup.lod-upload-note": "Note: you can upload scenes with LODs directly at",
   "popup.giant-splat-header": "Abnormal Splats Detected",

@@ -199,6 +199,7 @@
   "popup.load-options-header": "Ladeoptionen",
   "popup.lod-select-message": "Diese Datei enthält mehrere Detailstufen. Wählen Sie aus, welche geladen werden soll.",
   "popup.import-simplify-progress": "Modell wird für dieses Gerät vereinfacht…",
+  "popup.import-gpu-prepare": "{{count}} Gaussians werden auf die GPU geladen (bei großen Modellen dauert das einige Sekunden; das Fenster reagiert währenddessen nicht)…",
   "popup.lod-select-splats": "Splats",
   "popup.lod-upload-note": "Hinweis: Szenen mit LODs können direkt hochgeladen werden unter",
   "popup.giant-splat-header": "Abnormale Splats erkannt",

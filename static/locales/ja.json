@@ -199,6 +199,7 @@
   "popup.load-options-header": "読み込みオプション",
   "popup.lod-select-message": "このファイルには複数の詳細レベルが含まれています。読み込むレベルを選択してください。",
   "popup.import-simplify-progress": "このデバイス向けにモデルを間引いています…",
+  "popup.import-gpu-prepare": "{{count}} 個のガウシアンを GPU に転送しています（大きなモデルでは数秒かかり、その間ウィンドウは応答しません）…",
   "popup.lod-select-splats": "スプラット",
   "popup.lod-upload-note": "注: LODを含むシーンは次の場所から直接アップロードできます:",
   "popup.giant-splat-header": "異常なスプラットを検出",

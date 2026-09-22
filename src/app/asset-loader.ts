@@ -9,6 +9,12 @@ import { Splat } from '../splat/splat';
 import { detectGiantGreySplats, removeGiantGreySplats, shrinkGiantGreySplats } from '../splat/splat-sanitize';
 import { i18n } from '../ui/localization';
 
+/**
+ * 低于这个高斯数就不弹"正在传给显卡"的进度条（打包只要几十毫秒，弹一下反而闪）。
+ * 500 万是 tier A/B 的分界线（`src/core/splat-tier.ts`）。
+ */
+const IMPORT_GPU_NOTICE_MIN = 5_000_000;
+
 // handles loading gsplat assets using splat-transform
 class AssetLoader {
     app: AppBase;
@@ -27,6 +33,36 @@ class AssetLoader {
         this.app.assets.add(asset);
         asset.resource = new GSplatResource(this.app.graphicsDevice, gsplatData);
         return asset;
+    }
+
+    /**
+     * 让浏览器**真的画一帧**再进那段会阻塞主线程的同步循环（第十九轮）。
+     *
+     * 两帧是必要的：第一帧只是被排进队列，第二帧才保证上一次的 DOM/文本改动已经 paint 过。
+     * 250 ms 兜底：窗口不可见时 rAF 可能永远不来（浏览器里隐藏标签页就是如此），
+     * 没有兜底会把导入挂死 —— 这比"少显示一句话"严重得多。
+     */
+    private paintBeforeBlocking(): Promise<void> {
+        const scene = this.events.invoke('scene') as { forceRender?: boolean } | undefined;
+        if (scene) {
+            scene.forceRender = true;   // 按需渲染模式下，不请求就不会出帧
+        }
+        return new Promise<void>((resolve) => {
+            let settled = false;
+            const done = () => {
+                if (!settled) {
+                    settled = true;
+                    resolve();
+                }
+            };
+            const raf = (globalThis as any).requestAnimationFrame as undefined | ((cb: () => void) => number);
+            if (typeof raf !== 'function') {
+                setTimeout(done, 0);
+                return;
+            }
+            setTimeout(done, 250);
+            raf(() => raf(done));
+        });
     }
 
     /**
@@ -153,6 +189,19 @@ class AssetLoader {
                     }
                     // 'keep' (or dismiss) leaves the data untouched.
                 }
+            }
+
+            // 第十九轮：`createGSplatAsset()` 里那一步是**引擎把列式数据打成 GPU 纹理**的同步逐行循环
+            // （6000 万行实测 11.3 s，归因见 `docs/导入残留阻塞-归因与LOD时机-2026-09-22.md`），
+            // 期间主线程完全不动 —— 用户看到的是一动不动的 spinner，不知道还要等多久。
+            // 这里先把"正在传给显卡"画到屏幕上（两帧确保真的 paint 过，带 250 ms 兜底防止
+            // 窗口不可见时 rAF 不来把导入挂死），再进那段循环。
+            const numSplats = result.gsplatData?.numSplats ?? 0;
+            if (numSplats >= IMPORT_GPU_NOTICE_MIN) {
+                this.events.fire('stopSpinner');
+                this.events.fire('progressStart', i18n.t('popup.import-gpu-prepare', { count: numSplats.toLocaleString() }), false);
+                progressShown = true;
+                await this.paintBeforeBlocking();
             }
 
             const asset = this.createGSplatAsset(result.gsplatData, filename);

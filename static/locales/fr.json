@@ -199,6 +199,7 @@
   "popup.load-options-header": "Options de chargement",
   "popup.lod-select-message": "Ce fichier contient plusieurs niveaux de détail. Sélectionnez celui à charger.",
   "popup.import-simplify-progress": "Simplification du modèle pour cet appareil…",
+  "popup.import-gpu-prepare": "Envoi de {{count}} gaussiens vers le GPU (plusieurs secondes pour un grand modèle ; la fenêtre ne répondra pas pendant cette étape)…",
   "popup.lod-select-splats": "splats",
   "popup.lod-upload-note": "Remarque : vous pouvez télécharger des scènes avec LOD directement sur",
   "popup.giant-splat-header": "Splats anormaux détectés",

@@ -47,6 +47,19 @@ const runArm = async (browser, worker) => {
     // 用来判断阻塞落在 `import` resolve 之前（解码/物化）还是之后（GPU 上传 / 首次排序）。
     await page.evaluate(() => {
         window.__stall = { samples: 0, maxGap: 0, over1s: 0, over5s: 0, gaps: [], windows: [], longTaskMs: 0, longTaskCount: 0, longTaskMax: 0 };
+        // 进度条文案的时间戳：用来验证"传给显卡"那句提示是在阻塞**之前**就发出去的
+        // （第十九轮：`asset-loader` 在进引擎打包前先 fire progressStart + 等两帧）
+        window.__progressEvents = [];
+        try {
+            window.scene.events.on('progressStart', (text) => {
+                window.__progressEvents.push({ kind: 'start', text: String(text).slice(0, 120), at: Math.round(performance.now() - (window.__importT0 ?? 0)) });
+            });
+            window.scene.events.on('progressUpdate', (v) => {
+                window.__progressEvents.push({ kind: 'update', text: String(v?.text ?? '').slice(0, 120), at: Math.round(performance.now() - (window.__importT0 ?? 0)) });
+            });
+        } catch (e) {
+            window.__progressEvents.push({ kind: 'error', text: String(e).slice(0, 80), at: 0 });
+        }
         let last = performance.now();
         window.__stallTimer = setInterval(() => {
             const now = performance.now();
@@ -164,6 +177,7 @@ const runArm = async (browser, worker) => {
                 phase: window.__importResolvedAt === undefined ? 'unknown' :
                     (w.start < window.__importResolvedAt ? 'before-resolve' : 'after-resolve')
             })).sort((a, b) => b.gap - a.gap).slice(0, 6),
+            progressEvents: (window.__progressEvents || []).slice(-10),
             longTaskCount: s.longTaskCount,
             longTaskMs: Math.round(s.longTaskMs),
             longTaskMax: Math.round(s.longTaskMax),
@@ -192,7 +206,8 @@ const runArm = async (browser, worker) => {
         importMs: r.importMs, importResolvedAt: r.importResolvedAt,
         maxBlockMs: r.maxBlockMs, over1s: r.over1s, over5s: r.over5s,
         longTaskMs: r.longTaskMs, longTaskCount: r.longTaskCount, longTaskMax: r.longTaskMax,
-        numSplats: r.numSplats, reduction: r.importReduction, workerResults: r.workerResults
+        numSplats: r.numSplats, reduction: r.importReduction, workerResults: r.workerResults,
+        progressEvents: r.progressEvents, blockWindows: r.blockWindows
     });
     console.log(JSON.stringify({
         url: URL, model: MODEL, chunkMb: CHUNK_MB, budget: BUDGET || null,

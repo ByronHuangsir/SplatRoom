@@ -199,6 +199,7 @@
   "popup.load-options-header": "加载选项",
   "popup.lod-select-message": "此文件包含多个细节层级。请选择要加载的层级。",
   "popup.import-simplify-progress": "正在按本机图形能力抽稀导入…",
+  "popup.import-gpu-prepare": "正在把 {{count}} 个高斯传给显卡（大模型这一步要几秒，期间窗口会无响应）…",
   "popup.lod-select-splats": "高斯点",
   "popup.lod-upload-note": "注意：包含多个细节层级的场景可直接上传至",
   "popup.giant-splat-header": "检测到异常高斯",
