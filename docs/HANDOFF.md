@@ -1002,6 +1002,27 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     （`.ssproj`）③ `src/splat/group-renderer.ts` 的中性分支（合并渲染必须显式中性）。
     第十七轮把①②合并到同一对转换器（`curveSetToDoc/curveSetFromDoc`，`src/core/color-curves.ts`）后，
     两边不可能再漂移。
+65. **别自己 spawn 一个 Electron 探针宿主；要"最小化窗口"就用打包版 + `ShowWindow`**
+    （2026-09-22 新增，第十八轮，踩了两次）：做"后台导出"实验时需要把窗口最小化，
+    而 Electron 不支持 CDP 的 `Browser.setWindowBounds`（那是 Chrome 浏览器级的），只能由主进程
+    `win.minimize()` 做。于是试了"探针自己写一个 Electron 主进程 + `spawn(electronPath, [hostDir, ...])`"
+    —— **在本机静默退出**（stdout/stderr 全空，退出码 -1），而同一份代码直接
+    `& electron.exe <dir>` 前台跑却完全正常（试过仓库内、仓库外、临时目录三种位置，都一样）。
+    结论：**这条路别走**。可行的做法是 `docs/probes/background-export.cjs`：
+    起**打包版** `SplatRoom.exe --remote-debugging-port=9222 --remote-allow-origins=*`，
+    再用 PowerShell + user32 `ShowWindow(hwnd, SW_MINIMIZE=6)` 最小化它的主窗口（`SW_RESTORE=9` 恢复）。
+    两个附带的坑：① 内联 `-Command` 里写 C# 特写会被 PowerShell 吃掉引号
+    （`[DllImport(\"user32.dll\")]` → `[DllImport(user32.dll)]` ⇒ 编译失败）⇒ 写成临时 `.ps1` 再 `-File`；
+    ② **进程名要两种都试** —— 打包版叫 `SplatRoom`、开发版叫 `electron`，只找前者会在 attach 模式下
+    得到 `no-window`，**窗口压根没最小化，"修复后也正常"就是假绿**。探针必须把
+    `ok:<进程名>:<pid>` 打出来当证据。
+66. **`page.evaluate(async () => { await 导出 })` 会一直等到导出结束**（2026-09-22 新增，第十八轮）：
+    "后台导出"探针第一版这么写，于是"最小化期间"的采样全部落在导出**之后**，
+    得出"7 秒就完成、根本没卡"的假结论（真值是 60.4 s，其中最小化的 40 秒一帧没写）。
+    规矩：要观察"进行中的过程"就**不能 await** —— 把 promise 挂到 `window.__exportPromise` 上，
+    让 `page.evaluate` 立刻返回，再靠采样看进度。
+    （顺带：数进度别包 `OffscreenCanvas.prototype.convertToBlob` —— PNG 编码不走那条路；
+    数 `URL.createObjectURL` 调用更稳，`downloadFile` 每帧一次。)
 
 ---
 
@@ -1053,6 +1074,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `huge-io-wall.cjs` | **大文件 I/O 三层的墙（第十二轮）**：① 纯流式读完（`res.body.getReader()`，不进单块）② 页内单块分配上限（真写一遍）③ `Range` 切不同大小做 `arrayBuffer()`。结论：流式 7.5 GB 没问题；单块约 2 GB 就失败 |
 | `alloc-wall.cjs` | **干净的"单块 `ArrayBuffer` 上限"口径（第十二轮，不做任何 I/O）**：`new ArrayBuffer(n)` + 每 4 MB 真写一次。实测 1.5 GB 可以 / **2 GB 失败** |
 | `import-stall.cjs` | **"导入把主线程占了多久"的口径（第十六轮）**：同一台机器、同一个 7 GB 文件，导入 worker **关 / 开**各跑一次；页内 25 ms 心跳量 `maxBlockMs` / >1 s / >5 s 次数 + `PerformanceObserver('longtask')` 总时长与条数，另给 `importMs`（含分块 fetch）。开关用 `page.evaluateOnNewDocument` 注入（见坑 60）。用法：`node docs/probes/import-stall.cjs "<url>" huge-134m.ply 256 0 900` |
+| `export-8k.cjs` | **8K 导出四个墙的口径（第十八轮）**：设备 `maxTextureSize` / WebGPU limits、`VideoEncoder.isConfigSupported` 矩阵（**用应用真实的 codec 字符串**）+ **真编一帧**（`configure/encode/flush`）、`render.offscreen` 在各尺寸的耗时/字节/亮像素、`render.image` 的 PNG 字节与耗时。用法：`node docs/probes/export-8k.cjs "<url>" test-model.ply` |
+| `background-export.cjs` | **"后台导出"能不能跑的口径（第十八轮）**：起**打包版** → 8K 旋转台 PNG 序列 → `ShowWindow(SW_MINIMIZE)` 最小化主窗口 → 每 4 s 采样 `document.hidden` / rAF 频率 / 定时器间隔 / 已写出帧数；`attach` 模式可连一个已经在跑的应用（用 `npx electron .` 起开发版测 `electron-main.js` 的改动，不必重新打包）。用法：`node docs/probes/background-export.cjs release\SplatRoom-3.23.25.exe 12 7680 4320`；坑见 HANDOFF 65/66 |
 | `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg。**第 2 个参数可追加 Chromium 开关（逗号分隔）**，用来验证"alpha 编码是不是被特性开关挡住"——实测 `WebCodecsAlphaEncoder` / `AlphaEncoderWrapper` / `WebCodecsAlphaEncoding` 三个候选都不放行 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |

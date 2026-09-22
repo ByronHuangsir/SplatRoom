@@ -3808,6 +3808,44 @@ webgl2 同 49 套 `TOTAL FAILED: 0`（各 1 个既有 `UNPARSED`：`verify-merge
 
 **产物**：`release\SplatRoom-3.23.24.exe`；提交见 `docs/进度存档.md` 第十七轮。
 
+### 6.63 第十八轮：导出上限抬到 8K（三条路径）+ 后台导出可行性（原来不行 → 三行配置后可以）
+
+完整记录见 **`docs/8K导出与后台导出-实现与实测-2026-09-22.md`**。
+
+**先量四个墙**（`docs/probes/export-8k.cjs`，用**应用真实的 codec 字符串**问 + 真编一帧）：
+
+| 墙 | 实测 |
+| --- | --- |
+| 设备 | `maxTextureSize = 16384` ⇒ 8K 放得下 |
+| 编码器 | H.264 4K ✓ / **8K 被拒**；H.265 本机全分辨率被拒；VP9/AV1 到 **8192×4096 都能真编**；**8192×8192 全不行** |
+| 内存 | 8K RGBA 一帧回读 **126.6 MiB**（4K 31.6 MiB） |
+| 出片 | 8K PNG 一帧 **18.62 MB / 1.7 s**；360-8K 4.68 MB / 3.9 s |
+
+**落地**：新增 `src/core/export-resolution.ts`（预设表 + 设备过滤 + 静态编码器上限 + `bitrateFor()`）与
+`src/ui/export-codec-support.ts`（运行时 `isConfigSupported` 按尺寸/帧率筛编码器，带缓存）。
+三个对话框共用：图像/视频的 360 档从 4096 抬到 **8192×4096**，**旋转台从 4K 抬到 8K**；
+**选 8K 会自动换成 WebM + VP9/AV1 并给一行说明**（9 语言各 697 键）。
+**修掉一个真 bug**：老 `bbpfFactors` 表没有 8K 这一档 ⇒ `bitrate = NaN` ⇒ 编码器配置直接失败
+（现在 8K = 124.4 Mbps，1080p/4K 数字与历史完全一致）。
+
+**实测**（`docs/verify/verify-export-8k.cjs`，8 项）：8K PNG 7680×4320 / 18.62 MiB / 1712 ms；
+360-8K PNG 8192×4096 / 3904 ms；旋转台 8K PNG 序列 **12/12 帧、222.5 MiB、22.3 s**；
+8K WebM/VP9 真文件 1.57 MiB；对话框提供 8K 且自动切换编码器。
+
+**后台导出**（`docs/probes/background-export.cjs`，打包版 + `ShowWindow` 最小化）：
+
+| 量 | 最小化中（默认 `backgroundThrottling: true`） | 最小化中（`false` + 两条开关） |
+| --- | --- | --- |
+| `document.hidden` | true | false |
+| rAF | **停摆** | 继续（负载限制的 6–17 Hz） |
+| 定时器间隔 | **最大 1442 ms（≈1 Hz）** | 正常 |
+| 40 秒写出的帧 | **0 帧**（停在 2/12） | **3→6→8→9→12，最小化期间跑完** |
+| 导出总耗时 | **60.4 s**（恢复窗口才跑完） | **24.9 s** |
+
+⇒ **可以后台导出**（前提是关掉 Electron 的后台节流）；但"关掉应用还能继续导"不在本轮范围。
+
+**产物**：`release\SplatRoom-3.23.25.exe`；提交见 `docs/进度存档.md` 第十八轮。
+
 
 
 
