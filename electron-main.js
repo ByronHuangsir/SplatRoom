@@ -2,6 +2,8 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron')
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+// 启动页（Photoshop 风格）：独立小窗口 + 真实阶段的进度 + 左下角加载信息
+const splash = require('./electron-splash');
 // Detect dev mode
 const isDev = !fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
 
@@ -295,27 +297,27 @@ async function createWindow() {
         mainWindow.webContents.openDevTools();
         mainWindow.once('ready-to-show', () => { mainWindow.show(); });
     } else {
-        // Show a loading screen while server starts
-        mainWindow.loadURL(`data:text/html;charset=utf-8,
-            <html>
-                <body style="background:#1a1a2e;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;">
-                    <div style="text-align:center;color:#e0e0e0;">
-                        <h2 style="margin:0 0 16px 0;font-weight:300;">SplatRoom</h2>
-                        <p style="margin:0;color:#888;">Loading...</p>
-                    </div>
-                </body>
-            </html>
-        `);
-
+        // 启动页（Photoshop 风格）已经单独显示，主窗口保持隐藏到内容就绪，
+        // 不再需要一个"Loading..."的占位页面（那是旧做法，会闪一下白底）
+        splash.progress(30, '正在启动本地服务…');
         server.listen(port, '127.0.0.1', () => {
             console.log(`SplatRoom server running at http://127.0.0.1:${port}`);
+            splash.progress(55, '正在加载界面…');
             mainWindow.loadURL(withGpu(`http://127.0.0.1:${port}`));
+            splash.armFallback(() => mainWindow);
         });
     }
 
-    // Show window when content is ready (prevents white flash)
+    // 启动页与主窗口的两次 ready-to-show 都走同一个收尾（幂等）
+    mainWindow.webContents.once('did-finish-load', () => {
+        splash.progress(78, '正在初始化引擎…');
+    });
+    splash.registerStartupReady(() => mainWindow);
+
+    // Show window when content is ready (prevents white flash)。
+    // 同时收掉启动页（`finish` 内部会在主窗口还不可见时把它显示出来，幂等）。
     mainWindow.once('ready-to-show', () => {
-        mainWindow.show();
+        splash.finish(mainWindow);
     });
 
     // Handle window close: if there are unsaved changes, ask the user what to do.
@@ -402,6 +404,11 @@ if (!gotTheLock) {
 }
 
 app.whenReady().then(() => {
+    // **先把启动页显示出来**（在静态服务与渲染器之前）—— 用户双击后立刻有东西看，
+    // 进度与左下角的加载信息由 `electron-splash.js` 按真实阶段推进。
+    splash.show();
+    splash.progress(8, '正在启动 SplatRoom…');
+
     // Native output-folder picker for multi-file exports (keyframe images).
     // Using the main-process dialog instead of the File System Access API in
     // the renderer: the web picker requires a transient user activation that

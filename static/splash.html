@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SplatRoom</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #14161a;
+        font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        user-select: none;
+        cursor: default;
+    }
+    /* 启动图铺满（2848×1600 的 16:9 素材） */
+    #art {
+        position: absolute;
+        inset: 0;
+        background-image: url('splash.png');
+        background-size: cover;
+        background-position: center;
+    }
+    /* 底部一条渐变，让左下角的文字在任何底图上都读得清（Photoshop 也是这个做法） */
+    #shade {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 96px;
+        background: linear-gradient(to top, rgba(8, 10, 12, 0.86), rgba(8, 10, 12, 0));
+    }
+    /* 加载信息固定在**左侧下部**（用户要求） */
+    #info {
+        position: absolute;
+        left: 18px;
+        bottom: 16px;
+        right: 18px;
+        color: #e8eaee;
+    }
+    #status {
+        font-size: 12px;
+        letter-spacing: 0.3px;
+        opacity: 0.92;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    #bar-track {
+        margin-top: 8px;
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.16);
+        overflow: hidden;
+    }
+    #bar-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 2px;
+        background: linear-gradient(90deg, #ff8a3d, #ffb454);
+        transition: width 180ms ease-out;
+    }
+    #pct {
+        position: absolute;
+        right: 18px;
+        bottom: 16px;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: #cfd3da;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    }
+</style>
+</head>
+<body>
+    <div id="art"></div>
+    <div id="shade"></div>
+    <div id="info">
+        <div id="status">正在启动…</div>
+        <div id="bar-track"><div id="bar-fill"></div></div>
+    </div>
+    <div id="pct">0%</div>
+    <script>
+        const statusEl = document.getElementById('status');
+        const fillEl = document.getElementById('bar-fill');
+        const pctEl = document.getElementById('pct');
+
+        // 主进程通过 executeJavaScript 调这里；也支持 ipc 渲染进程消息
+        window.__splashSet = (pct, text) => {
+            const value = Math.max(0, Math.min(100, Math.round(pct)));
+            fillEl.style.width = value + '%';
+            pctEl.textContent = value + '%';
+            if (text) {
+                statusEl.textContent = text;
+            }
+        };
+
+        try {
+            const { ipcRenderer } = require('electron');
+            ipcRenderer.on('splash:progress', (_e, payload) => {
+                window.__splashSet(payload?.pct ?? 0, payload?.text ?? '');
+            });
+        } catch (e) {
+            // 没有 ipc 也能跑（主进程会用 executeJavaScript 推）
+        }
+    </script>
+</body>
+</html>

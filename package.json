@@ -1,6 +1,6 @@
 {
     "name": "splatroom",
-    "version": "3.23.32",
+    "version": "3.23.33",
     "author": "摄影师黄Sir <1924705842@qq.com>",
     "homepage": "https://github.com/photographer-huangsir/splatroom",
     "description": "3D Gaussian Splat Editor - 调色与后期工作流",
@@ -49,7 +49,8 @@
             "static/**/*",
             "electron-main.js",
             "electron-preload.js",
-            "package.json"
+            "package.json",
+            "electron-splash.js"
         ],
         "win": {
             "target": [
