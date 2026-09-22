@@ -24,6 +24,15 @@
         display: flex;
     }
 
+    // 右侧面板（调色 / 设置）打开时**让位**：它们是 `#canvas-container` 的兄弟节点，
+    // 用 `:has()` 就能表达"只要那两种面板可见，我就挪到面板列左边"，
+    // 不需要监听面板可见性事件（面板列 = right:102 + 宽 320 + 12 余量 ⇒ 434）。
+    // 用户反馈（2026-09-22）：调色面板打开后被这块挡住。
+    @at-root #canvas-container:has(#color-panel:not(.pcui-hidden)) #view-quick-controls,
+    #canvas-container:has(#settings-panel:not(.pcui-hidden)) #view-quick-controls {
+        right: 434px;
+    }
+
     // 视野角：**单行**（用户要求"滑轨直接跟在视角那三个字后面，不要另起一行"）——
     // 标签 `flex: 0 0 auto`（不再吃掉剩余宽度，这是最初轨道只有 18px 的原因），
     // 轨道 `flex: 1 1 0` 拿走整行剩下的所有宽度。

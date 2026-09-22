@@ -94,6 +94,39 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         `快捷控件 [${(layout.quickBox ?? []).join(', ')}]；右侧工具栏 [${(layout.rightToolbar ?? []).join(', ')}]` +
         ` ⇒ 重叠=${hitRight}；底部工具栏 [${(layout.bottomToolbar ?? []).join(', ')}] ⇒ 重叠=${hitBottom}`);
 
+    // 用户报的第二个 bug（2026-09-22）：调色面板打开后，被这块盖住 ⇒ 两种面板可见时必须让位到面板列左边
+    const panels = await page.evaluate(async () => {
+        const scene = window.scene;
+        const boxOf = (sel) => {
+            const el = document.querySelector(sel);
+            if (!el || el.classList.contains('pcui-hidden') || !el.getBoundingClientRect().width) return null;
+            const r = el.getBoundingClientRect();
+            return [Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)];
+        };
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const out = {};
+        for (const [key, sel, event] of [['color', '#color-panel', 'colorPanel.visible'], ['settings', '#settings-panel', 'settingsPanel.visible']]) {
+            const el = document.querySelector(sel);
+            if (el && el.ui) el.ui.hidden = false;                 // 真正打开面板（和工具栏点击同一条路径）
+            try { scene.events.fire(event, true); } catch (e) { /* 事件名变了也不影响上面的打开 */ }
+            await sleep(600);
+            out[key] = { panel: boxOf(sel), quick: boxOf('#view-quick-controls'), opened: !!el && !el.classList.contains('pcui-hidden') };
+            if (el && el.ui) el.ui.hidden = true;
+            try { scene.events.fire(event, false); } catch (e) { /* 同上 */ }
+            await sleep(400);
+        }
+        out.restored = boxOf('#view-quick-controls');
+        return out;
+    });
+    const hitColor = overlaps(panels.color.quick, panels.color.panel);
+    const hitSettings = overlaps(panels.settings.quick, panels.settings.panel);
+    check('it steps aside when a right-side panel (color / settings) is open (the second reported bug)',
+        panels.color.opened && panels.settings.opened && !!panels.color.panel && !!panels.settings.panel &&
+        !hitColor && !hitSettings,
+        `调色面板 [${(panels.color.panel ?? []).join(', ')}] vs 快捷控件 [${(panels.color.quick ?? []).join(', ')}] ⇒ 重叠=${hitColor}；` +
+        `设置面板 [${(panels.settings.panel ?? []).join(', ')}] vs [${(panels.settings.quick ?? []).join(', ')}] ⇒ 重叠=${hitSettings}；` +
+        `关闭后回到 [${(panels.restored ?? []).join(', ')}]`);
+
     // 用户要求：视野角**不要输入框**、滑轨**要长**
     check('the FOV control has no input box and its track is long',
         layout.sliderInputHidden === true && (layout.sliderTrackWidth ?? 0) >= 120,
