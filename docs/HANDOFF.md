@@ -168,23 +168,24 @@ npx serve dist -p 3621      # 后台起静态服务（另开一个窗口/后台�
 npm run check               # typecheck + eslint + 语言键 + audit，退出码 0 才算过
 npm run verify:diag         # 7 项渲染诊断，期望 "all 7 checks passed"
 $url = "http://localhost:3621/?gpu=webgpu"
-$suites = Get-ChildItem docs\verify\verify-*.cjs -Name | Where-Object { $_ -notlike "verify-measure-online*" -and $_ -ne "verify-blackscreen.cjs" -and $_ -ne "verify-large-model-backend.cjs" -and $_ -ne "verify-webgpu-fallback.cjs" -and $_ -ne "verify-load-worker.cjs" -and $_ -ne "verify-selection-responsiveness.cjs" -and $_ -ne "verify-large-model-ui.cjs" }
+$suites = Get-ChildItem docs\verify\verify-*.cjs -Name | Where-Object { $_ -notlike "verify-measure-online*" -and $_ -ne "verify-blackscreen.cjs" -and $_ -ne "verify-large-model-backend.cjs" -and $_ -ne "verify-webgpu-fallback.cjs" -and $_ -ne "verify-selection-responsiveness.cjs" -and $_ -ne "verify-large-model-ui.cjs" }
 foreach ($s in $suites) {
   $r = node "docs\verify\$s" $url 2>&1 | Out-String
   if ($r -match '"failed":\s*(\d+)') { "{0,-44} failed={1}" -f $s, [int]$Matches[1] } else { "{0,-44} UNPARSED" -f $s }
 }
 ```
 
-`docs/verify/` 里现在有 **55 个 `verify-*.cjs`**，批量脚本（`_tmp\run-batch.ps1`）跑 **46 个**
-（排除的 9 个：`verify-measure-online*` 3 个、`verify-blackscreen.cjs`、`verify-large-model-backend.cjs`、
-`verify-webgpu-fallback.cjs`、`verify-load-worker.cjs`、`verify-selection-responsiveness.cjs`、
-`verify-large-model-ui.cjs`）。
+`docs/verify/` 里现在有 **57 个 `verify-*.cjs`**，批量脚本（`_tmp\run-batch.ps1`）跑 **49 个**
+（排除的 8 个：`verify-measure-online*` 3 个、`verify-blackscreen.cjs`、`verify-large-model-backend.cjs`、
+`verify-webgpu-fallback.cjs`、`verify-selection-responsiveness.cjs`、`verify-large-model-ui.cjs`）。
+⚠️ `_tmp\run-batch.ps1` **必须保持纯 ASCII**：它由 Windows PowerShell 5.1（`powershell -File`）执行、
+按 ANSI 解码，UTF-8 的中文注释在某些字节上会**吞掉行尾换行** ⇒ 解析报
+`Unexpected token ')'`（第十六轮踩过，整批 0 秒就退出）。
 另有 **5 个 `.mts` 纯 node 套件**（`node --experimental-strip-types docs/verify/<x>.mts`）：
 `verify-index-ranges`（18 项）、`verify-motion-quality-policy`（13 项）、`verify-render-diagnostics`、
-`verify-splat-tier`（**21 项**，模型/设备分级与导入预算）、`verify-color-curves`（**11 项**，曲线采样与插值）。
-**双后端**：webgl2 侧跑**同一份 46 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
-**最近一轮实测（第十二轮，3.23.19）：webgpu 46 套 `TOTAL FAILED: 0`、webgl2 同 46 套 `TOTAL FAILED: 0`**，
-两边各有 1 个 `UNPARSED`（`verify-merge-ui.cjs`，既有输出形状问题，不是失败）。
+`verify-splat-tier`（**21 项**，模型/设备分级与导入预算）、`verify-color-curves`（**15 项**，曲线采样与插值）。
+**双后端**：webgl2 侧跑**同一份 49 套**（换成 `?gpu=webgl2`；个别套件内部会报 `skipped`，不算失败）。
+**最近一轮实测（第十六轮，3.23.23）：webgpu 49 套 / webgl2 49 套，`TOTAL FAILED` 见 `_tmp\batch-*-16.txt`**。
 
 **UNPARSED 是既有输出形状问题、不是失败**：`verify-merge-ui.cjs`（根本没有 `failed` 字段，看 `pageerrors: []`）、
 `verify-sphere-brush.cjs`（单独跑 **6/6**，退出码 0）、`verify-edit-grade-crop.cjs`（单独跑 **4/4**，`failed` 字段在批量里没被解析出来）。
@@ -197,7 +198,8 @@ foreach ($s in $suites) {
 | `verify-viewer-large.cjs` | `node docs/verify/verify-viewer-large.cjs "http://localhost:3621/?gpu=webgpu"` | 大模型上"三种导出真能跑完"的判定（7 项）；夹具按 `merged-scene.ply` → `scan.ply` → `nosh-test.ply` 找第一个，**都没有就跳过**（`skipped: true, failed: 0`），不假装通过 |
 | `verify-large-model-backend.cjs` | `node docs/verify/verify-large-model-backend.cjs big-model.ply webgpu http://localhost:3621/` | 先把 `_tmp\scan.ply` 拷成 `dist\big-model.ply`，跑完**立刻删** |
 | `verify-webgpu-fallback.cjs` | **不要传 url 参数**：`node docs/verify/verify-webgpu-fallback.cjs` | 它自己拼 `?gpu=…`；传了 url 会变成 `…?gpu=webgpu?gpu=…` → **假红** |
-| `verify-load-worker.cjs` / `verify-selection-responsiveness.cjs` | 要 `dist\scan.ply`（拷进去 → 跑 → 立刻删）；或喂小模型 `… test-model.ply` | 前者固化"load worker 现在为什么还关着"，后者固化第四十八轮的响应性回归 |
+| `verify-load-worker.cjs` | **已在批量里**（默认夹具 `test-model.ply`）：默认必须走 worker、关掉开关必须 0、列/姿态一致；夹具 > 2000 万点时另要求"最长阻塞至少减半"。要真数字就用 20M 夹具：`node docs/verify/verify-load-worker.cjs "<url>" test-20m-fill.ply` |
+| `verify-selection-responsiveness.cjs` | 要 `dist\scan.ply`（拷进去 → 跑 → 立刻删）；或喂小模型 `… test-model.ply`。固化第四十八轮的响应性回归 |
 | `verify-floater-biggrid.cjs` | 先 `node docs/verify/gen-floater-biggrid-splat.cjs` 生成 `dist/floater-biggrid-test.ply` | 跑完连同 `dist\*.ply` 一起清掉 |
 | `verify-render-diagnostics.mts` / `verify-index-ranges.mts` | `npm run verify:diag` / `node --experimental-strip-types docs/verify/verify-index-ranges.mts` | 批量脚本只收 `verify-*.cjs`，这两个 `.mts` 永远不进批量（后者 18 项、纯 node、秒级） |
 | `verify-measure-online*.cjs` / `verify-blackscreen.cjs` | 默认打**线上部署地址** | 不属于批量，只在需要时手动跑 |
@@ -921,6 +923,48 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     `slice().arrayBuffer()` 分块读 + `makeStridedSource()` 抽稀 + `materializeToDataTable()`，
     再把**列缓冲（Transferable ArrayBuffer）**传回主线程组装 `GSplatData`。
     这样 1.35 亿那档的 57 秒主线程占用就能搬走，而且峰值内存还少一份整文件副本。
+    **第十六轮已按这个姿势落地并默认打开**，见坑 59/60/61 与
+    `docs/导入worker-实现与实测-2026-09-22.md`。
+59. **类实例过不了结构化克隆 —— `Transform.rotation` 到手是普通对象，`setLocalRotation()` 会静默写出 NaN**
+    （2026-09-22 新增，第十六轮，**这是把导入 worker 默认打开的拦路虎，也是历史"worker 一开就坏"的真凶**）：
+    worker 把 `dataTable.transform`（`splat-transform` 的 `Transform`：`translation: Vec3 / rotation: Quat / scale`）
+    postMessage 回来时，结构化克隆**只保留自有属性、丢掉原型** ⇒ 主线程拿到的是
+    `{x, y, z, w}` 普通对象（数值完全正确！）。而 PlayCanvas 的
+    `GraphNode.setLocalRotation(x, y, z, w)` 内部按 `if (x instanceof Quat)` 分流：
+    普通对象走 `else` 分支 ⇒ `localRotation.set(obj, undefined, undefined, undefined)`
+    ⇒ 四元数 `(obj, NaN, NaN, NaN)` ⇒ **世界矩阵的 3×3 整块 NaN**（平移和 w 还是对的，极具迷惑性）。
+    现象：模型不显示、`tool.boxSelection` 的体积因 `setFromTransformedAabb(local, NaN)` 也变 NaN、
+    于是"框选一个点都选不到"，而**列数据逐字节相同** —— 这正是坑 58 里"列字节完全相同但行为不同"
+    那条悬案的解释（历史那次 2000 vs 213 不是抽样差异，是导入姿态坏了）。
+    实测（`_tmp/diag-box-nan.cjs`，2000 点夹具）：
+    | | 主线程导入 | worker 导入（改前） | worker 导入（改后） |
+    | --- | --- | --- | --- |
+    | `entity.getWorldTransform().data` | `-1,0,0,0, 0,-1,0,0, 0,0,1,0, …` | **`NaN,NaN,NaN,0, …`** | `-1,0,0,0, 0,-1,0,0, 0,0,1,0, …` |
+    | 体工具体积 | `0.5992 × 0.2999 × 0.18` | **NaN** | `0.5992 × 0.2999 × 0.18` |
+    | 框选（模型 30% 体积） | 118/2000 | **0/2000** | 118/2000 |
+    修法：在 worker 边界上**还原成真类实例**（`load-worker-client.ts` 的 `rehydrateTransform()`，
+    用 `new Transform(new Vec3(...), new Quat(...), scale)`）。`Vec3` 同理（`copy()` 一样会丢）。
+    **推广**：任何"worker 传回来一个引擎/库的类实例"的地方都要问一句"它靠 `instanceof` 分流吗"。
+60. **模块顶层读的特性开关，`goto` 之后再设是没人读的 —— 套件会变成"worker 跟 worker 比"的假绿**
+    （2026-09-22 新增，第十六轮，踩了一次）：`USE_LOAD_WORKER` 是 `load-worker-client.ts` 的**模块顶层常量**，
+    所以在 `page.goto()` 之后 `page.evaluate` 去设 `window.__SPLATROOM_ENABLE_LOAD_WORKER__` 无效：
+    两次运行都走 worker，于是"主线程 vs worker"的逐列哈希比对**恒等**、`__LW_WORKER_RESULTS__` 两次都是 1，
+    套件全绿但什么也没证明（改前 `verify-import-worker.cjs` 就是这个状态）。
+    规矩：**这种开关一律用 `page.evaluateOnNewDocument()` 在页面脚本执行前注入**；
+    并且断言里必须**同时**钉住"基线那次 = 0、目标那次 > 0"，只断言 `> 0` 是抓不住这个坑的。
+61. **体工具（box/sphere selection）的默认体积只有模型 30%，而且模型在原点时它压根不拟合**
+    （2026-09-22 新增，第十六轮）：`box-selection.ts` 的 `activate()` 里
+    `if (!userPlaced || !volumeReachesTarget(box.worldBound, target)) fitToTarget();`
+    —— 模型就在原点上时"体积已经碰到目标"成立、不重新拟合，而它此刻的尺寸是构造时的默认值（相对模型极小）
+    ⇒ 按 "set" **一个点都选不到**，看起来像坏工具。想拿"非空过的部分选择"当判据（vacuity 守卫），
+    必须先把模型挪开再激活工具（`splat.entity.setPosition(8, 3, 0)`，见 `verify-shape-selection.cjs` 的
+    `movedModelCase`），拟合后的体积 = 密度中位数（逐轴中位数）+ 30% 尺寸 ⇒ 2000 点夹具稳定选中 118/2000。
+    **探针/套件的"部分选择"判据一定要带 0 < 选中数 < 总数 的守卫**，否则 NaN 体积那次会让判据静默失效。
+    （顺带：`select.rect` 事件在无头环境里无论给什么矩形都会选满整模，别拿它当选择探针。）
+62. **`docs/` 里的文本别用 PowerShell `Get-Content`/`Set-Content` 往返**（2026-09-22 再次确认，第三次踩）：
+    中文在控制台里显示成乱码还是小事，`Set-Content` 回写会把整个文件按当前代码页重编码
+    ⇒ 全文件 mojibake（`verify-color-curve.cjs` 就这么毁过一次，只能 `git checkout --` 重来）。
+    读写仓库文本一律用编辑工具；要核对 UTF-8 就用 `node -e`。
 
 ---
 
@@ -971,6 +1015,7 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
 | `huge-model-open.cjs` | **超大模型"能不能打开"的分阶段口径（第十二轮）**：`Range` 分块拼 `File`（与拖入真实文件等价）→ `import` → 逐阶段计时 + 画布亮像素 + 帧时间，并打印 `splat.importReduction` / `tier.policyChanged` / `lodAuto` / `lodAssets` / `motionQuality`。Node 侧每 3 s 快照 `window.__stages`，**渲染进程被 OOM 杀掉也能保住已走过的阶段**。第 6 参 `naive` 走 `fetch().arrayBuffer()` 对照；第 7 参强制导入预算。用法：`node docs/probes/huge-model-open.cjs "<url>" huge-134m.ply 240 0 256 6000000` |
 | `huge-io-wall.cjs` | **大文件 I/O 三层的墙（第十二轮）**：① 纯流式读完（`res.body.getReader()`，不进单块）② 页内单块分配上限（真写一遍）③ `Range` 切不同大小做 `arrayBuffer()`。结论：流式 7.5 GB 没问题；单块约 2 GB 就失败 |
 | `alloc-wall.cjs` | **干净的"单块 `ArrayBuffer` 上限"口径（第十二轮，不做任何 I/O）**：`new ArrayBuffer(n)` + 每 4 MB 真写一次。实测 1.5 GB 可以 / **2 GB 失败** |
+| `import-stall.cjs` | **"导入把主线程占了多久"的口径（第十六轮）**：同一台机器、同一个 7 GB 文件，导入 worker **关 / 开**各跑一次；页内 25 ms 心跳量 `maxBlockMs` / >1 s / >5 s 次数 + `PerformanceObserver('longtask')` 总时长与条数，另给 `importMs`（含分块 fetch）。开关用 `page.evaluateOnNewDocument` 注入（见坑 60）。用法：`node docs/probes/import-stall.cjs "<url>" huge-134m.ply 256 0 900` |
 | `video-alpha-support.cjs` | **透明视频可行性判据（第十二轮）**：`VideoEncoder.isConfigSupported` 扫 codec × `alpha` 支持矩阵 + 一帧带 alpha 的往返（编→解→读 alpha）+ `MediaRecorder.isTypeSupported`。结论：本机对所有 codec 都拒绝 `alpha: 'keep'`，`video/quicktime` 也不支持 ⇒ 透明 MOV 只能靠 PNG 序列 + 外部 ffmpeg。**第 2 个参数可追加 Chromium 开关（逗号分隔）**，用来验证"alpha 编码是不是被特性开关挡住"——实测 `WebCodecsAlphaEncoder` / `AlphaEncoderWrapper` / `WebCodecsAlphaEncoding` 三个候选都不放行 |
 | `gpu-frame-probe.cjs` | GPU 每帧耗时 + `litPercent` 可见性（没有它就不知道"快"是不是因为没画东西） |
 | `sortgate-sim.cjs` | 排序闸门判据的**状态机仿真**（不依赖浏览器） |

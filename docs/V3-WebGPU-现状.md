@@ -3722,6 +3722,48 @@ mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 
 
 **产物**：`release\SplatRoom-3.23.21.exe`；提交见 `docs/进度存档.md` 第十四轮。
 
+### 6.61 第十六轮：导入搬进 worker（默认打开）+ 修掉结构化克隆导致的 NaN 旋转
+
+**做了什么**：用户确认顺序的第 ③ 件。`src/workers/load-worker.ts` 重写 + `load-worker-client.ts` 改契约：
+主线程**只把 `File`/`Blob` 结构化克隆给 worker**（不复制字节），worker 自己分块读 +
+按设备预算抽稀 + 物化 + morton 重排，列缓冲 **Transferable** 回传；进度 / 多 LOD 弹窗 / 取消三个桥都通，
+任何失败回退主线程同步路径，`window.__SPLATROOM_ENABLE_LOAD_WORKER__ = false` 可关。
+完整设计与实测见 **`docs/导入worker-实现与实测-2026-09-22.md`**。
+
+**关键实测（`1亿gs.ply` = 134,652,397 点 / 7.02 GB；`docs/probes/import-stall.cjs`，同构建、开关用
+`evaluateOnNewDocument` 注入）**
+
+| 量 | worker 关 | worker 开 | 变化 |
+| --- | --- | --- | --- |
+| **主线程最长阻塞** | **33,169 ms** | **11,612 ms** | **−65.0%** |
+| 阻塞时间窗（相对导入起点） | 22,295 → 55,463 ms | 43,508 → 55,119 ms | 起点晚了 21.2 s |
+| longtask 总时长 / 条数 | 39,496 ms / 62 | **11,808 ms / 2** | −70% |
+| 导入墙钟 | 56,692 ms | 56,575 ms | 持平 |
+| 抽稀（两边同一份判定） | `{from:134652397, to:60000000, tier:C, device:high, reason:over-device-cap}` | 同左 | 一致 |
+
+强制 6,000,000 行：**2,735 → 1,258 ms** ⇒ 阻塞与行数成正比（worker 开时 ≈ 5.2 M 行/秒），
+残留的 11.6 s 是**逐行主线程工作**（`GSplatData` 组装 + 每个高斯的 state/transform 通道 + 首次 GPU 上传），
+不在本轮范围，已列为下一轮目标。
+
+**为什么历史上一开 worker 就坏（真凶）**：worker 回传的 `Transform` 经结构化克隆**丢掉 `Quat` 原型**，
+而引擎 `GraphNode.setLocalRotation()` 用 `if (x instanceof Quat)` 分流 ⇒ 普通对象走
+`localRotation.set(obj, undefined, undefined, undefined)` ⇒ **旋转矩阵 3×3 整块 NaN**（平移正常）。
+现象是模型不显示、体工具体积 NaN、框选 0/2000，而**列数据逐字节相同**。
+修法：边界上 `rehydrateTransform()`（`new Transform(new Vec3(...), new Quat(...), scale)`）。
+⇒ `docs/verify/verify-shape-selection.cjs` 本轮之前是**红的**（0/2000 那条），修完复绿。
+
+**逐字节等价回归**：新增 `docs/verify/verify-import-worker.cjs`（**8 项**，双后端 0 失败）——
+19 列 FNV 逐列一致（含重排后的顺序）、包围盒一致、**姿态是真 `Quat` 且无 NaN**、
+同一次框选手势两边都 **118/2000**（状态位哈希 `2228546316`）、基线 `__LW_WORKER_RESULTS__ = 0` 而 worker 那次 = 1。
+
+**两个"空过判据"（HANDOFF 60/61）**：① 特性开关是模块顶层常量 ⇒ 探针必须
+`page.evaluateOnNewDocument` 注入，否则两次都走 worker、比对恒等；② 体工具要靠"模型离原点"才会把体积
+拟合到模型上（否则选 0 个点，"选择等价"判据静默失效）。
+另修：`window.__SPLATROOM_IMPORT_BUDGET__` 由主线程读出后随消息带进 worker（`budgetOverride`），
+worker 在抽稀前补发 `type:'budget'` ⇒ UI 的"正在简化导入"进度条与 `splat.importReduction` 两条路径一致。
+
+**产物**：`release\SplatRoom-3.23.23.exe`；提交见 `docs/进度存档.md` 第十六轮。
+
 
 
 
