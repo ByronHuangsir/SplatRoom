@@ -3,6 +3,7 @@ import { AppBase, Asset, GSplatData, GSplatResource } from 'playcanvas';
 
 import { readDeviceFacts } from '../core/device-facts';
 import { Events } from '../core/events';
+import { type SplatAabb } from '../core/splat-aabb';
 import { describeBudget, type ImportBudget } from '../core/splat-tier';
 import { defaultLodIndex, loadGSplatDataAsync, validateGSplatData } from '../io/index';
 import { Splat } from '../splat/splat';
@@ -28,9 +29,48 @@ class AssetLoader {
     // wrap in-memory GSplatData in a gsplat Asset + GSplatResource registered with
     // the engine. shared by the splat-transform load path and the PLY sequence
     // frame source, which already holds decoded GSplatData.
-    createGSplatAsset(gsplatData: GSplatData, filename: string): Asset {
+    //
+    // `precomputedAabb`（第二十二轮）：worker 已经按引擎的算法算好了包围盒。引擎构造
+    // `GSplatResource` 时会**无条件**全表扫一遍算它（6000 万行实测 2.2 s，全在主线程），
+    // 所以这里在构造期间把 `calcAabb` 临时接管成"直接填这个盒子"，构造完立刻还原
+    // （后面编辑/变换还要靠引擎自己重算，绝不能把 shim 留着）。
+    createGSplatAsset(gsplatData: GSplatData, filename: string, precomputedAabb?: SplatAabb | null): Asset {
         const asset = new Asset(filename, 'gsplat', { url: `local-asset-${Date.now()}`, filename });
         this.app.assets.add(asset);
+
+        let shimmed = false;
+        let previousOwn: unknown;
+        if (precomputedAabb) {
+            // 探针可读：worker 算出来的盒子（套件拿它与引擎自己的 `calcAabb` 逐位对照 ——
+            // 注意不能拿 `resource.aabb` 比：GPU bound pass 会在构造之后把它改小）
+            (globalThis as any).__AABB_FROM_WORKER__ = precomputedAabb;
+            const data = gsplatData as unknown as { calcAabb?: unknown };
+            const hadOwn = Object.prototype.hasOwnProperty.call(data, 'calcAabb');
+            previousOwn = hadOwn ? data.calcAabb : undefined;
+            // 只接管"无 pred 的那次调用"（引擎构造时就是这么调的）；带 pred 的调用照旧走原实现
+            data.calcAabb = function (result: any, pred?: unknown) {
+                if (pred || !result?.center || !result?.halfExtents) {
+                    return false;
+                }
+                result.center.set(...precomputedAabb.center);
+                result.halfExtents.set(...precomputedAabb.halfExtents);
+                return true;
+            };
+            shimmed = true;
+            try {
+                asset.resource = new GSplatResource(this.app.graphicsDevice, gsplatData);
+            } finally {
+                if (shimmed) {
+                    if (previousOwn !== undefined) {
+                        data.calcAabb = previousOwn;
+                    } else {
+                        delete data.calcAabb;
+                    }
+                }
+            }
+            return asset;
+        }
+
         asset.resource = new GSplatResource(this.app.graphicsDevice, gsplatData);
         return asset;
     }
@@ -209,7 +249,7 @@ class AssetLoader {
                 await this.paintBeforeBlocking();
             }
 
-            const asset = this.createGSplatAsset(result.gsplatData, filename);
+            const asset = this.createGSplatAsset(result.gsplatData, filename, result.aabb ?? null);
 
             const splat = new Splat(asset, transform.rotation);
             if (reduced) {

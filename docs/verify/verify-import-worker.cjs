@@ -116,7 +116,36 @@ const runOne = async (browser, workerEnabled, boxOrNull = null) => {
             workerResults: window.__LW_WORKER_RESULTS__ || 0,
             // 第二十轮：巨型灰高斯的统计现在**由 worker 算**（`detectGiantGreyFromColumns`），
             // 主线程只在回退路径上自己扫。两条路的数字必须一致，`source` 必须各是 worker / main。
-            giantReport: window.__GIANT_REPORT__ ?? null
+            giantReport: window.__GIANT_REPORT__ ?? null,
+            // 第二十二轮：包围盒也由 worker 预算，主线程构造资源时临时接管 `calcAabb`。
+            // 这里用**引擎自己的实现**（原型方法，构造后已还原）再算一遍做对照 ——
+            // 包围盒参与取景/裁剪，算错了是静默的。
+            // 注意：**不能拿 `resource.aabb` 当基准** —— 构造之后 GPU bound pass 会把它改小
+            // （实测 2000 点夹具：构造时 1.03859 vs bound pass 之后 0.99859），
+            // 所以比的是"worker 交出来的盒子" vs "引擎现算的盒子"。
+            aabb: (() => {
+                try {
+                    const rep = window.__AABB_FROM_WORKER__ ?? null;
+                    const Box = splat.localBound.constructor;
+                    const ref = new Box();
+                    const ok = splat.splatData.calcAabb(ref);
+                    const nums = (box) => [
+                        box.center.x, box.center.y, box.center.z,
+                        box.halfExtents.x, box.halfExtents.y, box.halfExtents.z
+                    ];
+                    const engine = nums(ref);
+                    const res = splat.asset?.resource?.aabb;
+                    return {
+                        engineReturned: ok,
+                        fromWorker: rep ? [...rep.center, ...rep.halfExtents] : null,
+                        engine: engine.map(v => +v.toFixed(6)),
+                        resourceAabb: res ? nums(res).map(v => +v.toFixed(6)) : null,
+                        equal: !!rep && [...rep.center, ...rep.halfExtents].every((v, i) => v === engine[i])
+                    };
+                } catch (e) {
+                    return { error: String(e).slice(0, 160) };
+                }
+            })()
         };
     }, BUDGET);
 
@@ -263,6 +292,21 @@ const runOne = async (browser, workerEnabled, boxOrNull = null) => {
         Math.abs(a.giantReport.diag - b.giantReport.diag) < 1e-6,
         `main: ${JSON.stringify(a.giantReport)}；worker: ${JSON.stringify(b.giantReport)}` +
         '（第二十轮把这份统计搬进 worker，省掉 6000 万行那档约 1.2 s 的主线程阻塞）');
+
+    check('the precomputed bounding box equals the engine\'s own calcAabb bit-for-bit (worker path)',
+        !!b.aabb && !b.aabb.error && b.aabb.equal === true && b.aabb.engineReturned === true &&
+        (b.aabb.fromWorker ?? []).every(v => Number.isFinite(v)),
+        b.aabb?.error ? `error: ${b.aabb.error}` :
+            `worker 交出=[${(b.aabb.fromWorker ?? []).join(', ')}] vs 引擎现算=[${(b.aabb.engine ?? []).join(', ')}]` +
+            ` ⇒ 逐位相同=${b.aabb.equal}；资源上的 aabb=[${(b.aabb.resourceAabb ?? []).join(', ')}]` +
+            '（构造后 GPU bound pass 会把它改小，所以它**不是**判据）');
+
+    check('the main-thread arm keeps the engine-computed box (fallback path unchanged)',
+        !!a.aabb && !a.aabb.error && a.aabb.fromWorker === null && a.aabb.engineReturned === true &&
+        (a.aabb.resourceAabb ?? []).every(v => Number.isFinite(v)),
+        a.aabb?.error ? `error: ${a.aabb.error}` :
+            `main 臂没有 worker 预算（fromWorker=${JSON.stringify(a.aabb.fromWorker)}）、引擎自己算成功，` +
+            `资源上的 aabb=[${(a.aabb.resourceAabb ?? []).join(', ')}]`);
 
     check('that selection is a real partial selection (so the check above is not vacuous)',
         off.selection.selected > 0 && off.selection.selected < off.selection.total,

@@ -35,6 +35,8 @@ type LoadResult = {
     reduction?: { from: number; to: number; tier: string; device: string; reason: string };
     /** worker 顺手算好的巨型灰高斯统计（第二十轮）；`null`/缺失 = 主线程回退扫描 */
     giantSplat?: { total: number; giantGrey: number; diag: number; removable: boolean } | null;
+    /** worker 顺手算好的包围盒（第二十二轮，逐行镜像引擎算法）；`null`/缺失 = 让引擎自己算 */
+    aabb?: { center: [number, number, number], halfExtents: [number, number, number] } | null;
 };
 
 type Pending = {
@@ -169,7 +171,13 @@ const handleWorkerMessage = async (e: MessageEvent) => {
             transform
         };
         const gsplatData = dataTableToGSplatData(dataTable as any);
-        p.resolve({ gsplatData, transform, reduction: msg.reduction ?? undefined, giantSplat: msg.giantSplat ?? null });
+        p.resolve({
+            gsplatData,
+            transform,
+            reduction: msg.reduction ?? undefined,
+            giantSplat: msg.giantSplat ?? null,
+            aabb: msg.aabb ?? null
+        });
         return;
     }
 

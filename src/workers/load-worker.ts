@@ -23,6 +23,7 @@ import {
     WorkerQueue
 } from '@playcanvas/splat-transform';
 
+import { computeSplatAabb } from '../core/splat-aabb';
 import { importBudget, type DeviceFacts } from '../core/splat-tier';
 import { BlobReadFileSystem } from '../io/read/file-systems';
 import { makeStridedSource } from '../io/read/strided-source';
@@ -200,8 +201,25 @@ const handleLoad = async (msg: any) => {
                 giantSplat = null;   // 检测失败不影响导入：主线程会走回退扫描
             }
 
+            // 包围盒（第二十二轮）：引擎构造 `GSplatResource` 时会无条件全表扫一遍算它
+            // （6000 万行实测 2.2 s，占主线程），而 worker 手上就是同一批列 —— 在这儿顺手算，
+            // 主线程只需把结果填进去（`asset-loader` 里临时接管 `calcAabb`）。
+            let aabb: any = null;
+            try {
+                aabb = computeSplatAabb({
+                    x: colByName.get('x') ?? null,
+                    y: colByName.get('y') ?? null,
+                    z: colByName.get('z') ?? null,
+                    s0: colByName.get('scale_0') ?? null,
+                    s1: colByName.get('scale_1') ?? null,
+                    s2: colByName.get('scale_2') ?? null
+                }, dataTable.numRows, false);
+            } catch {
+                aabb = null;   // 算不出来就让引擎自己算（行为退化，不影响正确性）
+            }
+
             (self as any).postMessage(
-                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction, giantSplat },
+                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction, giantSplat, aabb },
                 transfer
             );
         } finally {
