@@ -3880,6 +3880,29 @@ webgl2 同 49 套 `TOTAL FAILED: 0`（各 1 个既有 `UNPARSED`：`verify-merge
 
 **产物**：`release\SplatRoom-3.23.26.exe`；提交见 `docs/进度存档.md` 第十九轮。
 
+### 6.65 第二十/二十一轮：导入提示 + 把最后一趟逐行主线程扫描搬进 worker
+
+**第二十轮（3.23.27）**：进 `createGSplatAsset()`（引擎打包）之前把进度文案换成
+`popup.import-gpu-prepare`（9 语言各 698 键）并 `paintBeforeBlocking()`（等两帧 + 250 ms 兜底），
+那 11 秒不再是一动不动的 spinner。实测：2000 万夹具提示在 33,432 ms 发出、主阻塞窗 33,435 ms 开始；
+6000 万那档原来的单块 11,716 ms 拆成 1,212 + 10,557（中间那一帧就是画提示）。
+
+**第二十一轮（3.23.28）**：把我们自己的 `detectGiantGreySplats()`（巨型灰检测，全表扫两遍，
+6000 万行约 1.2 s）搬进导入 worker（`detectGiantGreyFromColumns`，并把 `Math.exp` 挪到判定链末尾）：
+
+| 量（6000 万行） | 改前 | 改后 |
+| --- | --- | --- |
+| 主线程最长阻塞 | 11,804 ms | **10,482 ms** |
+| 阻塞窗结构 | 1,212 ms（扫描）+ 10,557 ms（引擎打包） | **只剩 10,482 ms（引擎打包）** |
+| 导入墙钟 | 57,416 ms | **55,373 ms** |
+
+⇒ 应用侧**逐行主线程导入工作清零**；剩下的 10.5 s 全在引擎（`updateTransformData` / `calcAabb` /
+`updateColorData` / `writeTexture`），要再压只能改导入预算（画质取舍，等用户拍板）。
+回归：新增 `verify-giant-detect.mts`（8 项纯函数）+ `verify-import-worker.cjs` 的
+"两条路径统计一致且 source 各为 worker/main"。
+
+**产物**：`release\SplatRoom-3.23.28.exe`；提交见 `docs/进度存档.md` 第二十/二十一轮。
+
 
 
 
