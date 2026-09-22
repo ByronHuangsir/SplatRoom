@@ -402,8 +402,17 @@ export const buildLodAssets = async (
     onProgress?: (f: number) => void
 ): Promise<{ count: number; asset: Asset }[]> => {
     const levels = await buildLodLevels(source, fractions, source.comments ?? [], onProgress);
-    return levels.map((lv, i) => ({
-        count: lv.count,
-        asset: createLodAsset(app, lv.data, i, baseName)
-    }));
+    // 逐层创建 + **每层之间让出一手宏任务**（第十九轮，`docs/probes/import-profile.cjs` 的归因）：
+    // 代理层的"打包"是引擎在 `GSplatResource` 构造里同步做的（60M 主模型 2 层代理实测 ≈5 s），
+    // 一次性建完就是一段 5 秒的连续冻结；逐层让出后最长阻塞≈减半，进度条也真的能重绘。
+    const out: { count: number; asset: Asset }[] = [];
+    for (let i = 0; i < levels.length; i++) {
+        if (i > 0) {
+            await new Promise<void>((resolve) => {
+                setTimeout(resolve, 0);
+            });
+        }
+        out.push({ count: levels[i].count, asset: createLodAsset(app, levels[i].data, i, baseName) });
+    }
+    return out;
 };

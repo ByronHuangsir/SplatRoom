@@ -137,6 +137,14 @@ const runArm = async (browser, worker) => {
         if (done) break;
     }
 
+    // **导入 resolve 之后继续采样 20 秒**：import 的"尾巴"不止那一段连续阻塞 ——
+    // 例如自动生成的 LOD 代理层是在 `scene.elementAdded` 之后 400 ms 才开始的，
+    // 那一段（实测 ~3.6 s）落在 resolve 之后，只看 resolve 前的窗口会漏掉它。
+    const tailSamples = 20;
+    for (let i = 0; i < tailSamples; i++) {
+        await sleep(1000);
+    }
+
     const out = await page.evaluate(() => {
         const s = window.__stall;
         const splat = window.scene.getElementsByType('splat').slice(-1)[0];

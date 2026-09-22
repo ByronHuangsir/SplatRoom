@@ -129,9 +129,24 @@ export const registerLodEvents = (
 
         if (!autoEnabled) return;
         if (numSplats < LOD_GENERATE_MIN) return;
-        // defer until the scene is interactive (focus/import done)
-        setTimeout((): void => {
-            void generateForSplat(splat);
-        }, 400);
+        // 第十九轮：**等主线程真的空下来再建代理层**。
+        // 原来固定 400 ms，正好落在"引擎把 6000 万行打包进显存"那段 11.7 s 之后的尾巴上：
+        // 实测用户在 1.35 亿那档看到的是 11.7 s 冻结 → 停 2.6 s → **又冻 5.0 s**（`import-stall.cjs`）。
+        // 改成 `requestIdleCallback`（带 8 s 兜底）—— 让浏览器告诉我们线程空了再开始，
+        // 于是用户先拿到"能看能动"的模型，代理层随后悄悄补上（层与层之间还会再让出一手，
+        // 见 `buildLodAssets`），最长阻塞从 5.0 s 降到约一半。
+        const scheduleLodBuild = (splat: Splat) => {
+            const start = () => {
+                void generateForSplat(splat);
+            };
+            const ric = (globalThis as any).requestIdleCallback as
+                undefined | ((cb: () => void, opts?: { timeout: number }) => number);
+            if (typeof ric === 'function') {
+                ric(start, { timeout: 8000 });
+            } else {
+                setTimeout(start, 4000);
+            }
+        };
+        scheduleLodBuild(splat);
     });
 };
