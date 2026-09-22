@@ -48,11 +48,39 @@ const runOnce = async (browser, mode) => {
     await page.waitForFunction('!!window.scene', { timeout: 90000, polling: 500 });
     await sleep(1500);
 
-    await page.evaluate(async (m) => {
-        const r = await fetch('./' + m);
-        const buf = await r.arrayBuffer();
-        window.__buf = new Uint8Array(buf);
-    }, MODEL);
+    // 把模型取回页面拼成 `File`。**不能用 `fetch().arrayBuffer()`**：单块 `ArrayBuffer`
+    // 的上限实测是 1.5 GB 可以 / 2 GB 失败（HANDOFF 43、`docs/probes/alloc-wall.cjs`），
+    // 20M 夹具是 4.4 GB ⇒ 直接 `TypeError: Failed to fetch`。按 `Range` 分块取（与拖入真实文件等价）。
+    const built = await page.evaluate(async (m, chunkMb) => {
+        try {
+            const head = await fetch('./' + m, { headers: { Range: 'bytes=0-0' } });
+            const total = parseInt(head.headers.get('content-range')?.split('/')[1] || '0', 10) ||
+                +(head.headers.get('content-length') || 0);
+            if (!total) {
+                // 不带 content-range 的静态服务：退回整块读（只对小模型可行）
+                const buf = await (await fetch('./' + m)).arrayBuffer();
+                window.__buf = new Uint8Array(buf);
+                return { ok: true, bytes: buf.byteLength, parts: 1, mode: 'arrayBuffer' };
+            }
+            const chunk = chunkMb * 1024 * 1024;
+            const parts = [];
+            for (let off = 0; off < total; off += chunk) {
+                const r = await fetch('./' + m, { headers: { Range: `bytes=${off}-${Math.min(off + chunk, total) - 1}` } });
+                if (r.status !== 206) return { ok: false, error: `Range not supported (status ${r.status})` };
+                parts.push(await r.blob());
+            }
+            window.__file = new File(parts, m);
+            return { ok: true, bytes: window.__file.size, parts: parts.length, mode: `range-${chunkMb}MB` };
+        } catch (e) {
+            return { ok: false, error: String(e).slice(0, 200) };
+        }
+    }, MODEL, 64);
+    if (!built.ok) {
+        console.log(JSON.stringify({ fatal: 'could not fetch the fixture: ' + built.error, model: MODEL }));
+        await browser.close();
+        process.exitCode = 1;
+        return;
+    }
 
     const out = await page.evaluate(async (m) => {
         const sleep2 = (ms) => new Promise(r => setTimeout(r, ms));
@@ -67,7 +95,10 @@ const runOnce = async (browser, mode) => {
             gaps.push(now - last);
             last = now;
         }, 20);
-        const p = scene.events.invoke('import', [{ filename: m, contents: new File([window.__buf], m) }])
+        const p = scene.events.invoke('import', [{
+            filename: m,
+            contents: window.__file || new File([window.__buf], m)
+        }])
             .then(() => { res.importMs = Date.now() - res.started; })
             .catch((e) => { res.importError = String(e).slice(0, 300); });
         for (let i = 0; i < 40; i++) {
