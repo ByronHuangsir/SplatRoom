@@ -1,5 +1,6 @@
 import { Color } from 'playcanvas';
 
+import { curveSetFromDoc, curveSetToDoc, type CurveSetDoc } from '../core/color-curves';
 import { Splat } from '../splat/splat';
 
 /**
@@ -10,9 +11,13 @@ import { Splat } from '../splat/splat';
  * is applied in the shader at render time and baked into exported files.
  *
  * File naming: "scene.ply" → "scene.ply.sscg"
+ *
+ * 版本历史：v3 之前没有 HSL；**v5（2026-09-22，第十七轮）加了曲线调色 `curves`**。
+ * 旧版本文件里没有的字段一律"不动"（见 `deserializeGrade` 的 `undefined` 语义），
+ * 所以 v4 及更早的侧车照旧能读。
  */
 
-const SSCG_VERSION = 4;
+const SSCG_VERSION = 5;
 
 /** Complete color grade data stored in sidecar */
 export interface ColorGradeData {
@@ -32,6 +37,11 @@ export interface ColorGradeData {
     hslHue?: number[];
     hslSat?: number[];
     hslLum?: number[];
+    /**
+     * 曲线调色（v5 起）。四个通道，各是 `[[x, y], …]` 或 `null`（= 该通道恒等）；
+     * `undefined`（旧文件）= 不碰曲线，`null` = 清空全部曲线。与 `.ssproj` 同一份语义。
+     */
+    curves?: CurveSetDoc;
 }
 
 /** Create default (neutral) color grade data */
@@ -51,7 +61,8 @@ const createDefaultGradeData = (sourceFile: string): ColorGradeData => ({
     colorGradeEnabled: true,
     hslHue: [0, 0, 0, 0, 0, 0, 0, 0],
     hslSat: [0, 0, 0, 0, 0, 0, 0, 0],
-    hslLum: [0, 0, 0, 0, 0, 0, 0, 0]
+    hslLum: [0, 0, 0, 0, 0, 0, 0, 0],
+    curves: null
 });
 
 /**
@@ -74,7 +85,10 @@ const serializeGrade = (splat: Splat): ColorGradeData => {
         colorGradeEnabled: splat.colorGradeEnabled,
         hslHue: Array.from(splat.hslHue),
         hslSat: Array.from(splat.hslSat),
-        hslLum: Array.from(splat.hslLum)
+        hslLum: Array.from(splat.hslLum),
+        // 曲线：与 `.ssproj` 用同一对转换器（`src/core/color-curves.ts`），
+        // 存控制点而不是 33×4 个采样值。少这一行的代价是"存了调色再读回来曲线没了"。
+        curves: curveSetToDoc(splat.curves)
     };
 };
 
@@ -99,6 +113,11 @@ const deserializeGrade = (splat: Splat, data: ColorGradeData): void => {
     if (data.hslHue) splat.hslHue = data.hslHue;
     if (data.hslSat) splat.hslSat = data.hslSat;
     if (data.hslLum) splat.hslLum = data.hslLum;
+    // 曲线：`undefined`（v4 及更早的侧车）= 整段不碰；`null` = 清空；
+    // `{…}` = 四个通道按存的值设（通道是 `null` ⇒ 该通道恒等）。
+    if (data.curves !== undefined) {
+        splat.setCurves(data.curves === null ? null : curveSetFromDoc(data.curves));
+    }
 };
 
 /**

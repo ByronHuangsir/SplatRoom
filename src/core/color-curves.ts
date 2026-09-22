@@ -277,3 +277,60 @@ export const applyCurveSetToRGB = (rgb: number[] | Float32Array | { r: number, g
         set(i, evaluateCurveAt(perCh[i], evaluateCurveAt(master, get(i))));
     }
 };
+
+// ---- 文档（JSON）形式 ----
+//
+// `.ssproj` 与 `.sscg` 侧车都要把曲线写进 JSON。控制点存成 `[[x, y], …]`
+// （比 `{x, y}` 短、比 33×4 个采样值可读），每个通道 `null` = 该通道恒等。
+// 这两个转换器放在纯函数层，`.ssproj`（`Splat.docSerialize/docDeserialize`）与
+// `.sscg`（`color-grade-file.ts`）共用同一份语义 —— 两边不可能漂移，
+// 也就能在 node 里单测（`docs/verify/verify-color-curves.mts`）。
+
+/** JSON 里的曲线形状：四个通道，各是 `[[x, y], …]` 或 `null` */
+export type CurveSetDoc = Partial<Record<CurveChannel, number[][] | null>> | null;
+
+/** `CurveSet` → JSON 形状（通道缺失 ⇒ `null`） */
+export const curveSetToDoc = (set: CurveSet | null | undefined): Record<CurveChannel, number[][] | null> => {
+    const out = {} as Record<CurveChannel, number[][] | null>;
+    for (const ch of CURVE_CHANNELS) {
+        const pts = set?.[ch];
+        out[ch] = pts && pts.length ? pts.map(p => [p.x, p.y]) : null;
+    }
+    return out;
+};
+
+/**
+ * JSON 形状 → `CurveSet`。
+ *
+ * **`null` 与"字段缺失"要分开看**（HANDOFF 52 的同一类坑）：`.sscg` 里
+ * `curves: null` 表示"存的时候就没有曲线 ⇒ 读的时候要清空"，而**整个 `curves` 字段缺失**
+ * 表示"这份文件（v4 及更早）没有曲线概念 ⇒ 什么都别动"。所以缺失的判断在调用方做，
+ * 这里只负责把一个 `CurveSetDoc` 转成 `CurveSet`。
+ *
+ * 通道里少于 2 个点（或不是数字对）按恒等处理 —— 与 `sampleCurve` 的下限一致。
+ */
+export const curveSetFromDoc = (doc: CurveSetDoc | undefined): CurveSet => {
+    const out = emptyCurveSet();
+    if (!doc || typeof doc !== 'object') {
+        return out;
+    }
+    for (const ch of CURVE_CHANNELS) {
+        const raw = (doc as any)[ch];
+        if (Array.isArray(raw) && raw.length >= 2) {
+            const pts: CurvePoint[] = [];
+            for (const p of raw) {
+                if (Array.isArray(p) && p.length >= 2) {
+                    const x = Number(p[0]);
+                    const y = Number(p[1]);
+                    if (Number.isFinite(x) && Number.isFinite(y)) {
+                        pts.push({ x, y });
+                    }
+                }
+            }
+            if (pts.length >= 2) {
+                out[ch] = pts;
+            }
+        }
+    }
+    return out;
+};

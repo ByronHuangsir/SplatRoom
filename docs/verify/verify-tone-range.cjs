@@ -386,7 +386,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 const r = { label, bp, wp };
                 try {
                     // 返回形状是 { selected, unselected, min, max, numValues }（不是 bins）
-                    const hist = await scene.dataProcessor.calcHistogram(splat, 1);
+                    //
+                    // **模式必须是颜色模式（5..7 / 18..20），不能用 1**：`propMode = 1` 是
+                    // `worldPos.y`（坐标），根本不经过 `applyColorGrade`，用它测"调色有没有
+                    // 影响这条通路"会永远读到"没变化"（HANDOFF 53）。这里用 5 = 最终颜色 R，
+                    // 也就是黑场/白场真正作用的那条通路。
+                    const hist = await scene.dataProcessor.calcHistogram(splat, 5);
                     const sel = hist && hist.selected ? Array.from(hist.selected) : [];
                     const uns = hist && hist.unselected ? Array.from(hist.unselected) : [];
                     r.histBins = sel.length;
@@ -394,12 +399,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                         Number.isFinite(hist.min) && Number.isFinite(hist.max);
                     r.histSum = +(sel.reduce((a, b) => a + b, 0) + uns.reduce((a, b) => a + b, 0)).toFixed(1);
                     r.histValues = hist.numValues;
+                    r.histRange = [hist.min, hist.max];
                 } catch (e) {
                     r.histError = String(e).slice(0, 120);
                 }
                 try {
                     const minMax = [0, 1];
-                    const mask = await scene.dataProcessor.selectByRange(splat, 1, {
+                    const mask = await scene.dataProcessor.selectByRange(splat, 5, {
                         min: minMax[0], max: minMax[1], numBins: 256, rangeStart: 0, rangeEnd: 255, onScreenOnly: false
                     });
                     let sel = 0;
@@ -437,6 +443,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 return `${k}: hist=${r.histError ? 'ERR:' + r.histError : (r.histBins + ' bins, values=' + r.histValues + ', finite=' + r.histFinite + ', sum=' + r.histSum)} ` +
                     `sel=${r.selectError ? 'ERR:' + r.selectError : (r.selected + '/' + r.total)}`;
             }).join(' | '));
+
+        // 上面那条只证明"不炸"。这条证明**黑场/白场真的走到了颜色通路**（mode 5 = 最终颜色 R）：
+        // 退化档（黑场=白场=1，被 MIN_TONE_RANGE 兜住）与正常档（黑场 0.5）应该给出不同的
+        // 直方图 min/max。用 mode 1（坐标）时这条会**永远读到"一样"**，也就测不出东西（HANDOFF 53）。
+        const d = dataPath.degenerate;
+        const n = dataPath.normal;
+        const reachable = !!(d && n && Array.isArray(d.histRange) && Array.isArray(n.histRange));
+        const moved = reachable &&
+            (Math.abs(d.histRange[0] - n.histRange[0]) > 0.02 || Math.abs(d.histRange[1] - n.histRange[1]) > 0.02);
+        check('the tone range actually reaches the graded colour path (histogram mode 5 moves with it)',
+            reachable && moved,
+            reachable
+                ? `最终颜色 R 范围：退化档(黑场=白场=1) ${d.histRange.map(v => v.toFixed(3)).join('..')} vs ` +
+                  `正常档(黑场 0.5) ${n.histRange.map(v => v.toFixed(3)).join('..')}；` +
+                  `选中数 ${d.selected}/${d.total} vs ${n.selected}/${n.total}` +
+                  `（改前这两条检查用的是 mode 1 = worldPos.y，根本不经过调色）`
+                : 'phase missing');
     } catch (e) {
         check('suite ran without throwing', false, String(e).slice(0, 200));
     }

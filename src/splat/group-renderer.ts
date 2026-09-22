@@ -622,6 +622,12 @@ class GroupRenderer {
             material.setParameter('hslSatB', [0, 0, 0, 0]);
             material.setParameter('hslLumA', [0, 0, 0, 0]);
             material.setParameter('hslLumB', [0, 0, 0, 0]);
+            // 曲线也要显式中性（2026-09-22，第十七轮）：merged 实体是一次 draw、多份来源，
+            // 每份来源的曲线各不相同 ⇒ 这里只能是"不施加"。**必须显式写 0**：
+            // 着色器里 `uCurveEnabled` 一旦为 1 就会去采样 `uCurve` 纹理，
+            // 而合并材质根本没有绑定那张纹理（未绑定采样在 WGSL/GLSL 上都是未定义行为）。
+            // 与上面其它中性值同一个理由，别删。
+            material.setParameter('uCurveEnabled', 0);
             material.setParameter('showDeleted', 0.0);
             // 中性选择/锁定色：merged 的 state 纹理全零（无选择/锁定），
             // 设置中性值防止意外非零时模型被染色（与单模型默认一致）

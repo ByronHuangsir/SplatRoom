@@ -10,6 +10,8 @@ import {
     CURVE_SAMPLES,
     applyCurveSetToRGB,
     applyCurveToRGB,
+    curveSetFromDoc,
+    curveSetToDoc,
     curveSetToTables,
     emptyCurveSet,
     evaluateCurveAt,
@@ -167,6 +169,50 @@ check('applyCurveSetToRGB works on {r,g,b} objects (ColorGrade) and on arrays al
         return Math.abs(obj.r - arr[0]) < 1e-9 && Math.abs(obj.b - arr[2]) < 1e-9 && obj.b < 0.25 && obj.r > 0.45;
     })(),
     '同一组表对对象与数组结果一致；蓝通道被压到 ~0.2，红/绿保持 0.5');
+
+// ---- 5. 文档（JSON）形式（第十七轮）：`.ssproj` 与 `.sscg` 侧车共用 ----
+const docSet = toCurveSet({
+    master: [{ x: 0, y: 0.05 }, { x: 0.5, y: 0.6 }, { x: 1, y: 0.98 }],
+    red: [{ x: 0, y: 0 }, { x: 1, y: 0.8 }]
+});
+const doc = curveSetToDoc(docSet);
+check('curveSetToDoc writes [[x,y],…] per channel and null for the empty ones',
+    Array.isArray(doc.master) && doc.master.length === 3 && doc.master[1][0] === 0.5 && doc.master[1][1] === 0.6 &&
+    Array.isArray(doc.red) && doc.red.length === 2 && doc.green === null && doc.blue === null,
+    `curves=${JSON.stringify(doc)}`);
+
+check('curveSetFromDoc round-trips the control points (and 33×4 tables stay bit-identical)',
+    (() => {
+        const back = curveSetFromDoc(doc);
+        const t0 = curveSetToTables(docSet);
+        const t1 = curveSetToTables(back);
+        return JSON.stringify(back) === JSON.stringify(docSet) &&
+            !!t0 && !!t1 && JSON.stringify(Array.from(t0)) === JSON.stringify(Array.from(t1));
+    })(),
+    '控制点逐点一致，采样表逐位一致（所以"存了再读"画面不会变）');
+
+check('curveSetFromDoc(null / undefined / {} ) is the identity set (nothing invented)',
+    isIdentityCurveSet(curveSetFromDoc(null)) &&
+    isIdentityCurveSet(curveSetFromDoc(undefined)) &&
+    isIdentityCurveSet(curveSetFromDoc({})),
+    '侧车里 `curves: null` 与"整个字段缺失"都落到全恒等（"缺失 = 不碰"由调用方区分，见 color-grade-file.ts）');
+
+check('curveSetFromDoc drops junk: non-pairs, non-finite values, and channels with < 2 usable points',
+    (() => {
+        const s = curveSetFromDoc({
+            master: [[0, 0], [1, 1]],
+            red: [[0, 0]],                        // 只有 1 个点 ⇒ 恒等
+            green: [[0, 0], ['x', 0.5], [1, 1]],  // 中间那个不是数字对 ⇒ 丢掉
+            blue: [[0, NaN], [1, 'q'], [0.5, 0.5]]
+        } as any);
+        return s.master!.length === 2 && s.red === null && s.green!.length === 2 && s.blue === null;
+    })(),
+    '红通道 1 个点 ⇒ 恒等；绿通道丢掉坏点后剩两个；蓝通道全是坏值 ⇒ 恒等（不会拿 NaN 去采样）');
+
+check('curveSetToDoc of a cleared set is all-null (so "清空曲线"能存进侧车)',
+    CURVE_CHANNELS.every(ch => curveSetToDoc(emptyCurveSet())[ch] === null) &&
+    CURVE_CHANNELS.every(ch => curveSetToDoc(null)[ch] === null),
+    '全恒等 / null ⇒ 四个通道都是 null');
 
 const failed = checks.filter(c => !c.pass).length;
 console.log(JSON.stringify({ checks, failed }, null, 1));

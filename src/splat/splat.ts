@@ -21,7 +21,7 @@ import {
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
-import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
+import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
 import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -2062,11 +2062,7 @@ class Splat extends Element {
             hslSat: Array.from(this._hslSat),
             hslLum: Array.from(this._hslLum),
             // 曲线调色：存四个通道的**控制点**（每个通道 3~8 个数字对），比存 33×4 个采样值短、可读
-            curves: CURVE_CHANNELS.reduce((acc, ch) => {
-                const pts = this._curvePoints[ch];
-                acc[ch] = pts ? pts.map(p => [p.x, p.y]) : null;
-                return acc;
-            }, {} as Record<string, number[][] | null>)
+            curves: curveSetToDoc(this._curvePoints)
         };
     }
 
@@ -2092,14 +2088,7 @@ class Splat extends Element {
         if (hslLum) this.hslLum = hslLum;
         // 曲线：可选字段（旧 .ssproj 没有 ⇒ 保持恒等），格式 `{ master: [[x,y],…], red: …, green: …, blue: … }`
         if (curves && typeof curves === 'object') {
-            const set: Partial<CurveSet> = {};
-            for (const ch of CURVE_CHANNELS) {
-                const raw = curves[ch];
-                if (Array.isArray(raw) && raw.length >= 2) {
-                    set[ch] = raw.map((p: number[]) => ({ x: p[0], y: p[1] }));
-                }
-            }
-            this.setCurves(set);
+            this.setCurves(curveSetFromDoc(curves));
         }
     }
 }

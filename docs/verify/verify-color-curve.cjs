@@ -530,6 +530,126 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('no page errors after driving the panel UI', errors.length === 0,
         errors.slice(0, 3).join(' | ') || 'none');
 
+    // ---- 11：`.sscg` 侧车往返（第十七轮：侧车原来只存调色参数、**曲线整个丢掉**）----
+    //
+    // 无头环境里 `showSaveFilePicker` / `showOpenFilePicker` 不存在，正好可以把它俩换成
+    // 页内桩：保存侧车时把 JSON 截在 `write()` 里（不用 CDP 下载重定向），
+    // 读取时喂一个我们自己的 `File`。走的是**应用真实的 grade.save / grade.load 事件**，
+    // 不是直接调模块函数。
+    const sidecar = await page.evaluate(async () => {
+        try {
+            const scene = window.scene;
+            const s = window.__splat;
+            const points = [
+                { x: 0, y: 0.05 }, { x: 0.45, y: 0.55 }, { x: 1, y: 0.98 }
+            ];
+            s.setCurves(null);
+            await window.__render(2);
+            const base = await window.__grab();
+
+            // 一条能明显改变画面的曲线 + 一个非中性调色参数（证明整份侧车都过了一遍）
+            s.setCurves({ master: points, red: [{ x: 0, y: 0 }, { x: 0.5, y: 0.6 }, { x: 1, y: 1 }] });
+            s.brightness = 0.07;
+            const graded = await window.__grab();
+
+            // 保存：截住 JSON
+            let saved = null;
+            window.showSaveFilePicker = async () => ({
+                createWritable: async () => ({
+                    write: async (blob) => { saved = await blob.text(); },
+                    close: async () => { }
+                })
+            });
+            scene.events.fire('grade.save');
+            for (let i = 0; i < 40 && !saved; i++) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            const doc = saved ? JSON.parse(saved) : null;
+
+            // 清空曲线与调色，再用同一份 JSON 读回来
+            s.setCurves(null);
+            s.brightness = 0;
+            await window.__render(2);
+
+            window.showOpenFilePicker = async () => ([{
+                getFile: async () => new File([saved ?? ''], 'test-model.ply.sscg', { type: 'application/json' })
+            }]);
+            scene.events.fire('grade.load');
+            await new Promise(r => setTimeout(r, 800));
+            await window.__render(3);
+            const restored = await window.__grab();
+            // 曲线要单独读（`__grab()` 只给亮度/像素统计，没有曲线）
+            const restoredCurves = JSON.parse(JSON.stringify(s.curves));
+
+            // 旧版（v4，无 curves 字段）侧车：不能崩，也不能动曲线。
+            // 先清掉曲线，这样"旧文件读进来之后曲线还是空的"才说明它真的没碰曲线。
+            s.setCurves(null);
+            await window.__render(2);
+            const legacy = JSON.stringify({ version: 4, sourceFile: 'test-model.ply', brightness: 0.2 });
+            window.showOpenFilePicker = async () => ([{
+                getFile: async () => new File([legacy], 'legacy.ply.sscg', { type: 'application/json' })
+            }]);
+            scene.events.fire('grade.load');
+            await new Promise(r => setTimeout(r, 800));
+            const afterLegacy = { curves: JSON.parse(JSON.stringify(s.curves)), brightness: s.brightness };
+
+            s.setCurves(null);
+            s.brightness = 0;
+            await window.__render(2);
+            return {
+                version: doc ? doc.version : null,
+                docCurves: doc ? doc.curves : null,
+                docBrightness: doc ? doc.brightness : null,
+                savedBytes: saved ? saved.length : 0,
+                restoredCurves,
+                samePoints: JSON.stringify(restoredCurves) === JSON.stringify({
+                    master: points, red: [{ x: 0, y: 0 }, { x: 0.5, y: 0.6 }, { x: 1, y: 1 }],
+                    green: null, blue: null
+                }),
+                meanLumBase: base.meanLum, meanLumGraded: graded.meanLum, meanLumRestored: restored.meanLum,
+                maxPixelDiff: (() => {
+                    let m = 0;
+                    for (let i = 0; i < graded.data.length; i++) {
+                        m = Math.max(m, Math.abs(graded.data[i] - restored.data[i]));
+                    }
+                    return m;
+                })(),
+                afterLegacy
+            };
+        } catch (e) {
+            return { error: String(e).slice(0, 250) };
+        }
+    });
+
+    check('.sscg sidecar stores the curves (v5) instead of dropping them',
+        !!sidecar.docCurves && Array.isArray(sidecar.docCurves.master) && sidecar.docCurves.master.length === 3 &&
+        Array.isArray(sidecar.docCurves.red) && sidecar.docCurves.red.length === 3 &&
+        sidecar.docCurves.green === null && sidecar.docCurves.blue === null &&
+        sidecar.version === 5,
+        sidecar.error ? `phase error: ${sidecar.error}` :
+            `version=${sidecar.version}（v4 及更早没有 curves）；curves=${JSON.stringify(sidecar.docCurves)}；` +
+            `同时存下的 brightness=${sidecar.docBrightness}；JSON ${sidecar.savedBytes} 字节`);
+
+    check('loading that .sscg back restores the curve and the graded image (pixel-level)',
+        sidecar.samePoints && sidecar.maxPixelDiff <= 2 &&
+        Math.abs(sidecar.meanLumRestored - sidecar.meanLumGraded) < 0.002 &&
+        sidecar.meanLumGraded > sidecar.meanLumBase + 0.01,
+        sidecar.error ? `phase error: ${sidecar.error}` :
+            `控制点一致=${sidecar.samePoints}；恢复后与"存之前那一帧"逐像素最大差 ${sidecar.maxPixelDiff}；` +
+            `meanLum 基线 ${sidecar.meanLumBase?.toFixed(4)} → 调色后 ${sidecar.meanLumGraded?.toFixed(4)} → ` +
+            `读回侧车后 ${sidecar.meanLumRestored?.toFixed(4)}；读回的曲线 ${JSON.stringify(sidecar.restoredCurves)}`);
+
+    check('a v4 sidecar (no curves field) still loads and leaves the curves alone',
+        !!sidecar.afterLegacy && sidecar.afterLegacy.brightness === 0.2 &&
+        sidecar.afterLegacy.curves &&
+        sidecar.afterLegacy.curves.master === null && sidecar.afterLegacy.curves.red === null,
+        sidecar.error ? `phase error: ${sidecar.error}` :
+            `旧侧车只有 brightness ⇒ 读回后 brightness=${sidecar.afterLegacy?.brightness}（=0.2）、` +
+            `曲线没有被凭空造出来（master=${JSON.stringify(sidecar.afterLegacy?.curves?.master)}）`);
+
+    check('no page errors after driving the panel UI', errors.length === 0,
+        errors.slice(0, 3).join(' | ') || 'none');
+
     console.log(JSON.stringify({ model: MODEL, url: URL, checks, failed: checks.filter(c => !c.pass).length }, null, 1));
     await browser.close();
     process.exit(0);
