@@ -107,17 +107,20 @@ fn applySaturationToColor(c: vec3f) -> vec3f {
 }
 
 // ---- 曲线调色（与 GLSL 侧、CPU 侧逐位同一套：33 点线性插值）----
-fn curveLookup(xIn: f32) -> f32 {
+// 纹理是 33×4 的 R32F：行 0 = RGB 主曲线，行 1/2/3 = R/G/B（见 color-curves.ts）。
+fn curveLookup(xIn: f32, ch: i32) -> f32 {
     let t: f32 = clamp(xIn, 0.0, 1.0) * 32.0;
     let i0: i32 = i32(floor(t));
     let i1: i32 = min(i0 + 1, 32);
-    let a: f32 = textureLoad(uCurve, vec2i(i0, 0), 0).r;
-    let b: f32 = textureLoad(uCurve, vec2i(i1, 0), 0).r;
+    let a: f32 = textureLoad(uCurve, vec2i(i0, ch), 0).r;
+    let b: f32 = textureLoad(uCurve, vec2i(i1, ch), 0).r;
     return mix(a, b, t - f32(i0));
 }
 
 fn applyCurveToColor(c: vec3f) -> vec3f {
-    return vec3f(curveLookup(c.x), curveLookup(c.y), curveLookup(c.z));
+    // 先 RGB 主曲线（三通道同一条），再各自通道的曲线
+    let m: vec3f = vec3f(curveLookup(c.x, 0), curveLookup(c.y, 0), curveLookup(c.z, 0));
+    return vec3f(curveLookup(m.x, 1), curveLookup(m.y, 2), curveLookup(m.z, 3));
 }
 
 // per-splat hashed random numbers, shared with the modify hook

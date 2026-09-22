@@ -68,17 +68,20 @@ vec3 applySaturation(vec3 color) {
 }
 
 // ---- 曲线调色（与 WGSL 侧、CPU 侧逐位同一套：33 点线性插值）----
-float curveLookup(float xIn) {
+// 纹理是 33×4 的 R32F：行 0 = RGB 主曲线，行 1/2/3 = R/G/B（见 color-curves.ts）。
+float curveLookup(float xIn, int ch) {
     float t = clamp(xIn, 0.0, 1.0) * 32.0;
     int i0 = int(floor(t));
     int i1 = min(i0 + 1, 32);
-    float a = texelFetch(uCurve, ivec2(i0, 0), 0).r;
-    float b = texelFetch(uCurve, ivec2(i1, 0), 0).r;
+    float a = texelFetch(uCurve, ivec2(i0, ch), 0).r;
+    float b = texelFetch(uCurve, ivec2(i1, ch), 0).r;
     return mix(a, b, t - float(i0));
 }
 
 vec3 applyCurve(vec3 color) {
-    return vec3(curveLookup(color.r), curveLookup(color.g), curveLookup(color.b));
+    // 先 RGB 主曲线（三通道同一条），再各自通道的曲线
+    color = vec3(curveLookup(color.r, 0), curveLookup(color.g, 0), curveLookup(color.b, 0));
+    return vec3(curveLookup(color.r, 1), curveLookup(color.g, 2), curveLookup(color.b, 3));
 }
 
 void main(void) {

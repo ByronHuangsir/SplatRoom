@@ -77,6 +77,12 @@ uniform float cgOffset;
 uniform float cgSaturation;
 uniform float transparency;
 
+// 曲线调色（与视口/导出同一组表：33×4 R32F，行 0 = RGB 主曲线，1/2/3 = R/G/B）。
+// 直方图与"按范围选择"必须跟视口一致，否则用户看到的是曲线后的画面、
+// 筛选却按曲线前的颜色算 —— 这是第十三轮之后仍存在的缺口，这里补上。
+uniform sampler2D cgCurve;
+uniform float cgCurveEnabled;
+
 // SH band weighting constants (matches engine's gsplatEvalSH GLSL chunk).
 #if SH_BANDS > 0
 const float SH_C1 = 0.4886025119029199;
@@ -109,8 +115,22 @@ struct Splat {
     bool visible;       // passes the onScreenOnly filter
 };
 
+float cgCurveLookup(float xIn, int ch) {
+    float t = clamp(xIn, 0.0, 1.0) * 32.0;
+    int i0 = int(floor(t));
+    int i1 = min(i0 + 1, 32);
+    float a = texelFetch(cgCurve, ivec2(i0, ch), 0).r;
+    float b = texelFetch(cgCurve, ivec2(i1, ch), 0).r;
+    return mix(a, b, t - float(i0));
+}
+
 vec3 applyColorGrade(vec3 c) {
     c = cgOffset + c * cgScale;
+    // 曲线：先 RGB 主曲线（行 0），再各自通道（行 1/2/3）—— 与顶点着色器/CPU 镜像同序
+    if (cgCurveEnabled > 0.5) {
+        c = vec3(cgCurveLookup(c.r, 0), cgCurveLookup(c.g, 0), cgCurveLookup(c.b, 0));
+        c = vec3(cgCurveLookup(c.r, 1), cgCurveLookup(c.g, 2), cgCurveLookup(c.b, 3));
+    }
     float grey = dot(c, vec3(0.299, 0.587, 0.114));
     return mix(vec3(grey), c, cgSaturation);
 }

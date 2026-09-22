@@ -62,7 +62,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 await nextFrame();
             }
         };
-        // 抓一帧的亮度统计 + 原始像素（用于逐像素对照）
+        // 抓一帧的亮度统计 + **每通道均值** + 原始像素（每通道均值是分通道曲线的判据）
         window.__grab = async () => {
             await window.__render(3);
             const src = scene.canvas;
@@ -75,15 +75,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const lums = [];
             let sum = 0;
             let n = 0;
+            let sumR = 0;
+            let sumG = 0;
+            let sumB = 0;
             for (let i = 0; i < d.length; i += 4 * 5) {
                 const lum = (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
                 sum += lum;
+                sumR += d[i] / 255;
+                sumG += d[i + 1] / 255;
+                sumB += d[i + 2] / 255;
                 lums.push(lum);
                 n++;
             }
             lums.sort((a, b) => a - b);
             return {
                 meanLum: sum / n,
+                meanR: sumR / n,
+                meanG: sumG / n,
+                meanB: sumB / n,
                 p10: lums[Math.floor(n * 0.1)],
                 median: lums[Math.floor(n * 0.5)],
                 p90: lums[Math.floor(n * 0.9)],
@@ -102,6 +111,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             for (let i = 0; i < 33; i++) a[i] = Math.min(1, Math.max(0, fn(i / 32)));
             return a;
         };
+        // 把采样函数变成**控制点**（等距 33 个点，形状与 __samples 等价）
+        window.__points = (fn) => {
+            const pts = [];
+            for (let i = 0; i < 33; i++) {
+                pts.push({ x: i / 32, y: Math.min(1, Math.max(0, fn(i / 32))) });
+            }
+            return pts;
+        };
+        // 设置曲线（第 14 轮起是四通道：不传 channels 就只设 RGB 主曲线）
+        window.__setCurve = (points) => {
+            window.__splat.setCurves(points ? { master: points } : null);
+        };
     });
 
     const baseline = await page.evaluate(() => window.__grab());
@@ -111,7 +132,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // 注意：`uCurveEnabled` 是**每帧**在 onPreRender 里推的，所以必须先出一帧再读，
     // 否则读到的是上一帧的值（第一版就踩了这个，读到 0）。
     const identity = await page.evaluate(async () => {
-        window.__splat.setCurve(window.__samples(x => x));
+        window.__setCurve(window.__points(x => x));
         const g = await window.__grab();
         const en = window.__curveEnabled();
         return { en, g };
@@ -143,12 +164,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // ---- 3：抬亮 / 压暗方向 ----
     const lift = await page.evaluate(async () => {
-        window.__splat.setCurve(window.__samples(x => x + 0.35 * x * (1 - x) * 4 * 0.25 + 0.2 * Math.sin(Math.PI * x)));
+        window.__setCurve(window.__points(x => x + 0.35 * x * (1 - x) * 4 * 0.25 + 0.2 * Math.sin(Math.PI * x)));
         const g = await window.__grab();
         return { ...g, en: window.__curveEnabled() };
     });
     const crush = await page.evaluate(async () => {
-        window.__splat.setCurve(window.__samples(x => x - 0.2 * Math.sin(Math.PI * x)));
+        window.__setCurve(window.__points(x => x - 0.2 * Math.sin(Math.PI * x)));
         return window.__grab();
     });
 
@@ -164,7 +185,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // ---- 4：S 曲线拉对比 ----
     const sCurve = await page.evaluate(async () => {
         // 平滑 S：暗端压、亮端抬（拐点在 0.5）
-        window.__splat.setCurve(window.__samples(x => x + 0.35 * x * (1 - x) * (2 * x - 1)));
+        window.__setCurve(window.__points(x => x + 0.35 * x * (1 - x) * (2 * x - 1)));
         return window.__grab();
     });
     // 判据用"围绕中位数的展布"而不是"p90 一定变亮"：本夹具的画面几乎是均匀中灰
@@ -182,7 +203,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // ---- 5：还原 ----
     const restored = await page.evaluate(async () => {
-        window.__splat.setCurve(null);
+        window.__setCurve(null);
         const g = await window.__grab();
         const en = window.__curveEnabled();   // 同样要等一帧
         return { en, g };
@@ -258,8 +279,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         uiDrag = await page.evaluate(async () => {
             const g = await window.__grab();
             return {
-                points: window.__splat.curvePoints,
-                hasCurve: !!window.__splat.curve,
+                points: window.__splat.curves.master,
+                hasCurve: !!window.__splat.curveTables,
                 enabled: window.__curveEnabled(),
                 meanLum: g.meanLum,
                 dots: document.querySelectorAll('.curve-dot').length
@@ -282,7 +303,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const afterUndo = await page.evaluate(async () => {
         window.scene.events.fire('edit.undo');
         const g = await window.__grab();
-        return { points: window.__splat.curvePoints, hasCurve: !!window.__splat.curve, meanLum: g.meanLum };
+        return { points: window.__splat.curves.master, hasCurve: !!window.__splat.curveTables, meanLum: g.meanLum };
     });
     check('one drag = one undo step (undo removes the whole curve)',
         !afterUndo.hasCurve && afterUndo.points === null &&
@@ -293,7 +314,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // 分类复位按钮：把曲线清掉
     const afterReset = await page.evaluate(async () => {
         // 先造一条曲线（走 splat API，等价于拖控件），再点"曲线"分类的复位按钮
-        window.__splat.setCurvePoints([{ x: 0, y: 0 }, { x: 0.5, y: 0.7 }, { x: 1, y: 1 }]);
+        window.__setCurve([{ x: 0, y: 0 }, { x: 0.5, y: 0.7 }, { x: 1, y: 1 }]);
         await window.__render(2);
         const curveSection = document.querySelector('.curve-section');
         const btn = curveSection && curveSection.querySelector('.category-reset-btn');
@@ -304,8 +325,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const g = await window.__grab();
         return {
             ok: true,
-            hasCurve: !!window.__splat.curve,
-            points: window.__splat.curvePoints,
+            hasCurve: !!window.__splat.curveTables,
+            points: window.__splat.curves.master,
             dots: document.querySelectorAll('.curve-dot').length,
             meanLum: g.meanLum
         };
@@ -321,26 +342,190 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // ---- 7：文档往返（.ssproj 用的就是这条）----
     const roundTrip = await page.evaluate(() => {
         const s = window.__splat;
-        s.setCurvePoints([{ x: 0, y: 0.05 }, { x: 0.45, y: 0.55 }, { x: 1, y: 0.98 }]);
-        const before = { points: s.curvePoints, samples: Array.from(s.curve || []) };
+        s.setCurves({
+            master: [{ x: 0, y: 0.05 }, { x: 0.45, y: 0.55 }, { x: 1, y: 0.98 }],
+            red: [{ x: 0, y: 0 }, { x: 0.5, y: 0.6 }, { x: 1, y: 1 }]
+        });
+        const grab = () => ({
+            points: s.curves,
+            // 四个通道各取前 33 个采样值，比对整张表
+            tables: Array.from(s.curveTables || [])
+        });
+        const before = grab();
         const doc = s.docSerialize();
-        s.setCurvePoints(null);
+        s.setCurves(null);
         s.docDeserialize(doc);
-        const after = { points: s.curvePoints, samples: Array.from(s.curve || []) };
+        const after = grab();
         return {
-            docCurve: doc.curve,
+            docCurves: doc.curves,
             before,
             after,
             samePoints: JSON.stringify(before.points) === JSON.stringify(after.points),
-            maxSampleDiff: after.samples.length === before.samples.length ?
-                before.samples.reduce((m, v, i) => Math.max(m, Math.abs(v - after.samples[i])), 0) : 1
+            sameTables: JSON.stringify(before.tables) === JSON.stringify(after.tables)
         };
     });
-    check('docSerialize/docDeserialize round-trips the curve (control points as [x, y] pairs)',
-        Array.isArray(roundTrip.docCurve) && roundTrip.docCurve.length === 3 &&
-        roundTrip.samePoints && roundTrip.maxSampleDiff < 1e-9,
-        `doc.curve=${JSON.stringify(roundTrip.docCurve)}；` +
-        `往返后控制点一致=${roundTrip.samePoints}；33 个采样点最大差 ${roundTrip.maxSampleDiff.toExponential(2)}`);
+    check('docSerialize/docDeserialize round-trips all four curve channels (master + red here)',
+        !!roundTrip.docCurves && Array.isArray(roundTrip.docCurves.master) && roundTrip.docCurves.master.length === 3 &&
+        Array.isArray(roundTrip.docCurves.red) && roundTrip.docCurves.red.length === 3 &&
+        roundTrip.docCurves.green === null && roundTrip.docCurves.blue === null &&
+        roundTrip.samePoints && roundTrip.sameTables,
+        `doc.curves=${JSON.stringify(roundTrip.docCurves)}；控制点一致=${roundTrip.samePoints}；` +
+        `33×4 张表逐位一致=${roundTrip.sameTables}`);
+
+    // ---- 8：分通道独立性（只动红通道时，绿蓝逐像素不变）----
+    const perChannel = await page.evaluate(async () => {
+        try {
+            const s = window.__splat;
+            s.setCurves(null);
+            const base = await window.__grab();
+            // 只抬红通道
+            s.setCurves({ red: window.__points(x => Math.min(1, x + 0.3 * Math.sin(Math.PI * x))) });
+            const onlyRed = await window.__grab();
+            // 只压蓝通道
+            s.setCurves({ blue: window.__points(x => Math.max(0, x - 0.3 * Math.sin(Math.PI * x))) });
+            const onlyBlue = await window.__grab();
+            s.setCurves(null);
+            const back = await window.__grab();
+            // 逐像素比对"绿/蓝通道有没有被红曲线影响"
+            let maxG = 0;
+            let maxB = 0;
+            let maxR = 0;
+            for (let i = 0; i < base.data.length; i += 4) {
+                maxR = Math.max(maxR, Math.abs(base.data[i] - onlyRed.data[i]));
+                maxG = Math.max(maxG, Math.abs(base.data[i + 1] - onlyRed.data[i + 1]));
+                maxB = Math.max(maxB, Math.abs(base.data[i + 2] - onlyRed.data[i + 2]));
+            }
+            return {
+                baseMean: { r: base.meanR, g: base.meanG, b: base.meanB },
+                redMean: { r: onlyRed.meanR, g: onlyRed.meanG, b: onlyRed.meanB },
+                blueMean: { r: onlyBlue.meanR, g: onlyBlue.meanG, b: onlyBlue.meanB },
+                maxR,
+                maxG,
+                maxB,
+                restored: Math.abs(back.meanLum - base.meanLum) < 1e-6 && Math.abs(back.meanR - base.meanR) < 1e-6
+            };
+        } catch (e) {
+            return { error: String(e).slice(0, 200) };
+        }
+    });
+
+    check('a red-channel-only curve raises R and leaves G/B bit-identical',
+        !!perChannel.redMean && perChannel.redMean.r > perChannel.baseMean.r + 0.05 &&
+        perChannel.maxG === 0 && perChannel.maxB === 0 && perChannel.maxR > 20,
+        perChannel.redMean
+            ? `R 均值 ${perChannel.baseMean.r.toFixed(4)} → ${perChannel.redMean.r.toFixed(4)}；` +
+              `逐像素最大变化 R=${perChannel.maxR} G=${perChannel.maxG} B=${perChannel.maxB}（G/B 必须为 0）`
+            : `phase error: ${perChannel.error}`);
+
+    check('a blue-channel-only curve lowers B only, and clearing restores the baseline',
+        !!perChannel.blueMean && perChannel.blueMean.b < perChannel.baseMean.b - 0.05 &&
+        Math.abs(perChannel.blueMean.r - perChannel.baseMean.r) < 0.005 &&
+        Math.abs(perChannel.blueMean.g - perChannel.baseMean.g) < 0.005 &&
+        perChannel.restored,
+        perChannel.blueMean
+            ? `B 均值 ${perChannel.baseMean.b.toFixed(4)} → ${perChannel.blueMean.b.toFixed(4)}；` +
+              `R/G 变化 ${Math.abs(perChannel.blueMean.r - perChannel.baseMean.r).toFixed(4)} / ` +
+              `${Math.abs(perChannel.blueMean.g - perChannel.baseMean.g).toFixed(4)}；清空后回到基线=${perChannel.restored}`
+            : `phase error: ${perChannel.error}`);
+
+    // ---- 9：直方图 / 范围选择必须跟曲线一致（第十四轮补的镜像）----
+    // 三个坑（都踩过）：
+    //   ① 模式必须用**颜色模式**（5..7 = 最终颜色的 R/G/B、18..20 = HSV）：`propMode = 1` 是
+    //      `worldPos.y`（位置），根本不经过 `applyColorGrade`；
+    //   ② 直方图的柱按 [min,max] 归一化，单调曲线不改变"秩" ⇒ 柱形/重心几乎不动，
+    //      能证明"s 曲线进了这条通路"的是 **min/max 数值**；
+    //   ③ "选亮部命中数"不是好判据（基线恰好也是 1200）。可靠的判据是**逐档问**：
+    //      在固定 [0,1] 区间里挑一个高档与一个低档，看曲线把命中从高档搬到低档。
+    const mirror = await page.evaluate(async () => {
+        try {
+            const COLOR_MODE = 5; // 最终颜色的 R 通道（isFinalColorMode 5..7 / 18..20）
+            const scene = window.scene;
+            const splat = window.__splat;
+            const count = async (lo, hi) => {
+                const mask = await scene.dataProcessor.selectByRange(splat, COLOR_MODE, {
+                    min: 0, max: 1, numBins: 256, rangeStart: lo, rangeEnd: hi, onScreenOnly: false
+                });
+                let sel = 0;
+                if (mask) {
+                    const arr = mask instanceof Uint8Array ? mask : new Uint8Array(mask);
+                    for (let i = 0; i < arr.length; i++) {
+                        if (arr[i]) {
+                            sel++;
+                        }
+                    }
+                    scene.dataProcessor.releaseMask(mask);
+                }
+                return sel;
+            };
+            const histOf = async () => {
+                const h = await scene.dataProcessor.calcHistogram(splat, COLOR_MODE);
+                return { min: h.min, max: h.max, bins: Array.from(h.selected || []).length };
+            };
+            // 一个"高档"（值 ≈0.78）与一个"低档"（值 ≈0.16）
+            const HI = 200;
+            const LO = 40;
+            const probe = async () => ({ hi: await count(HI, HI), lo: await count(LO, LO) });
+            // 扫一遍档位，找出"选择通路眼里"的非空范围（每 8 档问一次，分辨率 3%）
+            const scan = async () => {
+                let lo = -1;
+                let hi = -1;
+                for (let b = 0; b < 256; b += 8) {
+                    if (await count(b, b + 7) > 0) {
+                        if (lo < 0) {
+                            lo = b;
+                        }
+                        hi = b + 7;
+                    }
+                }
+                return { lo, hi };
+            };
+
+            splat.setCurves(null);
+            await window.__render(2);
+            const baseHist = await histOf();
+            const baseProbe = await probe();
+            const baseScan = await scan();
+
+            // 整体压到一半：原来在高档的点应该落到低档
+            splat.setCurves({ master: [{ x: 0, y: 0 }, { x: 1, y: 0.5 }] });
+            await window.__render(2);
+            const curveHist = await histOf();
+            const curveProbe = await probe();
+            const curveScan = await scan();
+
+            splat.setCurves(null);
+            await window.__render(2);
+            return {
+                rangeBase: [baseHist.min, baseHist.max], rangeCurve: [curveHist.min, curveHist.max],
+                baseProbe, curveProbe, baseScan, curveScan, bins: baseHist.bins,
+                total: splat.numSplats, hiBin: HI, loBin: LO
+            };
+        } catch (e) {
+            return { error: String(e).slice(0, 250) };
+        }
+    });
+
+    check('the histogram reflects the curve (its min/max move with the graded colour)',
+        Array.isArray(mirror.rangeBase) &&
+        mirror.rangeCurve[0] < mirror.rangeBase[0] - 0.02 &&
+        mirror.rangeCurve[1] < mirror.rangeBase[1] - 0.02,
+        Array.isArray(mirror.rangeBase)
+            ? `最终颜色 R 范围 ${mirror.rangeBase.map(v => v.toFixed(3)).join('..')} → ` +
+              `${mirror.rangeCurve.map(v => v.toFixed(3)).join('..')}（把整体压到一半，两端应一起下移）；bins=${mirror.bins}`
+            : `phase error: ${mirror.error}`);
+
+    check('range selection reflects the curve (the bin range it sees moves down with the curve)',
+        !!mirror.baseScan && mirror.baseScan.lo >= 0 && mirror.baseScan.hi > mirror.baseScan.lo &&
+        mirror.curveScan.hi > 0 && mirror.curveScan.hi < mirror.baseScan.hi &&
+        mirror.curveScan.lo < mirror.baseScan.lo,
+        mirror.baseScan
+            ? `固定 [0,1] 区间、256 档，扫描选择通路看到的非空档位：无曲线 ${mirror.baseScan.lo}..${mirror.baseScan.hi}` +
+              `（对应值 ${(mirror.baseScan.lo / 256).toFixed(2)}..${(mirror.baseScan.hi / 256).toFixed(2)}）→ ` +
+              `曲线后 ${mirror.curveScan.lo}..${mirror.curveScan.hi}` +
+              `（${(mirror.curveScan.lo / 256).toFixed(2)}..${(mirror.curveScan.hi / 256).toFixed(2)}）；` +
+              `直方图 min/max 同步 ${mirror.rangeBase.map(v => v.toFixed(3)).join('..')} → ${mirror.rangeCurve.map(v => v.toFixed(3)).join('..')}` +
+              `（第十四轮之前这条通路完全不吃曲线）`
+            : `phase error: ${mirror.error}`);
 
     check('no page errors after driving the panel UI', errors.length === 0,
         errors.slice(0, 3).join(' | ') || 'none');
@@ -348,4 +533,4 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(JSON.stringify({ model: MODEL, url: URL, checks, failed: checks.filter(c => !c.pass).length }, null, 1));
     await browser.close();
     process.exit(0);
-})().catch((e) => { console.log(JSON.stringify({ fatal: String(e).slice(0, 500) })); process.exit(1); });
+})().catch((e) => { console.log(JSON.stringify({ fatal: String(e && e.message || e).slice(0, 500), stack: String(e && e.stack || '').slice(0, 900) }, null, 1)); process.exit(1); });

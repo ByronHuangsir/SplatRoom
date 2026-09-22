@@ -180,3 +180,100 @@ export const applyCurveToRGB = (rgb: Float32Array | number[], samples: Float32Ar
     rgb[1] = evaluateCurveAt(samples, rgb[1]);
     rgb[2] = evaluateCurveAt(samples, rgb[2]);
 };
+
+// ---- 分通道（RGB 主 / 红 / 绿 / 蓝）----
+//
+// 着色器里是一张 **33×4 的 R32F 纹理**：行 0 = RGB 主曲线，行 1/2/3 = R/G/B。
+// 施加顺序与 Lightroom 一致：**先主曲线（三通道同一条），再各自通道的曲线**，
+// 也就是 `out.r = f_red(f_master(in.r))`。四份数学（GLSL/WGSL 顶点、CPU 导出镜像、
+// 直方图/范围选择的值通路）都必须按这个顺序。
+
+/** 曲线通道 */
+export type CurveChannel = 'master' | 'red' | 'green' | 'blue';
+
+/** 通道顺序 = 纹理行号（0..3），别改：着色器里的 `ch` 就是它 */
+export const CURVE_CHANNELS: readonly CurveChannel[] = ['master', 'red', 'green', 'blue'];
+
+/** 一组曲线（每条可以是 `null` = 恒等） */
+export type CurveSet = Record<CurveChannel, CurvePoint[] | null>;
+
+/** 全恒等的一组曲线 */
+export const emptyCurveSet = (): CurveSet => ({ master: null, red: null, green: null, blue: null });
+
+/** 把一组控制点拷贝成 `CurveSet`（缺的通道填空） */
+export const toCurveSet = (partial: Partial<CurveSet> | null | undefined): CurveSet => ({
+    master: partial?.master ? partial.master.map(p => ({ x: p.x, y: p.y })) : null,
+    red: partial?.red ? partial.red.map(p => ({ x: p.x, y: p.y })) : null,
+    green: partial?.green ? partial.green.map(p => ({ x: p.x, y: p.y })) : null,
+    blue: partial?.blue ? partial.blue.map(p => ({ x: p.x, y: p.y })) : null
+});
+
+/** 一组曲线是不是全恒等（全恒等 ⇒ 着色器整段跳过） */
+export const isIdentityCurveSet = (set: CurveSet | null | undefined): boolean => {
+    if (!set) {
+        return true;
+    }
+    return CURVE_CHANNELS.every(ch => !set[ch] || isIdentityCurve(sampleCurve(set[ch]!)));
+};
+
+/**
+ * 把一组曲线采样成**一张扁平表**：`tables[ch * CURVE_SAMPLES + i]`，`ch` 见 `CURVE_CHANNELS`。
+ * 全恒等时返回 `null`（调用方据此走"没有曲线"的快路径）。
+ *
+ * @param set - 控制点集合
+ * @param out - 可选目标缓冲（长度 ≥ `CURVE_SAMPLES * 4`）
+ * @returns 长度 `CURVE_SAMPLES * 4` 的采样表，或 `null`
+ */
+export const curveSetToTables = (set: CurveSet | null | undefined, out?: Float32Array): Float32Array | null => {
+    if (!set) {
+        return null;
+    }
+    const dst = out ?? new Float32Array(CURVE_SAMPLES * CURVE_CHANNELS.length);
+    let any = false;
+    for (let ch = 0; ch < CURVE_CHANNELS.length; ch++) {
+        const points = set[CURVE_CHANNELS[ch]];
+        const slice = dst.subarray(ch * CURVE_SAMPLES, (ch + 1) * CURVE_SAMPLES);
+        if (points && points.length >= 2) {
+            sampleCurve(points, slice);
+            if (!isIdentityCurve(slice)) {
+                any = true;
+            }
+        } else {
+            slice.set(identityCurveSamples());
+        }
+    }
+    return any ? dst : null;
+};
+
+/**
+ * 按"先主曲线、再各自通道"的顺序对一个 RGB 施加整组曲线（CPU 导出镜像用）。
+ * 接受任何带 r/g/b 的对象或数组（`ColorGrade` 用的是 `{r,g,b}`）。
+ *
+ * @param rgb - 就地修改（`{r,g,b}` 或长度 ≥ 3 的数组）
+ * @param tables - `curveSetToTables()` 的输出
+ */
+export const applyCurveSetToRGB = (rgb: number[] | Float32Array | { r: number, g: number, b: number }, tables: Float32Array): void => {
+    const isObj = !Array.isArray(rgb) && !(rgb instanceof Float32Array);
+    const get = (i: number) => (isObj ? (i === 0 ? (rgb as any).r : i === 1 ? (rgb as any).g : (rgb as any).b) : (rgb as any)[i]);
+    const set = (i: number, v: number) => {
+        if (isObj) {
+            if (i === 0) {
+                (rgb as any).r = v;
+            } else if (i === 1) {
+                (rgb as any).g = v;
+            } else {
+                (rgb as any).b = v;
+            }
+        } else {
+            (rgb as any)[i] = v;
+        }
+    };
+    const master = tables.subarray(0, CURVE_SAMPLES);
+    const red = tables.subarray(CURVE_SAMPLES, CURVE_SAMPLES * 2);
+    const green = tables.subarray(CURVE_SAMPLES * 2, CURVE_SAMPLES * 3);
+    const blue = tables.subarray(CURVE_SAMPLES * 3, CURVE_SAMPLES * 4);
+    const perCh = [red, green, blue];
+    for (let i = 0; i < 3; i++) {
+        set(i, evaluateCurveAt(perCh[i], evaluateCurveAt(master, get(i))));
+    }
+};

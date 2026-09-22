@@ -3675,6 +3675,53 @@ mediabunny 只有 Matroska/WebM 的 muxer 写 alpha（ISOBMFF 里连 `sideData` 
 
 **产物**：`release\SplatRoom-3.23.20.exe`；提交见 `docs/进度存档.md` 第十三轮。
 
+---
+
+### 6.60 第十四轮：曲线做完整 —— 分通道（RGB/红/绿/蓝）+ 直方图与范围选择的镜像
+
+第十三轮结束时曲线还有一个真缺口：**它只影响视口与导出，不影响"按范围选择"** ——
+用户看到的画面已经变了，筛选却按曲线前的颜色算。这一轮把曲线做完整。
+
+#### 分通道
+
+- LUT 从 33×1 扩成 **33×4 R32F**（行 0 = RGB 主曲线，行 1/2/3 = R/G/B，行号 = `CURVE_CHANNELS` 顺序）；
+- 组合顺序 **先主曲线、再各自通道**（`out.r = f_red(f_master(in.r))`），
+  GLSL 与 WGSL 各 6 次查表，CPU 镜像（`applyCurveSetToRGB`）同序；
+- `Splat.setCurves({master,red,green,blue})` / `curves`（控制点）/ `curveTables`（33×4，全恒等 ⇒ null）；
+  面板四个通道页签；`.ssproj` 存四个通道的控制点；撤消字段 `ColorAdjustment.curves`；
+- 9 语言新增 4 个页签文案（各 695 键）。
+
+#### 直方图 / 范围选择镜像
+
+`splat-value-shader.ts`（两条值通路共用的取值 chunk）新增 `cgCurve` + `cgCurveEnabled`，
+在 `applyColorGrade()` 里按 `scale/offset → 主曲线 → 各通道曲线 → 饱和度` 施加；
+`calc-histogram.ts` / `select-by-range.ts` 把 `splat.curveTexture` 喂进 `values`
+（与 `splatState`/`splatSH_*` 同一套 `resolve(scope, values)` 机制）。
+
+#### 实测（`docs/verify/verify-color-curve.cjs` 18 项，双后端 0 失败；`verify-color-curves.mts` 15 项）
+
+| 项 | 数字 |
+|---|---|
+| 只抬红通道 | R 均值 0.8330 → **0.9393**；**逐像素最大变化 R=255 / G=0 / B=0** |
+| 只压蓝通道 | B 均值 0.3684 → **0.1447**；R/G 变化 0.0000；清空后逐位回基线 |
+| 组合顺序 | 0.4 只过主曲线 ⇒ 0.5200；再叠红通道（×0.5）⇒ **R=0.2600**、G/B 保持 0.5200 |
+| **直方图镜像** | 最终颜色 R 范围 **0.300..0.900 → 0.150..0.450** |
+| **范围选择镜像** | 选择通路看到的非空档位 **72..231（0.28..0.90）→ 32..119（0.13..0.46）** |
+| 文档往返 | `curves={master:[[0,0.05],[0.45,0.55],[1,0.98]], red:[[0,0],[0.5,0.6],[1,1]], green:null, blue:null}`，控制点与 33×4 表逐位一致 |
+
+#### 三个新坑（HANDOFF 53/54/55）
+
+① `propMode = 1` 是 `worldPos.y`（位置），根本不经过 `applyColorGrade`（颜色模式是 5..7 / 18..20）；
+② 直方图的柱按 `[min,max]` 归一化 ⇒ 单调曲线在柱形上不可见（重心 153.0 → 153.0），
+要看 `min`/`max` 或**固定区间扫档位**；
+③ `new Container({ class: 'a b' })` 会让**整个应用起不来**（探针只看到 `window.scene` 超时）。
+
+#### 还没做
+
+① `.sscg` sidecar 的曲线字段；② 分组渲染的中性分支；③ 曲线预设按钮。
+
+**产物**：`release\SplatRoom-3.23.21.exe`；提交见 `docs/进度存档.md` 第十四轮。
+
 
 
 

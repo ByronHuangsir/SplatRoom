@@ -6,12 +6,18 @@
 //
 // usage: node --experimental-strip-types docs/verify/verify-color-curves.mts
 import {
+    CURVE_CHANNELS,
     CURVE_SAMPLES,
+    applyCurveSetToRGB,
     applyCurveToRGB,
+    curveSetToTables,
+    emptyCurveSet,
     evaluateCurveAt,
     identityCurveSamples,
     isIdentityCurve,
-    sampleCurve
+    isIdentityCurveSet,
+    sampleCurve,
+    toCurveSet
 } from '../../src/core/color-curves.ts';
 
 const checks: { name: string; pass: boolean; detail: string }[] = [];
@@ -106,6 +112,61 @@ applyCurveToRGB(rgb, lifted);
 check('applyCurveToRGB applies the same curve to all three channels (RGB master curve)',
     rgb[0] > 0.1 && rgb[1] > 0.5 && rgb[2] > 0.9 - 1e-6 && rgb[0] < rgb[1] && rgb[1] <= rgb[2],
     `[0.1, 0.5, 0.9] → [${rgb.map(v => v.toFixed(4)).join(', ')}]（抬亮曲线，逐通道）`);
+
+// ---- 4. 分通道（第十四轮）：四通道表 + 组合顺序 ----
+check('emptyCurveSet / isIdentityCurveSet agree, and a partial set fills the rest with null',
+    isIdentityCurveSet(emptyCurveSet()) &&
+    isIdentityCurveSet(null) &&
+    isIdentityCurveSet(toCurveSet({ red: [{ x: 0, y: 0 }, { x: 1, y: 1 }] })) &&
+    !isIdentityCurveSet(toCurveSet({ red: [{ x: 0, y: 0 }, { x: 1, y: 0.8 }] })) &&
+    toCurveSet({ master: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }).green === null,
+    '全 null、只给正常红通道 ⇒ 都算恒等；给一条压暗的红通道 ⇒ 不算；缺的通道补 null');
+
+check('curveSetToTables lays out 4 channels × 33 samples (master first) and returns null for all-identity',
+    curveSetToTables(emptyCurveSet()) === null &&
+    (() => {
+        const t = curveSetToTables({ red: [{ x: 0, y: 0 }, { x: 1, y: 0.5 }] });
+        if (!t || t.length !== CURVE_SAMPLES * 4) {
+            return false;
+        }
+        // 行 0（主）恒等；行 1（红）末端 ~0.5；行 2/3 恒等
+        return Math.abs(t[16] - 0.5) < 1e-6 && Math.abs(t[CURVE_SAMPLES + 32] - 0.5) < 1e-6 &&
+            Math.abs(t[CURVE_SAMPLES * 2 + 32] - 1) < 1e-6 && Math.abs(t[CURVE_SAMPLES * 3 + 32] - 1) < 1e-6;
+    })(),
+    '所有通道恒等 ⇒ null；只设红通道 ⇒ 长度 132、行 1 末端 0.5、其余两行仍是恒等');
+
+check('the composition order is master-then-channel (out.r = f_red(f_master(x)))',
+    (() => {
+        const masterOnly = curveSetToTables({ master: [{ x: 0, y: 0.2 }, { x: 1, y: 1 }] })!;
+        const masterAndRed = curveSetToTables({
+            master: [{ x: 0, y: 0.2 }, { x: 1, y: 1 }],
+            red: [{ x: 0, y: 0 }, { x: 1, y: 0.5 }]
+        })!;
+        const a = { r: 0.4, g: 0.4, b: 0.4 };
+        const b = { r: 0.4, g: 0.4, b: 0.4 };
+        applyCurveSetToRGB(a, masterOnly);     // 只过主曲线
+        applyCurveSetToRGB(b, masterAndRed);   // 主曲线 + 红通道
+        (globalThis as any).__comp = { a, b };
+        // 红通道是 y→y/2；G/B 只过主曲线 ⇒ 必须与"只有主曲线"完全一致
+        return Math.abs(b.r - a.r * 0.5) < 0.02 &&
+            Math.abs(b.g - a.g) < 1e-9 && Math.abs(b.b - a.b) < 1e-9;
+    })(),
+    (() => {
+        const c = (globalThis as any).__comp;
+        return c ? `0.4 只过主曲线 ⇒ ${c.a.r.toFixed(4)}（=0.2+0.4×0.8）；再叠红通道（×0.5）⇒ R=${c.b.r.toFixed(4)}，` +
+            `G/B 保持不变（${c.b.g.toFixed(4)} / ${c.b.b.toFixed(4)}）` : 'no data';
+    })());
+
+check('applyCurveSetToRGB works on {r,g,b} objects (ColorGrade) and on arrays alike',
+    (() => {
+        const tables = curveSetToTables({ blue: [{ x: 0, y: 0 }, { x: 1, y: 0.4 }] })!;
+        const obj = { r: 0.5, g: 0.5, b: 0.5 };
+        const arr = [0.5, 0.5, 0.5];
+        applyCurveSetToRGB(obj, tables);
+        applyCurveSetToRGB(arr, tables);
+        return Math.abs(obj.r - arr[0]) < 1e-9 && Math.abs(obj.b - arr[2]) < 1e-9 && obj.b < 0.25 && obj.r > 0.45;
+    })(),
+    '同一组表对对象与数组结果一致；蓝通道被压到 ~0.2，红/绿保持 0.5');
 
 const failed = checks.filter(c => !c.pass).length;
 console.log(JSON.stringify({ checks, failed }, null, 1));

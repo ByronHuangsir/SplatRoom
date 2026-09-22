@@ -4,7 +4,7 @@ import { Color } from 'playcanvas';
 import { CurveEditor } from './curve-editor';
 import { i18n } from './localization';
 import { Tooltips } from './tooltips';
-import { type CurvePoint } from '../core/color-curves';
+import { type CurveChannel, type CurvePoint, toCurveSet } from '../core/color-curves';
 import { SetSplatColorAdjustmentOp, type ColorAdjustment } from '../core/edit-ops';
 import { Events } from '../core/events';
 import { MIN_TONE_RANGE } from '../core/tone-range';
@@ -62,7 +62,7 @@ class ColorPanel extends Container {
             hslHue: Array.from(tgt.hslHue),
             hslSat: Array.from(tgt.hslSat),
             hslLum: Array.from(tgt.hslLum),
-            curve: tgt.curvePoints
+            curves: tgt.curves
         });
 
         const resetSingleParam = (newState: Partial<ColorAdjustment>) => {
@@ -190,15 +190,49 @@ class ColorPanel extends Container {
         });
         blendContent.append(transparencyRow);
 
-        // ---- Curves 曲线（RGB 主曲线）----
-        // 引擎侧：33 点采样表 → 一张 33×1 R32F LUT 纹理（GLSL/WGSL 顶点阶段查表）。
-        // 默认恒等 + 着色器开关关闭 ⇒ 不动这里的控件时画面**逐像素不变**。
+        // ---- Curves 曲线（RGB 主 / 红 / 绿 / 蓝 四个通道）----
+        // 引擎侧：四组控制点 → 33×4 R32F LUT 纹理（行 0 主曲线、行 1/2/3 = R/G/B）。
+        // 默认全恒等 + 着色器开关关闭 ⇒ 不动这里的控件时画面**逐像素不变**。
         const curveEditor = new CurveEditor();
+        const curveTabs = new Container({ class: 'hsl-tab-bar' });
+        // PCUI 的 `class` 参数只能是一个 token：多个类名要在构造后 add（否则 DOMTokenList.add 抛 InvalidCharacterError）
+        curveTabs.class.add('curve-tab-bar');
+        const curveTabsByChannel: Record<string, Label> = {};
+        const curveTabKeys: [CurveChannel, string][] = [
+            ['master', 'panel.colors.curve.master'],
+            ['red', 'panel.colors.curve.red'],
+            ['green', 'panel.colors.curve.green'],
+            ['blue', 'panel.colors.curve.blue']
+        ];
+        let activeCurveChannel: CurveChannel = 'master';
+        const selectCurveChannel = (channel: CurveChannel) => {
+            activeCurveChannel = channel;
+            for (const [ch, t] of Object.entries(curveTabsByChannel)) {
+                if (ch === channel) {
+                    t.class.add('active');
+                } else {
+                    t.class.remove('active');
+                }
+            }
+            curveEditor.setPoints(selected ? selected.curves[channel] : null, true);
+        };
+        const makeCurveTab = (channel: CurveChannel, key: string): Label => {
+            const tab = new Label({ class: 'hsl-tab' });
+            i18n.bindText(tab, key);
+            tab.on('click', () => selectCurveChannel(channel));
+            return tab;
+        };
+        for (const [channel, key] of curveTabKeys) {
+            curveTabsByChannel[channel] = makeCurveTab(channel, key);
+            curveTabs.append(curveTabsByChannel[channel]);
+        }
+        curveTabsByChannel.master.class.add('active');
         const { section: curveSection, content: curveContent } = makeCategorySection(
             'panel.colors.category.curve',
             undefined,
-            () => resetSingleParam({ curve: null })
+            () => resetSingleParam({ curves: null })
         );
+        curveContent.append(curveTabs);
         curveContent.append(curveEditor);
         curveSection.class.add('curve-section');
 
@@ -407,7 +441,7 @@ class ColorPanel extends Container {
             }
 
             // 曲线编辑器回填（silent：回填不触发 change，避免自己把自己写回去的死循环）
-            curveEditor.setPoints(tgt ? tgt.curvePoints : null, true);
+            curveEditor.setPoints(tgt ? tgt.curves[activeCurveChannel] : null, true);
 
             // Update grade toggle visual state
             const gradeEnabled = tgt ? tgt.colorGradeEnabled : true; if (gradeEnabled) {
@@ -471,12 +505,14 @@ class ColorPanel extends Container {
         });
 
         // 曲线编辑器：整段拖动合并成**一次**撤销（按下 start / 松开 end），
-        // 拖动过程持续写 op.newState.curve 并 do() ⇒ 画面实时跟手。
+        // 拖动过程持续写 op.newState.curves 并 do() ⇒ 画面实时跟手。
         curveEditor.on('gestureStart', start);
         curveEditor.on('gestureEnd', end);
         curveEditor.on('change', (points: CurvePoint[]) => {
             updateOp((o) => {
-                o.newState.curve = points.map(p => ({ x: p.x, y: p.y }));
+                const next = toCurveSet(o.newState.curves ?? (selected ? selected.curves : null));
+                next[activeCurveChannel] = points.map(p => ({ x: p.x, y: p.y }));
+                o.newState.curves = next;
             });
         });
 
@@ -676,7 +712,7 @@ class ColorPanel extends Container {
                     hslHue: [0, 0, 0, 0, 0, 0, 0, 0],
                     hslSat: [0, 0, 0, 0, 0, 0, 0, 0],
                     hslLum: [0, 0, 0, 0, 0, 0, 0, 0],
-                    curve: null
+                    curves: null
                 };
                 const oldState = buildState(selected);
                 const resetOp = new SetSplatColorAdjustmentOp({

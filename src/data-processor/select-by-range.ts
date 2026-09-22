@@ -173,6 +173,10 @@ class SelectByRange {
             cgOffset: tone.offsetBase + brightness,
             cgSaturation: saturation,
             transparency,
+            // 曲线（与视口同一张 33×4 LUT）：按范围选择必须跟视口一致，
+            // 否则用户看到的是曲线后的画面、筛选却按曲线前的颜色算
+            cgCurve: splat.curveTexture,
+            cgCurveEnabled: splat.curveTables ? 1 : 0,
             output_params: [resources.texture.width, resources.texture.height],
             minMax: [options.min, options.max],
             numBins: options.numBins,

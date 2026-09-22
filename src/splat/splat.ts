@@ -21,7 +21,7 @@ import {
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
-import { CURVE_SAMPLES, identityCurveSamples, isIdentityCurve, normalizeCurvePoints, sampleCurve, type CurvePoint } from '../core/color-curves';
+import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
 import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -138,10 +138,10 @@ class Splat extends Element {
     transformTexture: Texture;
     /** 曲线调色 LUT（33×1 R32F；见 src/core/color-curves.ts） */
     curveTexture: Texture;
-    /** 当前曲线采样表（33 点）；`null` = 恒等（画面零改动） */
-    private _curveSamples: Float32Array | null = null;
+    /** 当前曲线采样表（33 点 × 4 通道；`null` = 全恒等，画面零改动） */
+    private _curveTables: Float32Array | null = null;
     /** 曲线控制点（面板的真相源；文档保存/回填用） */
-    private _curvePoints: CurvePoint[] | null = null;
+    private _curvePoints: CurveSet = emptyCurveSet();
     selectionBoundStorage: BoundingBox;
     localBoundStorage: BoundingBox;
 
@@ -326,52 +326,48 @@ class Splat extends Element {
     }
 
     /**
-     * 设置曲线调色表（33 点，见 `src/core/color-curves.ts`）。
+     * 设置曲线（一组控制点：RGB 主 / 红 / 绿 / 蓝）。
      *
-     * 传 `null` 或恒等曲线 = 关闭：着色器里 `uCurveEnabled = 0` 整段跳过，
+     * 传全 `null`（或全恒等）⇒ 关闭：着色器里 `uCurveEnabled = 0` 整段跳过，
      * 画面与"没有曲线功能"逐位一致（这是默认状态，也是本仓库对观感类改动的硬要求）。
      *
-     * @param samples - 33 点采样表（更长也可以，只取前 `CURVE_SAMPLES` 个）；null = 恒等
-     * @param points - 可选的**控制点**（面板的真相源；给了就一起记下来，供文档保存/UI 回填）
+     * @param set - 各通道的控制点（`null` = 该通道恒等）
      */
-    setCurve(samples: Float32Array | null, points?: CurvePoint[] | null) {
-        const next = samples && !isIdentityCurve(samples) ? samples : null;
-        this._curveSamples = next;
-        this._curvePoints = next && points && points.length >= 2 ?
-            points.map(p => ({ x: p.x, y: p.y })) :
-            null;
+    setCurves(set: Partial<CurveSet> | null) {
+        const curves = toCurveSet(set);
+        const tables = curveSetToTables(curves);
+        this._curvePoints = curves;
+        this._curveTables = tables;
+        // 33×4 的 R32F 纹理：行 = 通道（0 主 / 1 R / 2 G / 3 B）
         const data = this.curveTexture.lock() as Float32Array;
-        if (next) {
-            data.set(next.subarray(0, CURVE_SAMPLES));
+        if (tables) {
+            data.set(tables.subarray(0, CURVE_SAMPLES * 4));
         } else {
-            data.set(identityCurveSamples());
+            for (let ch = 0; ch < 4; ch++) {
+                data.set(identityCurveSamples(), ch * CURVE_SAMPLES);
+            }
         }
         this.curveTexture.unlock();
         this.scene.events.fire('splat.curve', this);
     }
 
     /**
-     * 用**控制点**设置曲线（面板走这条）：内部采样成 33 点表再写纹理。
+     * 只设置 RGB 主曲线（等价于 `setCurves({ master })`；探针/脚本的快捷入口）。
      *
-     * @param points - 控制点（x/y 都在 0..1）；`null` 或不足 2 个 ⇒ 关闭曲线
+     * @param points - 控制点；`null` 或不足 2 个 ⇒ 主曲线恒等
      */
     setCurvePoints(points: CurvePoint[] | null) {
-        if (!points || points.length < 2) {
-            this.setCurve(null, null);
-            return;
-        }
-        const norm = normalizeCurvePoints(points);
-        this.setCurve(sampleCurve(norm), norm);
+        this.setCurves({ ...this._curvePoints, master: points && points.length >= 2 ? points : null });
     }
 
-    /** 当前曲线采样表（`null` = 恒等）。名字与 `ColorGrade` 的入参一致：导出镜像直接读它。 */
-    get curve() {
-        return this._curveSamples;
+    /** 当前曲线采样表（长度 33×4；`null` = 全恒等）。导出镜像直接读它。 */
+    get curveTables() {
+        return this._curveTables;
     }
 
-    /** 当前曲线控制点（`null` = 恒等）；文档保存与面板回填用 */
-    get curvePoints() {
-        return this._curvePoints ? this._curvePoints.map(p => ({ ...p })) : null;
+    /** 当前曲线控制点（各通道 `null` = 恒等）；文档保存与面板回填用 */
+    get curves(): CurveSet {
+        return toCurveSet(this._curvePoints);
     }
 
     /**
@@ -481,12 +477,13 @@ class Splat extends Element {
         this.state = new SplatState(splatData.getProp('state') as Uint8Array, this.stateTexture);
         this.transformTexture = createTexture('splatTransform', PIXELFORMAT_R16U);
 
-        // 曲线调色 LUT（33×1，R32F）。默认是恒等曲线 + `uCurveEnabled = 0`，
-        // 所以不设曲线时着色器整段跳过、画面与之前逐位一致（见 src/core/color-curves.ts）。
+        // 曲线调色 LUT（33×4，R32F）：行 0 = RGB 主曲线，行 1/2/3 = R/G/B。
+        // 默认是恒等曲线 + `uCurveEnabled = 0`，所以不设曲线时着色器整段跳过、
+        // 画面与之前逐位一致（见 src/core/color-curves.ts）。
         this.curveTexture = new Texture(device, {
             name: 'uCurve',
             width: CURVE_SAMPLES,
-            height: 1,
+            height: 4,
             format: PIXELFORMAT_R32F,
             mipmaps: false,
             minFilter: FILTER_NEAREST,
@@ -497,7 +494,9 @@ class Splat extends Element {
         {
             const ident = identityCurveSamples();
             const data = this.curveTexture.lock() as Float32Array;
-            data.set(ident);
+            for (let ch = 0; ch < 4; ch++) {
+                data.set(ident, ch * CURVE_SAMPLES);
+            }
             this.curveTexture.unlock();
         }
 
@@ -856,10 +855,14 @@ class Splat extends Element {
         serializer.packa(Array.from(this._hslHue));
         serializer.packa(Array.from(this._hslSat));
         serializer.packa(Array.from(this._hslLum));
-        // 曲线：把控制点展平进 hash（数据面板靠它判断"要不要重算直方图"）
+        // 曲线：把四个通道的控制点依次展平进 hash（数据面板靠它判断"要不要重算直方图"）。
+        // 通道之间用 NaN 分隔，避免 "[[0,1]] + [[0,1]]" 与 "[[0,1],[0,1]]" 撞 hash。
         const curveFlat: number[] = [];
-        for (const p of this._curvePoints ?? []) {
-            curveFlat.push(p.x, p.y);
+        for (const ch of CURVE_CHANNELS) {
+            for (const p of this._curvePoints[ch] ?? []) {
+                curveFlat.push(p.x, p.y);
+            }
+            curveFlat.push(NaN);
         }
         serializer.packa(curveFlat);
     }
@@ -1471,7 +1474,7 @@ class Splat extends Element {
             material.setParameter('hslLumA', [this._hslLum[0], this._hslLum[1], this._hslLum[2], this._hslLum[3]]);
             material.setParameter('hslLumB', [this._hslLum[4], this._hslLum[5], this._hslLum[6], this._hslLum[7]]);
             // 曲线调色：没有曲线时开关为 0，着色器整段跳过（画面零改动）
-            material.setParameter('uCurveEnabled', this._curveSamples ? 1 : 0);
+            material.setParameter('uCurveEnabled', this._curveTables ? 1 : 0);
         } else {
             // bypass all color grading 閳?neutral values
             material.setParameter('clrOffset', [0, 0, 0]);
@@ -2058,13 +2061,17 @@ class Splat extends Element {
             hslHue: Array.from(this._hslHue),
             hslSat: Array.from(this._hslSat),
             hslLum: Array.from(this._hslLum),
-            // 曲线调色：存**控制点**（3~8 个数字对），比存 33 个采样值短、可读，也便于以后加通道
-            curve: this._curvePoints ? this._curvePoints.map(p => [p.x, p.y]) : null
+            // 曲线调色：存四个通道的**控制点**（每个通道 3~8 个数字对），比存 33×4 个采样值短、可读
+            curves: CURVE_CHANNELS.reduce((acc, ch) => {
+                const pts = this._curvePoints[ch];
+                acc[ch] = pts ? pts.map(p => [p.x, p.y]) : null;
+                return acc;
+            }, {} as Record<string, number[][] | null>)
         };
     }
 
     docDeserialize(doc: any) {
-        const { name, position, rotation, scale, visible, tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curve } = doc;
+        const { name, position, rotation, scale, visible, tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curves } = doc;
 
         this.name = name;
         this.move(new Vec3(position), new Quat(rotation), new Vec3(scale));
@@ -2083,9 +2090,16 @@ class Splat extends Element {
         if (hslHue) this.hslHue = hslHue;
         if (hslSat) this.hslSat = hslSat;
         if (hslLum) this.hslLum = hslLum;
-        // 曲线：可选字段（旧 .ssproj 没有 ⇒ 保持恒等），格式 `[[x, y], …]`
-        if (Array.isArray(curve) && curve.length >= 2) {
-            this.setCurvePoints(curve.map((p: number[]) => ({ x: p[0], y: p[1] })));
+        // 曲线：可选字段（旧 .ssproj 没有 ⇒ 保持恒等），格式 `{ master: [[x,y],…], red: …, green: …, blue: … }`
+        if (curves && typeof curves === 'object') {
+            const set: Partial<CurveSet> = {};
+            for (const ch of CURVE_CHANNELS) {
+                const raw = curves[ch];
+                if (Array.isArray(raw) && raw.length >= 2) {
+                    set[ch] = raw.map((p: number[]) => ({ x: p[0], y: p[1] }));
+                }
+            }
+            this.setCurves(set);
         }
     }
 }

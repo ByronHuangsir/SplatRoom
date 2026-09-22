@@ -241,7 +241,10 @@ class CalcHistogram {
             ],
             cgOffset: tone.offsetBase + brightness,
             cgSaturation: saturation,
-            transparency
+            transparency,
+            // 曲线（与视口同一张 33×4 LUT）：直方图必须跟视口一致
+            cgCurve: splat.curveTexture,
+            cgCurveEnabled: splat.curveTables ? 1 : 0
         };
 
         if (shBands > 0) {

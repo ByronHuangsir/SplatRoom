@@ -1,5 +1,6 @@
 import { Asset, Color, Mat4, Quat, Vec3 } from 'playcanvas';
 
+import { type CurveSet } from './color-curves';
 import { IndexRanges, sortedPredicate } from './index-ranges';
 import { BoxShape } from '../scene/box-shape';
 import { Pivot } from '../scene/pivot';
@@ -517,8 +518,8 @@ type ColorAdjustment = {
     hslHue?: number[],
     hslSat?: number[],
     hslLum?: number[],
-    /** 曲线控制点（`null` = 恒等；见 `src/core/color-curves.ts`） */
-    curve?: { x: number, y: number }[] | null
+    /** 曲线控制点（四个通道；`null` = 清空全部曲线，见 `src/core/color-curves.ts`） */
+    curves?: CurveSet | null
 };
 
 class SetSplatColorAdjustmentOp {
@@ -537,7 +538,7 @@ class SetSplatColorAdjustmentOp {
 
     do() {
         const { splat } = this;
-        const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curve } = this.newState;
+        const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curves } = this.newState;
         if (tintClr) splat.tintClr = tintClr;
         if (temperature !== undefined && temperature !== null) splat.temperature = temperature;
         if (saturation !== undefined && saturation !== null) splat.saturation = saturation;
@@ -552,13 +553,13 @@ class SetSplatColorAdjustmentOp {
         if (hslHue) splat.hslHue = hslHue;
         if (hslSat) splat.hslSat = hslSat;
         if (hslLum) splat.hslLum = hslLum;
-        // 曲线：`undefined` = 这次操作不碰曲线；`null` = 清空曲线（两者必须区分）
-        if (curve !== undefined) splat.setCurvePoints(curve);
+        // 曲线：`undefined` = 这次操作不碰曲线；`null` = 清空全部曲线（两者必须区分）
+        if (curves !== undefined) splat.setCurves(curves);
     }
 
     undo() {
         const { splat } = this;
-        const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curve } = this.oldState;
+        const { tintClr, temperature, saturation, brightness, blackPoint, whitePoint, transparency, highlights, shadows, contrast, colorGradeEnabled, hslHue, hslSat, hslLum, curves } = this.oldState;
         if (tintClr) splat.tintClr = tintClr;
         if (temperature !== undefined && temperature !== null) splat.temperature = temperature;
         if (saturation !== undefined && saturation !== null) splat.saturation = saturation;
@@ -573,7 +574,7 @@ class SetSplatColorAdjustmentOp {
         if (hslHue) splat.hslHue = hslHue;
         if (hslSat) splat.hslSat = hslSat;
         if (hslLum) splat.hslLum = hslLum;
-        if (curve !== undefined) splat.setCurvePoints(curve);
+        if (curves !== undefined) splat.setCurves(curves);
     }
 }
 
