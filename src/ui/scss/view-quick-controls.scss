@@ -7,7 +7,7 @@
     position: absolute;
     right: 12px;
     top: 146px;                     // 坐标轴 140px 高 ⇒ 留 6px 间隙
-    width: 196px;
+    width: 204px;
     padding: 8px;
     display: flex;
     flex-direction: column;
@@ -24,17 +24,9 @@
         display: flex;
     }
 
-    // 视野角：上面一行标签+角度，下面整行滑轨（用户要求"不要输入框、滑轨长一些"）
-    .vqc-block {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-
-        .vqc-row {
-            height: 16px;
-        }
-    }
-
+    // 视野角：**单行**（用户要求"滑轨直接跟在视角那三个字后面，不要另起一行"）——
+    // 标签 `flex: 0 0 auto`（不再吃掉剩余宽度，这是最初轨道只有 18px 的原因），
+    // 轨道 `flex: 1 1 0` 拿走整行剩下的所有宽度。
     .vqc-row {
         display: flex;
         flex-direction: row;
@@ -43,20 +35,19 @@
         height: 22px;
 
         .vqc-label {
-            flex-grow: 1;
-            flex-shrink: 0;
+            flex: 0 0 auto;
             color: $text-primary;
             font-size: 11px;
             white-space: nowrap;
         }
 
         .vqc-value {
-            flex-shrink: 0;
-            min-width: 30px;
+            flex: 0 0 auto;
+            min-width: 26px;
             text-align: right;
             color: $text-secondary;
             font-size: 11px;
-            font-variant-numeric: tabular-nums;   // 数字等宽，不跳宽（`$font-mono` 这个变量本仓库没有）
+            font-variant-numeric: tabular-nums;
         }
 
         .vqc-toggle {
@@ -66,9 +57,10 @@
     }
 
     .vqc-slider {
-        width: 100%;
+        flex: 1 1 0;
+        min-width: 0;
 
-        // 藏掉 PCUI SliderInput 自带的数字输入框（用户明确不要），滑轨因此能占满整行
+        // 藏掉 PCUI SliderInput 自带的数字输入框（用户明确不要），滑轨因此能占满整行剩余宽度
         .pcui-numeric-input {
             display: none;
         }
