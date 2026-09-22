@@ -3,9 +3,12 @@
 #right-toolbar {
     position: absolute;
     right: 24px;
-    top: 50%;
+    // 用户反馈（2026-09-22）：右上角坐标轴下面新增的"视图快捷控件"（底边 **274px**，见
+    // `view-quick-controls.scss`；视野角改两行后比以前高）压住了工具栏最上面两个按钮
+    // ⇒ **把工具栏整体往下挪**到 286px（= 控件底边 + 12px 余量）。
+    top: 286px;
     width: 54px;
-    transform: translate(0, -50%);
+    transform: none;
     padding: 8px 0px;
     border-radius: 8px;
 

@@ -50,16 +50,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const c = cube.getBoundingClientRect();
         const q = qc.getBoundingClientRect();
         const cs = getComputedStyle(qc);
+        const boxOf = (sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return [Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)];
+        };
+        const sliderNum = qc.querySelector('.vqc-slider .pcui-numeric-input');
+        const track = qc.querySelector('.vqc-slider .pcui-slider-container');
+        const bar = qc.querySelector('.vqc-slider .pcui-slider-bar');
         return {
             cube: true, quick: true,
             cubeBox: [Math.round(c.left), Math.round(c.top), Math.round(c.right), Math.round(c.bottom)],
             quickBox: [Math.round(q.left), Math.round(q.top), Math.round(q.right), Math.round(q.bottom)],
+            rightToolbar: boxOf('#right-toolbar'),
+            bottomToolbar: boxOf('#bottom-toolbar'),
             gap: Math.round(q.top - c.bottom),
             rightGap: Math.round(c.right - q.right),
             pointerEvents: cs.pointerEvents,
             rows: Array.from(qc.querySelectorAll('.vqc-row')).map(r => (r.textContent || '').slice(0, 40)),
             slider: !!qc.querySelector('.vqc-slider'),
-            toggles: qc.querySelectorAll('.vqc-toggle').length
+            toggles: qc.querySelectorAll('.vqc-toggle').length,
+            sliderInputWidth: sliderNum ? Math.round(sliderNum.getBoundingClientRect().width) : null,
+            sliderInputHidden: !!sliderNum && getComputedStyle(sliderNum).display === 'none',
+            sliderTrackWidth: track ? Math.round(track.getBoundingClientRect().width) : null,
+            sliderBarWidth: bar ? Math.round(bar.getBoundingClientRect().width) : null
         };
     });
     check('the quick controls sit directly under the view-cube axis (same right edge, small gap)',
@@ -68,6 +83,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             ? `坐标轴 [${layout.cubeBox.join(', ')}]；快捷控件 [${layout.quickBox.join(', ')}] ⇒ 间隙 ${layout.gap}px、` +
               `右边缘差 ${layout.rightGap}px（pointer-events=${layout.pointerEvents}，可点击）`
             : `找不到元素（cube=${layout.cube} quick=${layout.quick}）`);
+
+    // 用户报的 bug：这块盖住了右侧工具栏最上面两个按钮 ⇒ 工具栏已下移，这里必须**不再重叠**
+    const overlaps = (a, b) => !!a && !!b &&
+        !(a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
+    const hitRight = overlaps(layout.quickBox, layout.rightToolbar);
+    const hitBottom = overlaps(layout.quickBox, layout.bottomToolbar);
+    check('the panel does not cover the right toolbar (the reported bug) nor the bottom toolbar',
+        layout.quickBox && !hitRight && !hitBottom,
+        `快捷控件 [${(layout.quickBox ?? []).join(', ')}]；右侧工具栏 [${(layout.rightToolbar ?? []).join(', ')}]` +
+        ` ⇒ 重叠=${hitRight}；底部工具栏 [${(layout.bottomToolbar ?? []).join(', ')}] ⇒ 重叠=${hitBottom}`);
+
+    // 用户要求：视野角**不要输入框**、滑轨**要长**
+    check('the FOV control has no input box and its track is long',
+        layout.sliderInputHidden === true && (layout.sliderTrackWidth ?? 0) >= 120,
+        `数字输入框 display=none 且宽 ${layout.sliderInputWidth}px；滑轨容器 ${layout.sliderTrackWidth}px、` +
+        `bar ${layout.sliderBarWidth}px（改前轨道只有 18px）`);
 
     check('it carries exactly the three requested controls (1 slider + 2 toggles)',
         layout.slider === true && layout.toggles === 2 && (layout.rows ?? []).length === 3,

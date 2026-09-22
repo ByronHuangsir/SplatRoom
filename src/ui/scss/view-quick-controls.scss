@@ -7,7 +7,7 @@
     position: absolute;
     right: 12px;
     top: 146px;                     // 坐标轴 140px 高 ⇒ 留 6px 间隙
-    width: 168px;
+    width: 196px;
     padding: 8px;
     display: flex;
     flex-direction: column;
@@ -22,6 +22,17 @@
 
     &:not(.pcui-hidden) {
         display: flex;
+    }
+
+    // 视野角：上面一行标签+角度，下面整行滑轨（用户要求"不要输入框、滑轨长一些"）
+    .vqc-block {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+
+        .vqc-row {
+            height: 16px;
+        }
     }
 
     .vqc-row {
@@ -48,15 +59,22 @@
             font-variant-numeric: tabular-nums;   // 数字等宽，不跳宽（`$font-mono` 这个变量本仓库没有）
         }
 
-        .vqc-slider {
-            flex-grow: 1;
-            flex-basis: 0;
-            min-width: 0;
-        }
-
         .vqc-toggle {
             flex-shrink: 0;
             background-color: $bcg-dark;
+        }
+    }
+
+    .vqc-slider {
+        width: 100%;
+
+        // 藏掉 PCUI SliderInput 自带的数字输入框（用户明确不要），滑轨因此能占满整行
+        .pcui-numeric-input {
+            display: none;
+        }
+
+        .pcui-slider-container {
+            width: 100%;
         }
     }
 }

@@ -35,8 +35,8 @@ class ViewQuickControls extends Container {
         };
 
         // ---- 视野角 ----
-        const fovRow = row('panel.camera.fov');
-        const fovValue = new Label({ class: 'vqc-value' });
+        // 用户反馈（2026-09-22）：**不要输入框、滑轨要长**。所以视野角单独排成两行 ——
+        // 上面一行"视野角 + 当前角度"，下面一行整行都是滑轨（PCUI 自带的数字输入框在 CSS 里藏掉）。
         const fovSlider = new SliderInput({
             class: 'vqc-slider',
             min: 10,
@@ -44,17 +44,25 @@ class ViewQuickControls extends Container {
             step: 1,
             value: 75
         });
+        const fovBlock = new Container({ class: 'vqc-block' });
+        const fovHeader = new Container({ class: 'vqc-row' });
+        const fovLabel = new Label({ class: 'vqc-label' });
+        i18n.bindText(fovLabel, 'panel.camera.fov');
+        const fovValue = new Label({ class: 'vqc-value' });
         const setFovLabel = (v: number) => {
             fovValue.text = `${Math.round(v)}°`;
         };
         setFovLabel(events.invoke('camera.fov') ?? 75);
         fovSlider.value = Number(events.invoke('camera.fov') ?? 75);
+        fovHeader.append(fovLabel);
+        fovHeader.append(fovValue);
+        this.append(fovBlock);
+        fovBlock.append(fovHeader);
+        fovBlock.append(fovSlider);
         fovSlider.on('change', (value: number) => {
             setFovLabel(value);
             events.fire('camera.setFov', value);
         });
-        fovRow.append(fovSlider);
-        fovRow.append(fovValue);
 
         // ---- 显示边界 ----
         const boundRow = row('panel.settings.show-bounding-box');
