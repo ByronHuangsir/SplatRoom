@@ -894,6 +894,8 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     进这条通路"会永远读到"没变化"（`isFinalColorMode` 只有 **5..7**（最终颜色 RGB）与
     **18..20**（HSV））。顺带发现 `verify-tone-range.cjs` 里那两条"直方图/范围选择不炸"的检查
     用的也是 mode 1 —— 它们只证明了不崩，**没有**证明调色真的生效。
+    **第十七轮已修**：那两条改用 mode **5**，并加了一条"最终颜色 R 范围随黑白场移动"的判据
+    （实测退化档 `-14.000..-2.002` vs 正常档 `-0.400..0.800`）。
 54. **直方图的柱是按 `[min,max]` 归一化的 ⇒ 单调曲线在柱形上几乎不可见**（2026-09-22 新增）：
     柱是"秩"的分布，单调映射不改变秩；用柱形/重心当判据会得出"曲线没生效"的错误结论
     （实测重心 153.0 → 153.0）。要看 **`min`/`max` 数值**，或者**用固定 `[0,1]` 区间逐档扫**：
@@ -970,6 +972,36 @@ webgpu **全量 38 套 `TOTAL FAILED: 0`**；20M 上 `verify-large-model-ui`（�
     中文在控制台里显示成乱码还是小事，`Set-Content` 回写会把整个文件按当前代码页重编码
     ⇒ 全文件 mojibake（`verify-color-curve.cjs` 就这么毁过一次，只能 `git checkout --` 重来）。
     读写仓库文本一律用编辑工具；要核对 UTF-8 就用 `node -e`。
+    （第十七轮又踩了一次**只读**版本：`Get-Content static\locales\zh-CN.json -Raw | ConvertFrom-Json`
+    在控制台里输出乱码并抛 `Invalid object passed in` —— 文件没坏，但别用这条命令判断语言包对不对，
+    用 `node -e "JSON.parse(fs.readFileSync(...))"`。）
+63. **测"保存/加载文件"这类路径，最简单的办法是在页内把文件选择器换成桩**（2026-09-22 新增，第十七轮）：
+    无头浏览器（非安全上下文）里 `showSaveFilePicker` / `showOpenFilePicker` 都不存在，
+    应用会走 `<a download>` / `<input type=file>` 兜底 —— 后者没法用脚本驱动。
+    不用 CDP 下载重定向（那是坑 57 的做法，适合真要看落盘文件）：**直接在页面里把它们换成桩**，
+    全程走应用真实的事件，几行就够：
+
+    ```js
+    // 保存：把内容截在 write() 里
+    window.showSaveFilePicker = async () => ({
+        createWritable: async () => ({ write: async (blob) => { window.__saved = await blob.text(); }, close: async () => { } })
+    });
+    scene.events.fire('grade.save');
+    // 读取：喂一个自己造的 File
+    window.showOpenFilePicker = async () => ([{ getFile: async () => new File([json], 'x.ply.sscg') }]);
+    scene.events.fire('grade.load');
+    ```
+
+    `verify-color-curve.cjs` 用它验了 `.sscg` 侧车的曲线往返（读回的曲线 + 逐像素画面都能断言）。
+    代价：桩要在**触发事件之前**装好，且事件是异步的 ⇒ 保存后要轮询等 `window.__saved` 出现。
+64. **"新加字段忘了加进序列化"是这个仓库反复出现的一类 bug**（2026-09-22 新增，第十七轮）：
+    HSL 在 `.sscg` v3 → v4 补过一次，**曲线又在 v5 补了一次**（`serializeGrade()` 抄了十几个参数、
+    唯独漏了曲线 ⇒ "存了调色再读回来，曲线没了"）。
+    规矩：给 `Splat` 加调色字段时，**同时**检查这三处 ——
+    ① `src/app/color-grade-file.ts`（`.sscg` 侧车）② `src/splat/splat.ts` 的 `docSerialize/docDeserialize`
+    （`.ssproj`）③ `src/splat/group-renderer.ts` 的中性分支（合并渲染必须显式中性）。
+    第十七轮把①②合并到同一对转换器（`curveSetToDoc/curveSetFromDoc`，`src/core/color-curves.ts`）后，
+    两边不可能再漂移。
 
 ---
 

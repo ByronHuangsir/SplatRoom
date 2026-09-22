@@ -3774,6 +3774,40 @@ webgl2 同 49 套 `TOTAL FAILED: 0`（各 1 个既有 `UNPARSED`：`verify-merge
 
 **产物**：`release\SplatRoom-3.23.23.exe`（122.09 MB）;提交见 `docs/进度存档.md` 第十六轮。
 
+### 6.62 第十七轮：曲线调色收尾 —— `.sscg` 侧车补曲线 + 分组渲染显式中性 + 修一条空过检查
+
+**做了什么**（清单里的最后两处真缺口，见 `docs/曲线调色-实现与设计-2026-09-22.md` §2/§3）
+
+1. **`.sscg` 调色侧车原来把曲线整个丢掉**：`serializeGrade()` 抄了十几个调色参数、唯独没有曲线
+   ⇒ "存了调色再读回来，曲线没了"（与 HSL 在 v3 → v4 补过一次是同一类 bug）。
+   `SSCG_VERSION` **4 → 5**；新增 `curveSetToDoc()` / `curveSetFromDoc()`
+   （`src/core/color-curves.ts`，**`.ssproj` 与 `.sscg` 共用同一对**，两边不可能漂移）；
+   `deserializeGrade` 按 **`undefined` = 不碰 / `null` = 清空 / 对象 = 逐通道设** 读回，v4 及更早照旧能读。
+2. **分组渲染的中性分支要显式关曲线**（`src/splat/group-renderer.ts`）：合并材质没写 `uCurveEnabled`，
+   而它一旦非 0，片元就会去采样**合并材质根本没绑定**的 `uCurve` 纹理（WGSL/GLSL 都是未定义行为）。
+   现在显式写 0。
+3. **`verify-tone-range.cjs` 那两条检查原来是空过的**：`mode 1` = `worldPos.y`，不经过 `applyColorGrade`
+   （HANDOFF 53）⇒ 只证明"不炸"。改成颜色模式 **5** 并加判据。
+
+**实测**
+
+| 检查 | 数字 |
+| --- | --- |
+| 侧车存曲线（`verify-color-curve.cjs`，22 项，双后端 0 失败） | `version=5`；`curves={"master":[[0,0.05],[0.45,0.55],[1,0.98]],"red":[[0,0],[0.5,0.6],[1,1]],"green":null,"blue":null}`；JSON 855 字节 |
+| 读回侧车 | 控制点逐点一致；与"存之前那一帧"**逐像素最大差 0**；平均亮度 0.4197 → **0.5686 → 0.5686** |
+| v4 旧侧车 | `brightness=0.2` 生效、曲线**不会凭空造出来**（`master=null`） |
+| 纯函数（`verify-color-curves.mts`，20 项） | 往返后 33×4 采样表**逐位一致**；非数字对 / `NaN` / 通道不足 2 点 ⇒ 按恒等丢掉 |
+| 空过检查修好后（`verify-tone-range.cjs`，11 项） | 最终颜色 R 范围：退化档(黑场=白场=1) **-14.000..-2.002** vs 正常档(黑场 0.5) **-0.400..0.800** |
+
+**两个新坑**（HANDOFF 63/64）：① 测保存/加载路径可以在页内**把文件选择器换成桩**
+（比 CDP 下载重定向省事、且走应用真实事件）；② 给 `Splat` 加调色字段时必须同时检查
+`.sscg` / `.ssproj` / 分组渲染中性分支三处 —— 这个仓库已经在这类"忘了序列化"上栽过两次（HSL、曲线）。
+
+**全量回归（冻结构建 `dist/index.js` SHA256 前缀 `E701646E`）**：见 `_tmp\batch-webgpu-17f.txt` /
+`_tmp\batch-webgl2-17f.txt`；`npm run check` 0、`npx tsc --noEmit` 0。
+
+**产物**：`release\SplatRoom-3.23.24.exe`；提交见 `docs/进度存档.md` 第十七轮。
+
 
 
 
