@@ -1,0 +1,62 @@
+@use 'colors.scss' as *;
+
+// 视图快捷控件：右上角坐标轴（#view-cube-container，140×140、right:0/top:0）**正下方**。
+// 用户要求（2026-09-22）：视野角 / 显示边界 / 显示网格这三个高频开关要随手够到。
+// 坐标轴本身 pointer-events: none（只是指示器），这块要能点，所以自己开 pointer-events。
+#view-quick-controls {
+    position: absolute;
+    right: 12px;
+    top: 146px;                     // 坐标轴 140px 高 ⇒ 留 6px 间隙
+    width: 168px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-radius: 6px;
+    background-color: rgba(24, 24, 24, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(4px);
+    pointer-events: auto;
+    user-select: none;
+
+    &:not(.pcui-hidden) {
+        display: flex;
+    }
+
+    .vqc-row {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+        height: 22px;
+
+        .vqc-label {
+            flex-grow: 1;
+            flex-shrink: 0;
+            color: $text-primary;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .vqc-value {
+            flex-shrink: 0;
+            min-width: 30px;
+            text-align: right;
+            color: $text-secondary;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;   // 数字等宽，不跳宽（`$font-mono` 这个变量本仓库没有）
+        }
+
+        .vqc-slider {
+            flex-grow: 1;
+            flex-basis: 0;
+            min-width: 0;
+        }
+
+        .vqc-toggle {
+            flex-shrink: 0;
+            background-color: $bcg-dark;
+        }
+    }
+}

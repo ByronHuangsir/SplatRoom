@@ -31,6 +31,7 @@ import { Tooltips } from './tooltips';
 import { TurntableVideoDialog } from './turntable-video-dialog';
 import { VideoSettingsDialog } from './video-settings-dialog';
 import { ViewCube } from './view-cube';
+import { ViewQuickControls } from './view-quick-controls';
 import { version } from '../../package.json';
 import { CameraTrajectory } from '../animation/camera-trajectory';
 import { Events } from '../core/events';
@@ -132,6 +133,11 @@ class EditorUI {
         events.on('prerender', (cameraMatrix: Mat4) => {
             viewCube.update(cameraMatrix);
         });
+
+        // 坐标轴正下方的视图快捷控件（视野角 / 显示边界 / 显示网格）——
+        // 用户要求：这三个高频开关要随手够到；设置面板里的那三份保持不动（同一套事件）。
+        const viewQuickControls = new ViewQuickControls(events);
+        canvasContainer.append(viewQuickControls);
 
         // Trajectory overlay canvas (renders camera path on top of 3D view)
         const trajectoryCanvas = document.createElement('canvas');
