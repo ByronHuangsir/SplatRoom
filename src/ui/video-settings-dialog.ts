@@ -1,9 +1,17 @@
 import { BooleanInput, Button, Container, Element, Label, SelectInput, VectorInput } from '@playcanvas/pcui';
 
+import { supportedCodecsAt } from './export-codec-support';
 import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
 import { VideoSettings } from '../app/render';
 import { Events } from '../core/events';
+import {
+    bitrateFor,
+    clampExportSize,
+    presetById,
+    presetOptionsFor,
+    type ExportProjection
+} from '../core/export-resolution';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {
@@ -64,24 +72,26 @@ class VideoSettingsDialog extends Container {
         projectionRow.append(projectionSelect);
 
         // resolution
+        //
+        // 预设与上限来自 `src/core/export-resolution.ts`（图像/视频/旋转台三条路径共用一份）：
+        // 8K（7680×4320）与 360-8K（8192×4096）都在表里，且**设备放不下的档位直接不出现在下拉里**
+        // （`maxTextureSize` 小于该尺寸时过滤掉，避免选完才在渲染目标/编码器上炸）。
+        const maxTextureSize = (() => {
+            try {
+                return (events.invoke('scene') as any)?.graphicsDevice?.maxTextureSize ?? 16384;
+            } catch {
+                return 16384;
+            }
+        })();
 
-        const standardResolutions = [
-            { v: '540', t: '960x540' },
-            { v: '720', t: '1280x720' },
-            { v: '1080', t: '1920x1080' },
-            { v: '1440', t: '2560x1440' },
-            { v: '4k', t: '3840x2160' },
-            { v: '8k', t: '7680x4320' }
-        ];
+        const optionsFor = (projection: ExportProjection) => {
+            return presetOptionsFor(projection, maxTextureSize).map(p => ({ v: p.v, t: p.t }));
+        };
 
-        // 360 output is 2:1 equirectangular, capped at 4096 wide to stay
-        // within common encoder dimension limits
-        const equirectResolutions = [
-            { v: '360-1k', t: '1024x512' },
-            { v: '360-2k', t: '2048x1024' },
-            { v: '360-4k', t: '3840x1920' },
-            { v: '360-4096', t: '4096x2048' }
-        ];
+        const standardResolutions = optionsFor('standard');
+
+        // 360 output is 2:1 equirectangular; 8K 那档是 8192×4096
+        const equirectResolutions = optionsFor('equirect');
 
         const resolutionLabel = new Label({ class: 'label' });
         i18n.bindText(resolutionLabel, 'popup.render-video.resolution');
@@ -128,6 +138,15 @@ class VideoSettingsDialog extends Container {
         codecRow.append(codecLabel);
         codecRow.append(codecSelect);
 
+        // 分辨率策略的状态与说明行（见下面 applyResolutionPolicy）
+        let policyToken = 0;
+        // 策略自己改 `formatSelect` 时不要再触发一轮（否则说明行会被下一轮清掉）
+        let applyingPolicy = false;
+        const is360 = () => projectionSelect.value === 'equirect';
+        const codecHint = new Label({ class: 'label' });
+        const codecHintRow = new Container({ class: 'row', hidden: true });
+        codecHintRow.append(codecHint);
+
         // Codec compatibility mapping
         const codecOptions: Record<string, Array<{ v: string, t: string }>> = {
             'mp4': [
@@ -151,10 +170,80 @@ class VideoSettingsDialog extends Container {
         };
 
         // Update codec options when format changes
+        //
+        // 分辨率策略（第十八轮）：**8K 只能 VP9/AV1** —— 实测（`docs/probes/export-8k.cjs`）用应用
+        // 真实的 codec 字符串问 WebCodecs：H.264（avc1.640033）在 7680×4320 被拒、H.265 本机没有
+        // 编码器，VP9/AV1 到 8192×4096 都能真编出帧。所以选了 8K 必须把 mp4/h264 换成能用的组合，
+        // 否则用户拿到的是"点了导出就报错"。换的时候给一行说明（`...resolution-note`）。
+        const applyResolutionPolicy = async () => {
+            const token = ++policyToken;
+            const preset = presetById(resolutionSelect.value) ?? presetById(is360() ? '360-4k' : '1080');
+            if (!preset) {
+                return;
+            }
+            const frameRate = Number(frameRateSelect.value) || 30;
+            const bitrate = bitrateFor({
+                width: preset.width,
+                height: preset.height,
+                frameRate,
+                quality: bitrateSelect.value,
+                preset: preset.v
+            });
+
+            const allowedFor = (format: string) => supportedCodecsAt(
+                (codecOptions[format] ?? codecOptions.mp4).map(o => o.v),
+                preset.width, preset.height, bitrate, frameRate
+            );
+
+            let format = formatSelect.value;
+            let allowed = await allowedFor(format);
+            let switchedFormat = false;
+            if (!allowed.length) {
+                // 这个容器在本尺寸下没有可用编码器（典型：8K 的 mp4/mov + H.264/H.265）
+                for (const candidate of ['webm', 'mkv', 'mp4', 'mov']) {
+                    if (candidate === format) {
+                        continue;
+                    }
+
+                    const list = await allowedFor(candidate);
+                    if (list.length) {
+                        format = candidate;
+                        allowed = list;
+                        switchedFormat = true;
+                        break;
+                    }
+                }
+            }
+            if (token !== policyToken) {
+                return;   // 又有人改了设置：这次结果作废
+            }
+            if (switchedFormat) {
+                // 举旗：这一轮 `formatSelect` 的 change 处理不要再重置编码器/藏说明行
+                applyingPolicy = true;
+                formatSelect.value = format;
+                applyingPolicy = false;
+            }
+            codecSelect.options = (codecOptions[format] ?? codecOptions.mp4).filter(o => allowed.includes(o.v));
+            if (!allowed.includes(codecSelect.value)) {
+                codecSelect.value = allowed[0];
+            }
+            const note = switchedFormat ?
+                i18n.t('popup.render-video.resolution-note', {
+                    size: preset.t,
+                    codec: String(codecSelect.value).toUpperCase(),
+                    format: format.toUpperCase()
+                }) :
+                '';
+            codecHint.text = note;
+            codecHintRow.hidden = !note;
+        };
+
         formatSelect.on('change', () => {
+            if (applyingPolicy) {
+                return;   // 这一轮是策略自己改的：编码器与说明行由策略继续设置
+            }
             const format = formatSelect.value;
-            const options = codecOptions[format] || codecOptions.mp4;
-            codecSelect.options = options;
+            codecSelect.options = codecOptions[format] || codecOptions.mp4;
 
             // Set default codec based on format
             if (format === 'webm') {
@@ -162,6 +251,9 @@ class VideoSettingsDialog extends Container {
             } else {
                 codecSelect.value = 'h264';
             }
+
+            // 上面只是"默认值"，接着按当前分辨率再筛一遍（8K 会把 h264/h265 拿掉）
+            applyResolutionPolicy();
         });
 
         // framerate
@@ -282,15 +374,25 @@ class VideoSettingsDialog extends Container {
         // sync the ui to the selected projection: 360 renders are 2:1
         // equirectangular without portrait mode or debug overlays
         const syncProjection = () => {
-            const is360 = projectionSelect.value === 'equirect';
-            resolutionSelect.options = is360 ? equirectResolutions : standardResolutions;
-            resolutionSelect.value = is360 ? '360-4k' : '1080';
-            portraitRow.hidden = is360;
-            showDebugRow.hidden = is360;
-            levelHorizonRow.hidden = !is360;
+            const isEquirect = projectionSelect.value === 'equirect';
+            resolutionSelect.options = isEquirect ? equirectResolutions : standardResolutions;
+            resolutionSelect.value = isEquirect ? '360-4k' : '1080';
+            portraitRow.hidden = isEquirect;
+            showDebugRow.hidden = isEquirect;
+            levelHorizonRow.hidden = !isEquirect;
+            applyResolutionPolicy();
         };
 
         projectionSelect.on('change', syncProjection);
+        resolutionSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
+        frameRateSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
+        bitrateSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
         syncProjection();
 
         // content
@@ -300,6 +402,7 @@ class VideoSettingsDialog extends Container {
         content.append(resolutionRow);
         content.append(formatRow);
         content.append(codecRow);
+        content.append(codecHintRow);
         content.append(frameRateRow);
         content.append(bitrateRow);
         content.append(frameRangeRow);
@@ -370,32 +473,6 @@ class VideoSettingsDialog extends Container {
 
                 onOK = () => {
 
-                    const widths: Record<string, number> = {
-                        '540': 960,
-                        '720': 1280,
-                        '1080': 1920,
-                        '1440': 2560,
-                        '4k': 3840,
-                        '8k': 7680,
-                        '360-1k': 1024,
-                        '360-2k': 2048,
-                        '360-4k': 3840,
-                        '360-4096': 4096
-                    };
-
-                    const heights: Record<string, number> = {
-                        '540': 540,
-                        '720': 720,
-                        '1080': 1080,
-                        '1440': 1440,
-                        '4k': 2160,
-                        '8k': 4320,
-                        '360-1k': 512,
-                        '360-2k': 1024,
-                        '360-4k': 1920,
-                        '360-4096': 2048
-                    };
-
                     const frameRates: Record<string, number> = {
                         '12': 12,
                         '15': 15,
@@ -407,35 +484,22 @@ class VideoSettingsDialog extends Container {
                         '120': 120
                     };
 
-                    // bits per pixel per frame for different quality settings
-                    const bppfs: Record<string, number> = {
-                        'low': 0.001,
-                        'medium': 0.01,
-                        'high': 0.1,
-                        'ultra': 1
-                    };
-
-                    // scale down higher resolutions (matched by pixel count)
-                    const bbpfFactors: Record<string, number> = {
-                        '540': 1,
-                        '720': 1 / 2,
-                        '1080': 1 / 3,
-                        '1440': 1 / 4,
-                        '4k': 1 / 5,
-                        '360-1k': 1,
-                        '360-2k': 1 / 3,
-                        '360-4k': 1 / 5,
-                        '360-4096': 1 / 5
-                    };
-
                     const is360 = projectionSelect.value === 'equirect';
                     const portrait = !is360 && portraitBoolean.value;
-                    const width = (portrait ? heights : widths)[resolutionSelect.value];
-                    const height = (portrait ? widths : heights)[resolutionSelect.value];
+                    // 尺寸与码率都走共用模块：尺寸取预设表（含 8K），码率用 `bitrateFor()`
+                    // —— 老实现里 `bbpfFactors` 没有 8K 这一档 ⇒ `bitrate = NaN` ⇒ 编码器直接失败。
+                    const preset = presetById(resolutionSelect.value) ?? presetById(is360 ? '360-4k' : '1080')!;
+                    const clamped = clampExportSize(
+                        portrait ? preset.height : preset.width,
+                        portrait ? preset.width : preset.height,
+                        maxTextureSize
+                    );
+                    const width = clamped.width;
+                    const height = clamped.height;
                     const frameRate = frameRates[frameRateSelect.value];
-                    const bppf = bppfs[bitrateSelect.value] * bbpfFactors[resolutionSelect.value];
-                    // bitrate (bps) = 100m * (width × height × frame rate × bppf) / 1m
-                    const bitrate = Math.floor(10 * width * height * frameRate * bppf);
+                    const bitrate = bitrateFor({
+                        width, height, frameRate, quality: bitrateSelect.value, preset: preset.v
+                    });
 
                     const frameRange = frameRangeInput.value as number[];
 

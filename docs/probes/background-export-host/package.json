@@ -1,0 +1,6 @@
+{
+    "name": "splatroom-bg-export-host",
+    "private": true,
+    "main": "main.js",
+    "description": "Probe-only Electron host for background-export A/B (not shipped in the app)"
+}

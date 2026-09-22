@@ -1,7 +1,9 @@
 import { Button, Container, Element, Label, SelectInput } from '@playcanvas/pcui';
 
+import { supportedCodecsAt } from './export-codec-support';
 import { i18n } from './localization';
 import { Events } from '../core/events';
+import { bitrateFor, clampExportSize, presetById, presetOptionsFor } from '../core/export-resolution';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {
@@ -51,13 +53,18 @@ class TurntableVideoDialog extends Container {
         header.append(headerText);
 
         // resolution
-        const standardResolutions = [
-            { v: '540', t: '960x540' },
-            { v: '720', t: '1280x720' },
-            { v: '1080', t: '1920x1080' },
-            { v: '1440', t: '2560x1440' },
-            { v: '4k', t: '3840x2160' }
-        ];
+        //
+        // 预设与上限来自 `src/core/export-resolution.ts`（与图像/视频导出共用一份）：
+        // 这一档原来是 4K 封顶，第十八轮抬到 **8K（7680×4320）**，并按设备 `maxTextureSize` 过滤。
+        const maxTextureSize = (() => {
+            try {
+                return (events.invoke('scene') as any)?.graphicsDevice?.maxTextureSize ?? 16384;
+            } catch {
+                return 16384;
+            }
+        })();
+
+        const standardResolutions = presetOptionsFor('standard', maxTextureSize).map(p => ({ v: p.v, t: p.t }));
 
         const resolutionLabel = new Label({ class: 'label' });
         i18n.bindText(resolutionLabel, 'popup.render-video.resolution');
@@ -106,6 +113,14 @@ class TurntableVideoDialog extends Container {
         codecRow.append(codecLabel);
         codecRow.append(codecSelect);
 
+        // 分辨率策略的状态与说明行（见 applyResolutionPolicy）
+        let policyToken = 0;
+        // 策略自己改 `formatSelect` 时不要再触发一轮（否则说明行会被下一轮清掉）
+        let applyingPolicy = false;
+        const codecHint = new Label({ class: 'label' });
+        const codecHintRow = new Container({ class: 'row', hidden: true });
+        codecHintRow.append(codecHint);
+
         const codecOptions: Record<string, Array<{ v: string, t: string }>> = {
             'mp4': [
                 { v: 'h264', t: 'H.264' },
@@ -127,7 +142,87 @@ class TurntableVideoDialog extends Container {
             ]
         };
 
+        // 8K 只能 VP9/AV1（实测：H.264 在 7680×4320 被 WebCodecs 拒、H.265 本机没有编码器）。
+        // 选了 8K 就自动把 mp4/h264 换成能用的容器+编码器，并给一行说明。
+        const applyResolutionPolicy = async () => {
+            const token = ++policyToken;
+            const preset = presetById(resolutionSelect.value) ?? presetById('1080');
+            if (!preset) {
+                return;
+            }
+            const frameRate = Number(frameRateSelect.value) || 30;
+            const bitrate = bitrateFor({
+                width: preset.width,
+                height: preset.height,
+                frameRate,
+                quality: bitrateSelect.value,
+                preset: preset.v
+            });
+            const allowedFor = (format: string) => supportedCodecsAt(
+                (codecOptions[format] ?? codecOptions.mp4).map(o => o.v),
+                preset.width, preset.height, bitrate, frameRate
+            );
+
+            let format = formatSelect.value;
+            if (format === 'png') {
+                // 帧序列没有编码器概念，不需要策略（也就不用问 WebCodecs）
+                codecHint.text = '';
+                codecHintRow.hidden = true;
+                return;
+            }
+
+            let allowed = await allowedFor(format);
+            let switchedFormat = false;
+            if (!allowed.length) {
+                for (const candidate of ['webm', 'mkv', 'mp4', 'mov']) {
+                    if (candidate === format) {
+                        continue;
+                    }
+
+                    const list = await allowedFor(candidate);
+                    if (list.length) {
+                        format = candidate;
+                        allowed = list;
+                        switchedFormat = true;
+                        break;
+                    }
+                }
+            }
+            if (token !== policyToken) {
+                return;
+            }
+            if (switchedFormat) {
+                // 举旗：这一轮 `formatSelect` 的 change 处理不要再重置编码器/藏说明行
+                applyingPolicy = true;
+                formatSelect.value = format;
+                applyingPolicy = false;
+                const isSequence = format === 'png';
+                codecRow.hidden = isSequence;
+                bitrateRow.hidden = isSequence;
+            }
+            codecSelect.options = (codecOptions[format] ?? codecOptions.mp4).filter(o => allowed.includes(o.v));
+            if (!allowed.includes(codecSelect.value)) {
+                codecSelect.value = allowed[0];
+            }
+            const note = switchedFormat ?
+                i18n.t('popup.render-video.resolution-note', {
+                    size: preset.t,
+                    codec: String(codecSelect.value).toUpperCase(),
+                    format: format.toUpperCase()
+                }) :
+                '';
+            codecHint.text = note;
+            codecHintRow.hidden = !note;
+        };
+
+        resolutionSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
+
         formatSelect.on('change', () => {
+            if (applyingPolicy) {
+                return;   // 这一轮是策略自己改的：编码器与说明行由策略继续设置
+            }
             const format = formatSelect.value;
             const options = codecOptions[format] || codecOptions.mp4;
             codecSelect.options = options;
@@ -142,6 +237,10 @@ class TurntableVideoDialog extends Container {
             const isSequence = format === 'png';
             codecRow.hidden = isSequence;
             bitrateRow.hidden = isSequence;
+            codecHintRow.hidden = true;
+
+            // 默认值之后按当前分辨率再筛一遍（8K 会把 h264/h265 拿掉）
+            applyResolutionPolicy();
         });
 
         // framerate
@@ -181,6 +280,14 @@ class TurntableVideoDialog extends Container {
         const bitrateRow = new Container({ class: 'row' });
         bitrateRow.append(bitrateLabel);
         bitrateRow.append(bitrateSelect);
+
+        // 帧率 / 码率变了也要重算编码器可用性（`isConfigSupported` 的结果与 fps 有关）
+        frameRateSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
+        bitrateSelect.on('change', () => {
+            applyResolutionPolicy();
+        });
 
         // rotate speed — read-only display
         const rotateSpeedLabel = new Label({ class: 'label' });
@@ -286,6 +393,7 @@ class TurntableVideoDialog extends Container {
         content.append(resolutionRow);
         content.append(formatRow);
         content.append(codecRow);
+        content.append(codecHintRow);
         content.append(frameRateRow);
         content.append(bitrateRow);
         content.append(rotateSpeedRow);
@@ -330,6 +438,8 @@ class TurntableVideoDialog extends Container {
 
         this.show = (mode: 'orbit' | 'look') => {
             updateComputedValues();
+            // 打开时按当前分辨率筛一遍编码器（8K 会把 h264/h265 换掉）
+            applyResolutionPolicy();
 
             this.hidden = false;
             document.addEventListener('keydown', keydown);
@@ -402,22 +512,6 @@ class TurntableVideoDialog extends Container {
                         // action === 'export'：无视警告，继续导出
                     }
 
-                    const widths: Record<string, number> = {
-                        '540': 960,
-                        '720': 1280,
-                        '1080': 1920,
-                        '1440': 2560,
-                        '4k': 3840
-                    };
-
-                    const heights: Record<string, number> = {
-                        '540': 540,
-                        '720': 720,
-                        '1080': 1080,
-                        '1440': 1440,
-                        '4k': 2160
-                    };
-
                     const frameRates: Record<string, number> = {
                         '12': 12,
                         '15': 15,
@@ -429,26 +523,16 @@ class TurntableVideoDialog extends Container {
                         '120': 120
                     };
 
-                    const bppfs: Record<string, number> = {
-                        'low': 0.001,
-                        'medium': 0.01,
-                        'high': 0.1,
-                        'ultra': 1
-                    };
-
-                    const bbpfFactors: Record<string, number> = {
-                        '540': 1,
-                        '720': 1 / 2,
-                        '1080': 1 / 3,
-                        '1440': 1 / 4,
-                        '4k': 1 / 5
-                    };
-
-                    const width = widths[resolutionSelect.value];
-                    const height = heights[resolutionSelect.value];
+                    // 尺寸取共用预设表（含 8K），码率用 `bitrateFor()`（老实现的 8K 档
+                    // 因为 `bbpfFactors` 缺项会算出 NaN ⇒ 编码器直接失败），并夹到设备上限。
+                    const preset = presetById(resolutionSelect.value) ?? presetById('1080')!;
+                    const clamped = clampExportSize(preset.width, preset.height, maxTextureSize);
+                    const width = clamped.width;
+                    const height = clamped.height;
                     const frameRate = frameRates[frameRateSelect.value];
-                    const bppf = bppfs[bitrateSelect.value] * bbpfFactors[resolutionSelect.value];
-                    const bitrate = Math.floor(10 * width * height * frameRate * bppf);
+                    const bitrate = bitrateFor({
+                        width, height, frameRate, quality: bitrateSelect.value, preset: preset.v
+                    });
 
                     const settings: TurntableVideoSettings = {
                         frameRate,

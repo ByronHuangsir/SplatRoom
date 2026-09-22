@@ -4,6 +4,7 @@ import { enableReliableInputDrag, hidePcuiSliderStrip } from './input-drag';
 import { i18n } from './localization';
 import { ImageSettings } from '../app/render';
 import { Events } from '../core/events';
+import { EQUIRECT_PRESETS, MAX_EXPORT_DIMENSION, presetById } from '../core/export-resolution';
 import sceneExport from './svg/export.svg';
 
 const createSvg = (svgString: string, args = {}) => {
@@ -61,21 +62,31 @@ class ImageSettingsDialog extends Container {
 
         // preset
 
-        // 360 output is 2:1 equirectangular, capped at 4096 wide to stay
-        // within common encoder dimension limits (mirrors video's presets)
+        // 尺寸来自 `src/core/export-resolution.ts`（与视频/旋转台导出共用一份表）：
+        // 标准档含 8K（7680×4320）、360 档含 8K（8192×4096），
+        // 且**设备放不下的档位不出现在下拉里**（`maxTextureSize` 不够就不给选，避免选完才炸）。
+        const maxTextureSize = (() => {
+            try {
+                return (events.invoke('scene') as any)?.graphicsDevice?.maxTextureSize ?? 16384;
+            } catch {
+                return 16384;
+            }
+        })();
+
+        const deviceFits = (v: string) => {
+            const p = presetById(v);
+            return !!p && p.width <= maxTextureSize && p.height <= maxTextureSize;
+        };
+
         const buildPresetOptions = () => {
             return projectionSelect.value === 'equirect' ? [
-                { v: '360-1k', t: '1024x512' },
-                { v: '360-2k', t: '2048x1024' },
-                { v: '360-4k', t: '3840x1920' },
-                { v: '360-4096', t: '4096x2048' },
+                ...EQUIRECT_PRESETS.map(p => ({ v: p.v, t: p.t })).filter(o => deviceFits(o.v)),
                 { v: 'custom', t: i18n.t('popup.render-image.resolution.custom') }
             ] : [
                 { v: 'viewport', t: i18n.t('popup.render-image.resolution.current') },
                 { v: 'HD', t: 'HD' },
                 { v: 'QHD', t: 'QHD' },
-                { v: '4K', t: '4K' },
-                { v: '8K', t: '8K' },
+                ...['4k', '8k'].filter(deviceFits).map(v => ({ v, t: v.toUpperCase() })),
                 { v: 'custom', t: i18n.t('popup.render-image.resolution.custom') }
             ];
         };
@@ -99,7 +110,9 @@ class ImageSettingsDialog extends Container {
             class: 'vector-input',
             dimensions: 2,
             min: 4,
-            max: 16000,
+            // 自定义分辨率也要被设备上限夹住：原来硬编码 16000，比本机 16384 略小但
+            // 集显上（8192/4096）会让用户填出一个渲染目标都建不出来的值。
+            max: Math.min(16384, Math.max(MAX_EXPORT_DIMENSION, maxTextureSize)),
             precision: 0,
             value: [1024, 768]
         });
@@ -219,34 +232,18 @@ class ImageSettingsDialog extends Container {
         // Handle custom resolution activation
 
         const updateResolution = () => {
-            const widths: Record<string, number> = {
-                'viewport': targetSize.width,
-                'HD': 1920,
-                'QHD': 2560,
-                '4K': 3840,
-                '8K': 7680,
-                '360-1k': 1024,
-                '360-2k': 2048,
-                '360-4k': 3840,
-                '360-4096': 4096
+            // 尺寸只有一份来源：共用预设表（`viewport` 走当前画布、`HD/QHD` 是历史短标签）
+            const dims: Record<string, { width: number, height: number }> = {
+                'viewport': targetSize,
+                'HD': { width: 1920, height: 1080 },
+                'QHD': { width: 2560, height: 1440 },
+                '4K': { width: 3840, height: 2160 },
+                '8K': { width: 7680, height: 4320 }
             };
-
-            const heights: Record<string, number> = {
-                'viewport': targetSize.height,
-                'HD': 1080,
-                'QHD': 1440,
-                '4K': 2160,
-                '8K': 4320,
-                '360-1k': 512,
-                '360-2k': 1024,
-                '360-4k': 1920,
-                '360-4096': 2048
-            };
-
-            resolutionValue.value = [
-                widths[presetSelect.value] ?? resolutionValue.value[0],
-                heights[presetSelect.value] ?? resolutionValue.value[1]
-            ];
+            const preset = dims[presetSelect.value] ?? presetById(presetSelect.value);
+            if (preset) {
+                resolutionValue.value = [preset.width, preset.height];
+            }
         };
 
         presetSelect.on('change', () => {

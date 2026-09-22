@@ -5,6 +5,17 @@ const fs = require('fs');
 // Detect dev mode
 const isDev = !fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
 
+// 渲染导出（图像 / 视频 / 旋转台帧序列）必须能在**窗口被最小化或被遮挡时继续跑**：
+// 第十八轮实测（`docs/probes/background-export.cjs`，8K 旋转台 PNG 序列）：
+//   窗口可见时 rafHz 38–60、定时器间隔 ~200 ms，导出正常推进；
+//   窗口一最小化，`document.hidden = true`，**rAF 被暂停、定时器被降到 ~1 Hz**
+//   （实测定时器最大间隔 1442 ms）⇒ 40 秒里一帧都没写出（进度停在 2/12），
+//   恢复窗口后才继续跑完（60.4 s vs 前台 21 s）。
+// Electron 的 `backgroundThrottling` 默认 true 就是这个行为；关掉它 + 关掉渲染进程后台化，
+// 导出才能在"最小化去干别的"时继续。
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 // MIME types for static file serving
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -152,7 +163,10 @@ async function createWindow() {
             nodeIntegration: false,
             contextIsolation: true,
             webSecurity: true,
-            preload: path.join(__dirname, 'electron-preload.js')
+            preload: path.join(__dirname, 'electron-preload.js'),
+            // 见文件顶部：导出要在最小化/被遮挡时继续跑（默认 true 会让 rAF 停摆、
+            // 定时器降到 1 Hz ⇒ 导出卡住）
+            backgroundThrottling: false
         },
         autoHideMenuBar: true
     });
@@ -200,7 +214,9 @@ async function createWindow() {
                         webPreferences: {
                             contextIsolation: true,
                             nodeIntegration: false,
-                            webSecurity: true
+                            webSecurity: true,
+                            // 弹出窗口（比较/合并/工厂等工具）同样不要被后台节流
+                            backgroundThrottling: false
                         }
                     }
                 };
