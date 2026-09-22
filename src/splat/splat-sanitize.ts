@@ -30,11 +30,12 @@ const isGiantGrey = (
     dc0: number, dc1: number, dc2: number,
     op: number, diag: number
 ): boolean => {
-    const lin = Math.exp(Math.max(s0, s1, s2));
-    if (lin <= diag * GIANT_SCALE_RATIO) return false;
+    // 判定顺序 = 语义不变（三个条件是与关系），但**把 `Math.exp` 挪到最后**：
+    // 巨型灰高斯是极少数，绝大多数行会在前两个廉价比较就被否掉，于是省掉 99% 的 exp
+    // （6000 万行那档实测能省掉几百毫秒，见 docs/导入残留阻塞-归因与LOD时机-2026-09-22.md）
     if (Math.abs(dc0) + Math.abs(dc1) + Math.abs(dc2) >= GREY_DC_EPS) return false;
     if (Math.abs(op) >= GREY_OPACITY_EPS) return false;
-    return true;
+    return Math.exp(Math.max(s0, s1, s2)) > diag * GIANT_SCALE_RATIO;
 };
 
 export interface GiantSplatReport {
@@ -72,21 +73,42 @@ const sceneDiagonal = (x: Float32Array, y: Float32Array, z: Float32Array): numbe
     return Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2 + (maxZ - minZ) ** 2);
 };
 
-/** Count giant-grey splats. Cheap single pass; call before offering removal. */
-export const detectGiantGreySplats = (data: GSplatData): GiantSplatReport => {
-    const N = data.numSplats;
-    const p = getProps(data);
+/** 巨型灰高斯的判定所需的全部列（`null` = 这一列不存在，直接跳过检测） */
+export interface GiantDetectColumns {
+    x: Float32Array | null;
+    y: Float32Array | null;
+    z: Float32Array | null;
+    s0: Float32Array | null;
+    s1: Float32Array | null;
+    s2: Float32Array | null;
+    dc0: Float32Array | null;
+    dc1: Float32Array | null;
+    dc2: Float32Array | null;
+    op: Float32Array | null;
+}
+
+/**
+ * 按列检测（第十九/二十轮）：**这份实现是纯函数、不依赖 GSplatData**，
+ * 所以它既能跑在主线程（回退路径），也能跑在**导入 worker** 里 —— worker 已经握着物化好的列，
+ * 顺手统计一遍就把主线程的"逐行扫描"整段搬走了（1.35 亿那档原来占主线程约 1.2 s）。
+ */
+export const detectGiantGreyFromColumns = (p: GiantDetectColumns, total: number): GiantSplatReport => {
     if (!p.x || !p.y || !p.z || !p.s0 || !p.s1 || !p.s2 || !p.dc0 || !p.dc1 || !p.dc2 || !p.op) {
-        return { total: N, giantGrey: 0, diag: 0, removable: false };
+        return { total, giantGrey: 0, diag: 0, removable: false };
     }
     const diag = sceneDiagonal(p.x, p.y, p.z);
     let giantGrey = 0;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < total; i++) {
         if (isGiantGrey(p.s0[i], p.s1[i], p.s2[i], p.dc0[i], p.dc1[i], p.dc2[i], p.op[i], diag)) {
             giantGrey++;
         }
     }
-    return { total: N, giantGrey, diag, removable: giantGrey > N * MIN_REMOVE_FRACTION };
+    return { total, giantGrey, diag, removable: giantGrey > total * MIN_REMOVE_FRACTION };
+};
+
+/** Count giant-grey splats. Cheap single pass; call before offering removal. */
+export const detectGiantGreySplats = (data: GSplatData): GiantSplatReport => {
+    return detectGiantGreyFromColumns(getProps(data), data.numSplats);
 };
 
 /**

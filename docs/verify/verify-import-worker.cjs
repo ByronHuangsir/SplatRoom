@@ -113,7 +113,10 @@ const runOne = async (browser, workerEnabled, boxOrNull = null) => {
                 scale: [s.x, s.y, s.z].map(f),
                 world: Array.from(w).map(f)
             },
-            workerResults: window.__LW_WORKER_RESULTS__ || 0
+            workerResults: window.__LW_WORKER_RESULTS__ || 0,
+            // 第二十轮：巨型灰高斯的统计现在**由 worker 算**（`detectGiantGreyFromColumns`），
+            // 主线程只在回退路径上自己扫。两条路的数字必须一致，`source` 必须各是 worker / main。
+            giantReport: window.__GIANT_REPORT__ ?? null
         };
     }, BUDGET);
 
@@ -250,6 +253,16 @@ const runOne = async (browser, workerEnabled, boxOrNull = null) => {
         off.selection.stateHash === on.selection.stateHash && off.selection.selected === on.selection.selected,
         `main 选中 ${off.selection.selected}/${off.selection.total}（位哈希 ${off.selection.stateHash}）；` +
         `worker 选中 ${on.selection.selected}/${on.selection.total}（位哈希 ${on.selection.stateHash}）`);
+
+    check('the giant-grey scan gives identical numbers on both paths (worker-computed vs main-thread fallback)',
+        !!a.giantReport && !!b.giantReport &&
+        a.giantReport.source === 'main' && b.giantReport.source === 'worker' &&
+        a.giantReport.total === b.giantReport.total &&
+        a.giantReport.giantGrey === b.giantReport.giantGrey &&
+        a.giantReport.removable === b.giantReport.removable &&
+        Math.abs(a.giantReport.diag - b.giantReport.diag) < 1e-6,
+        `main: ${JSON.stringify(a.giantReport)}；worker: ${JSON.stringify(b.giantReport)}` +
+        '（第二十轮把这份统计搬进 worker，省掉 6000 万行那档约 1.2 s 的主线程阻塞）');
 
     check('that selection is a real partial selection (so the check above is not vacuous)',
         off.selection.selected > 0 && off.selection.selected < off.selection.total,

@@ -160,7 +160,12 @@ class AssetLoader {
             // dominate the model we ask: shrink (keep all, clamp scale — the
             // recommended default), remove (delete them), or keep as-is.
             if (sanitize) {
-                const report = detectGiantGreySplats(gsplatData);
+                // 第二十轮：这份统计**在导入 worker 里已经算好了**（它手上就是同一批列），
+                // 主线程不再逐行扫 —— 1.35 亿那档原来这一趟占主线程约 1.2 s。
+                // 只有 worker 没给（回退到主线程同步加载）时才自己扫一遍。
+                const report = result.giantSplat ?? detectGiantGreySplats(gsplatData);
+                // 探针可读：证明了"哪条路算出来的"，也方便 A/B 比对数字
+                (globalThis as any).__GIANT_REPORT__ = { ...report, source: result.giantSplat ? 'worker' : 'main' };
                 if (report.removable) {
                     const popupResult = await this.events.invoke('showPopup', {
                         type: 'okcancel',

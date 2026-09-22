@@ -32,7 +32,10 @@ type LoadResult = {
     gsplatData: any;
     transform: any;
     /** 导入时按设备预算抽稀过才有（见 src/core/splat-tier.ts） */
-    reduction?: { from: number; to: number; tier: string; device: string; reason: string };};
+    reduction?: { from: number; to: number; tier: string; device: string; reason: string };
+    /** worker 顺手算好的巨型灰高斯统计（第二十轮）；`null`/缺失 = 主线程回退扫描 */
+    giantSplat?: { total: number; giantGrey: number; diag: number; removable: boolean } | null;
+};
 
 type Pending = {
     resolve: (r: LoadResult | null) => void;
@@ -166,7 +169,7 @@ const handleWorkerMessage = async (e: MessageEvent) => {
             transform
         };
         const gsplatData = dataTableToGSplatData(dataTable as any);
-        p.resolve({ gsplatData, transform, reduction: msg.reduction ?? undefined });
+        p.resolve({ gsplatData, transform, reduction: msg.reduction ?? undefined, giantSplat: msg.giantSplat ?? null });
         return;
     }
 

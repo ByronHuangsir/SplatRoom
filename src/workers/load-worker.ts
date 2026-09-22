@@ -26,6 +26,7 @@ import {
 import { importBudget, type DeviceFacts } from '../core/splat-tier';
 import { BlobReadFileSystem } from '../io/read/file-systems';
 import { makeStridedSource } from '../io/read/strided-source';
+import { detectGiantGreyFromColumns } from '../splat/splat-sanitize';
 
 // Mirror the app main-thread setup so the bundled engine + WebP wasm resolve
 // correctly inside this worker realm (separate from the main bundle's globals).
@@ -173,8 +174,34 @@ const handleLoad = async (msg: any) => {
                 };
             });
             const transfer = columns.map((c: any) => c.data);
+
+            // 巨型灰高斯检测（第十九/二十轮）：这份统计要扫全部行（1.35 亿那档抽稀后 6000 万行），
+            // 原来跑在主线程、占掉约 1.2 s。worker 手上就是同一批列，顺手统计一遍，
+            // 主线程就**完全不用**再逐行扫了（只有用户真选"移除/缩小"时才在主线程动数据）。
+            const colByName = new Map<string, Float32Array>();
+            for (const c of dataTable.columns) {
+                colByName.set(c.name, c.data as Float32Array);
+            }
+            let giantSplat: any = null;
+            try {
+                giantSplat = detectGiantGreyFromColumns({
+                    x: colByName.get('x') ?? null,
+                    y: colByName.get('y') ?? null,
+                    z: colByName.get('z') ?? null,
+                    s0: colByName.get('scale_0') ?? null,
+                    s1: colByName.get('scale_1') ?? null,
+                    s2: colByName.get('scale_2') ?? null,
+                    dc0: colByName.get('f_dc_0') ?? null,
+                    dc1: colByName.get('f_dc_1') ?? null,
+                    dc2: colByName.get('f_dc_2') ?? null,
+                    op: colByName.get('opacity') ?? null
+                }, dataTable.numRows);
+            } catch {
+                giantSplat = null;   // 检测失败不影响导入：主线程会走回退扫描
+            }
+
             (self as any).postMessage(
-                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction },
+                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction, giantSplat },
                 transfer
             );
         } finally {
