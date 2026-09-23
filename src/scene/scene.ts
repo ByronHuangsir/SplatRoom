@@ -54,6 +54,76 @@ const _groupSortLocalDir = new Vec3();
 const _groupSortInvModel = new Mat4();
 const _groupSortLastPos = new Vec3();
 const _groupSortLastDir = new Vec3();
+
+// 合并（组）实体的排序派发合并器 —— 与 `Splat.dispatchSort` 同一套语义，只是状态挂在这里。
+//
+// ⚠️ **为什么不能用引擎的字段**：这里原来判 `ws._sortInFlight` / 写 `ws._pendingCamera`，
+// 而**这两个字段在 playcanvas 2.21.3 里根本不存在**（`grep _sortInFlight node_modules/playcanvas`
+// 零命中）。第一次派发把 `ws._sortInFlight = true` 之后**没有任何代码会清它** ⇒ 此后每帧都走进
+// `_pendingCamera` 分支"只记录、不发送"，**合并渲染的排序从此冻结在第一次的位姿上**。
+// 主通路（`src/splat/splat.ts` 的 `dispatchSort`/`_onSortUpdated`）2026-09-21 已经修过同一个坑，
+// 这里当时漏了 —— 现在改成**自己的**在飞时刻（完成事件清零 + 3 s 超时兜底）与**自己的**待办位姿。
+const GROUP_SORT_INFLIGHT_TIMEOUT_MS = 3000;
+class GroupSorterCoalescer {
+    private inFlightSince = 0;
+    private hasPending = false;
+    private readonly pendingPos = new Vec3();
+    private readonly pendingDir = new Vec3();
+
+    /** 派发（或在飞时只记最新位姿）。与 splat 侧一致：每次派发都带 `forceUpdate: true`。 */
+    dispatch(sorter: any, localPos: Vec3, localDir: Vec3) {
+        const now = performance.now();
+        if (this.inFlightSince !== 0 && now - this.inFlightSince < GROUP_SORT_INFLIGHT_TIMEOUT_MS) {
+            this.pendingPos.copy(localPos);
+            this.pendingDir.copy(localDir);
+            this.hasPending = true;
+            return;
+        }
+        if (this.inFlightSince !== 0) {
+            // 超时兜底：上一次排序的回包没来（worker 认为"没动够"就不回包），别把自己锁死
+            this.inFlightSince = 0;
+        }
+        this.hasPending = false;
+        this.send(sorter, localPos, localDir);
+    }
+
+    /** 排序回包（`sorter` 的 `'updated'` 事件）：清在飞，并把攒下的最新位姿补发一次。 */
+    onUpdated(sorter: any) {
+        if (this.inFlightSince === 0) {
+            return;
+        }
+        this.inFlightSince = 0;
+        if (this.hasPending) {
+            this.hasPending = false;
+            this.send(sorter, this.pendingPos, this.pendingDir);
+        }
+    }
+
+    /** 合并实体被销毁/替换时调用，避免把新实例当成"有排序在飞"。 */
+    reset() {
+        this.inFlightSince = 0;
+        this.hasPending = false;
+    }
+
+    private send(sorter: any, localPos: Vec3, localDir: Vec3) {
+        try {
+            if (!sorter?.worker) {
+                return;
+            }
+            sorter.worker.postMessage({
+                cameraPosition: { x: localPos.x, y: localPos.y, z: localPos.z },
+                cameraDirection: { x: localDir.x, y: localDir.y, z: localDir.z },
+                forceUpdate: true
+            });
+            this.inFlightSince = performance.now();
+        } catch (e) {
+            // best-effort：排序失败不该影响渲染（也不该把自己标成"在飞"）
+            this.inFlightSince = 0;
+        }
+    }
+}
+const _groupSorter = new GroupSorterCoalescer();
+
 const specialSort = (instances: MeshInstance[], numInstances: number, cameraPos: Vec3, cameraDir: Vec3) => {
     const distances = new Map<MeshInstance, number>();
 
@@ -127,6 +197,11 @@ class Scene {
     // 一次性告警标记：渲染循环异常 / 合并排序兜底相机缺失只提示一次，避免每帧刷屏。
     _warnedRenderError = false;
     _warnedGroupNoMainCam = false;
+    // 合并实体当前的 sorter（用来登记/摘除 'updated' 监听，见 _syncGroupSorterListener）
+    private _groupSorterRef: any = null;
+    private readonly _onGroupSortUpdated = () => {
+        _groupSorter.onUpdated(this._groupSorterRef);
+    };
 
     // 相机是否正在动（指针按下 / 位姿变化 / 未超过 settle 窗口）。两个消费者：
     // GPU 每帧计时给帧打"动/静"标签，交互期降级只在 moving 时启用。见 src/core/camera-motion.ts。
@@ -684,6 +759,25 @@ class Scene {
         cam.rebuildRenderTargets();
     }
 
+    /**
+     * 合并实体的 sorter 会在组建立/解散时换掉，所以按实例登记 `'updated'` 监听：
+     * 没听过就登记，实例换了就换监听，组没了就摘掉并清掉"在飞"状态
+     * （否则新实例会继承旧实例的"在飞"标记，又变成一发不发的死路）。
+     */
+    private _syncGroupSorterListener(sorter: any) {
+        if (this._groupSorterRef === sorter) {
+            return;
+        }
+        if (this._groupSorterRef?.off) {
+            this._groupSorterRef.off('updated', this._onGroupSortUpdated, this);
+        }
+        this._groupSorterRef = sorter ?? null;
+        _groupSorter.reset();
+        if (sorter?.on) {
+            sorter.on('updated', this._onGroupSortUpdated, this);
+        }
+    }
+
     // 场景里的高斯点总数（没有 timestamp query 时，降级只能按模型规模判断，见 MotionQuality）
     private splatCount() {
         let total = 0;
@@ -765,11 +859,14 @@ class Scene {
         // 引擎排序链路依赖 culler 每帧把主相机 push 进 instance.cameras[]，
         // 但大模型/特定场景下 cameras 可能不填充 → update() 的 sort() 分支
         // 不执行 → worker 排序冻结在初始相机 → 相机移动后"近小远大"。
-        // 这里每帧用主相机强制排序合并实体（instance.sort 内部有 equalsApprox
-        // 节流 + sorter 有 _sortInFlight coalesce 补丁，相机不动时廉价）。
+        // 这里每帧用主相机强制排序合并实体（合并/在飞/超时由 _groupSorter 负责）。
         if (this.groupRenderer.isActive) {
             const mergedInst = (this.groupRenderer as any).mergedEntity?.gsplat?.instance;
             const mainCamNode = (this.camera as any)?.mainCamera as any;
+            // 排序回包（引擎 GSplatSorter 收到 worker 结果时 fire 'updated'）：
+            // `_groupSorter` 靠它清"在飞"并把攒下的最新位姿补发一次。
+            // 合并实例会被创建/销毁，所以按实例登记/摘除监听，并同时 reset 状态。
+            this._syncGroupSorterListener(mergedInst?.sorter);
             if (!mainCamNode) {
                 // 主相机引用缺失：合并实体排序兜底无法取相机姿态 → worker 排序
                 // 冻结在初始相机（"近小远大"）。异常状态，一次性告警暴露。
@@ -803,22 +900,9 @@ class Scene {
                     // Direct worker dispatch (same rationale as splat.ts:
                     // engine sorter.setCamera doesn't accept forceUpdate, and
                     // worker epsilon 1e-3 short-circuits our 1e-6 detections).
-                    try {
-                        const ws = mergedInst.sorter;
-                        if (ws._sortInFlight) {
-                            ws._pendingCamera = {
-                                pos: { x: _groupSortLocalPos.x, y: _groupSortLocalPos.y, z: _groupSortLocalPos.z },
-                                dir: { x: _groupSortLocalDir.x, y: _groupSortLocalDir.y, z: _groupSortLocalDir.z }
-                            };
-                        } else {
-                            ws._sortInFlight = true;
-                            ws.worker.postMessage({
-                                cameraPosition: { x: _groupSortLocalPos.x, y: _groupSortLocalPos.y, z: _groupSortLocalPos.z },
-                                cameraDirection: { x: _groupSortLocalDir.x, y: _groupSortLocalDir.y, z: _groupSortLocalDir.z },
-                                forceUpdate: true
-                            });
-                        }
-                    } catch (e) { /* best-effort */ }
+                    // 合并/在飞/超时/补发全部交给 _groupSorter —— 与主通路同一套语义，
+                    // 不再碰引擎里不存在的 _sortInFlight / _pendingCamera（见上面的说明）。
+                    _groupSorter.dispatch(mergedInst.sorter, _groupSortLocalPos, _groupSortLocalDir);
                 }
             }
         }

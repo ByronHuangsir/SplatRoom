@@ -30,6 +30,18 @@ class StateOp {
     mask: number;
     op: BitOp;
     updateFlags: number;
+    /**
+     * 选定作用行。默认在**构造之后由子类在 `do()` 里**覆盖（见 `SelectOp`）：本类的 do/undo 是
+     * 同一批行上的互逆位操作，所以"哪些行"必须在**真正执行的那一刻**才确定。
+     *
+     * 为什么不能让子类在构造函数里数一遍行：op 是排队执行的（`CommandQueue`），构造与执行之间
+     * 可能插进别的 op（实测路径：大模型上一次排队的 `SelectRangeOp` 还没跑完，用户按了隐藏 /
+     * 全选 / 全不选 / 反选 / 重置）。那样数出来的是**手势之前**的那批行 —— 隐藏会上一次的选择、
+     * 重置/恢复删格会作用在错的集合上，去浮云那条路甚至会把用户更早的选择删掉。
+     * 2026-09-23 把 `SelectAllOp` / `SelectNoneOp` / `SelectInvertOp` / `HideSelectionOp`
+     * 四个也改成 do 时捕获，与 `SelectOp` 一致。
+     */
+    captureRanges?(): void;
 
     constructor(splat: Splat, ranges: IndexRanges, mask: number, op: BitOp, updateFlags = State.selected) {
         this.splat = splat;
@@ -57,6 +69,7 @@ class StateOp {
     }
 
     async do() {
+        this.captureRanges?.();
         this.apply(this.op);
         await this.splat.updateState(this.updateFlags);
     }
@@ -78,8 +91,13 @@ class SelectAllOp extends StateOp {
     name = 'selectAll';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => state[i] === 0), State.selected, BitOp.SET);
+        // 作用行在 do() 里数（见 StateOp.captureRanges 的说明）：构造与执行之间可能插进别的 op
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.selected, BitOp.SET);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => state[i] === 0);
     }
 }
 
@@ -87,8 +105,12 @@ class SelectNoneOp extends StateOp {
     name = 'selectNone';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => (state[i] & State.selected) !== 0), State.selected, BitOp.CLEAR);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.selected, BitOp.CLEAR);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => (state[i] & State.selected) !== 0);
     }
 }
 
@@ -96,8 +118,12 @@ class SelectInvertOp extends StateOp {
     name = 'selectInvert';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => (state[i] & (State.locked | State.deleted)) === 0), State.selected, BitOp.TOGGLE);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.selected, BitOp.TOGGLE);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => (state[i] & (State.locked | State.deleted)) === 0);
     }
 }
 
@@ -134,7 +160,7 @@ class SelectOp extends StateOp {
         this.opKind = op;
     }
 
-    private captureRanges() {
+    captureRanges() {
         const splatData = this.splat.splatData;
         const state = splatData.getProp('state') as Uint8Array;
         const sel = this.sel;
@@ -182,8 +208,12 @@ class HideSelectionOp extends StateOp {
     name = 'hideSelection';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => state[i] === State.selected), State.locked, BitOp.SET, State.locked);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.locked, BitOp.SET, State.locked);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => state[i] === State.selected);
     }
 }
 
@@ -292,7 +322,7 @@ class DeleteSelectionOp extends StateOp {
         super(splat, IndexRanges.fromPredicate(0, () => false), State.deleted, BitOp.SET, State.deleted);
     }
 
-    private captureRanges() {
+    captureRanges() {
         const state = this.splat.splatData.getProp('state') as Uint8Array;
         this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => state[i] === State.selected);
     }
@@ -363,6 +393,16 @@ class SplatsTransformOp {
     transform: Mat4;
     paletteMap: Map<number, number>;
 
+    /**
+     * `do()` 实际改过的行。**undo 必须重放这一批行，而不是重新看一遍选区**：
+     * 选区可以在一次 do 之后被改掉而**不留历史记录**（拖动深度范围滑块就是原地重跑
+     * `SelectRangeOp`，见 `editor.ts` 里那条 `select.range` 路径），此时若 undo 按
+     * `state[i] === State.selected` 重新筛选，就会出现"do 改过的行没被还原、选区新进来的行被
+     * 当成改过"——后者查 `inverseMap` 得到 `undefined`，写进 Uint16Array 变成 0（恒等变换），
+     * 而 `free()` 又把那些调色板槽位放回池子，下一次变换再分配就会让高斯**静默跳到无关的变换上**。
+     */
+    private _affectedRows: number[] = [];
+
     constructor(options: { splat: Splat, transform: Mat4, paletteMap: Map<number, number> }) {
         this.splat = options.splat;
         this.transform = options.transform;
@@ -375,11 +415,19 @@ class SplatsTransformOp {
         const indices = splat.transformTexture.lock() as Uint16Array;
 
         // update splat transform palette indices
+        const affected: number[] = [];
         for (let i = 0; i < state.length; ++i) {
             if (state[i] === State.selected) {
-                indices[i] = paletteMap.get(indices[i]);
+                const next = paletteMap.get(indices[i]);
+                if (next === undefined) {
+                    // 这个索引不在调色板映射里：不是本 op 的目标，跳过（写 undefined 会静默变成 0）
+                    continue;
+                }
+                indices[i] = next;
+                affected.push(i);
             }
         }
+        this._affectedRows = affected;
 
         splat.transformTexture.unlock();
 
@@ -398,7 +446,6 @@ class SplatsTransformOp {
 
     async undo() {
         const { splat, paletteMap } = this;
-        const state = splat.splatData.getProp('state') as Uint8Array;
         const indices = splat.transformTexture.lock() as Uint16Array;
 
         // invert the palette map
@@ -407,10 +454,11 @@ class SplatsTransformOp {
             inverseMap.set(newIdx, oldIdx);
         });
 
-        // restore the original transform indices
-        for (let i = 0; i < state.length; ++i) {
-            if (state[i] === State.selected) {
-                indices[i] = inverseMap.get(indices[i]);
+        // restore the original transform indices —— 只重放 do 改过的那批行（见 _affectedRows）
+        for (const i of this._affectedRows) {
+            const prev = inverseMap.get(indices[i]);
+            if (prev !== undefined) {
+                indices[i] = prev;
             }
         }
 

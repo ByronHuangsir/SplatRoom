@@ -72,7 +72,20 @@ class EditHistory {
             this.history.pop().destroy?.();
         }
         this.history.push(editOp);
-        await this._redo(suppressOp);
+        try {
+            await this._redo(suppressOp);
+        } catch (e) {
+            // 应用失败（例如 SurfaceRefine 的 replaceData 在大模型上 OOM）时**必须把这一条撤出来**：
+            // 留在 history 里会变成一条"重做一遍什么都没发生"的幽灵记录（`canRedo()` 为真、Ctrl+Z
+            // 之后 Ctrl+Y 又把它推上去），而调用方多半是 fire-and-forget（`void editHistory.add(op)`），
+            // 用户看不到任何错误。这里收回 + 销毁，并把异常继续抛给调用方。
+            if (this.history[this.history.length - 1] === editOp) {
+                this.history.pop();
+            }
+            editOp.destroy?.();
+            this.fireEvents();
+            throw e;
+        }
     }
 
     private async _undo() {
@@ -173,7 +186,6 @@ class EditHistory {
 
             for (let i = 0; i < this.history.length; i++) {
                 const op = this.history[i];
-                // Skip ops referencing the splat; don't destroy them since the caller handles that
                 if (!opReferencesSplat(op, splat)) {
                     // Keep this operation
                     newHistory.push(op);
@@ -181,6 +193,14 @@ class EditHistory {
                     if (i < this.cursor) {
                         newCursor++;
                     }
+                } else {
+                    // 引用被移除 splat 的 op 必须在这里收尾。原来的注释说"调用方会处理"，
+                    // 但唯一的调用方（`editor.ts` 的 `scene.elementRemoved` 处理）**没有**处理 ——
+                    // 于是被丢掉的 op 还攥着自己的快照 Asset（`SurfaceRefineOp` 的两张
+                    // registry.add 过的快照），`app.assets` 一直持有 ⇒ 整个 GSplatResource
+                    // （全部列 + GPU 缓冲）永远不释放：1~7 GB 的模型上每做一次表面修复就永久多留一份。
+                    // 同一文件里的 `removeForShape` 一直是这么做的（`op.destroy?.()`），这里补齐。
+                    op.destroy?.();
                 }
             }
 
