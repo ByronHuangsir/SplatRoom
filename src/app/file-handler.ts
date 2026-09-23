@@ -3,6 +3,7 @@ import { Mat4, path, Quat, Vec3 } from 'playcanvas';
 import { deserializeGrade, serializeGrade, sidecarFilename } from './color-grade-file';
 import { CreateDropHandler } from './drop-handler';
 import { Events } from '../core/events';
+import { IndexRanges } from '../core/index-ranges';
 import { renderDiagnostics } from '../core/render-diagnostics';
 import { BrowserFileSystem, MappedReadFileSystem } from '../io/index';
 import { attachLodFromFile } from '../lod/lod-file';
@@ -521,6 +522,8 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
         const srcVec = new Vec3();
         const worldVec = new Vec3();
         const restoreFns: (() => void)[] = [];
+        // 本趟导出为了"删掉裁剪外的点"而新打上 deleted 位的行（俯仰：只关心这些行）
+        const marked: { splat: Splat, ranges: IndexRanges }[] = [];
 
         for (const splat of splats) {
             const data = splat.splatData;
@@ -533,31 +536,46 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement) 
 
             worldMat.copy(splat.worldTransform);
             const n = data.numSplats;
-            // snapshot BEFORE marking — restoring needs the pre-export bytes
-            const orig = state.slice();
-            const changed: number[] = [];
-
-            for (let i = 0; i < n; i++) {
-                // already deleted → skip (no need to re-mark)
-                if ((state[i] & State.deleted) !== 0) continue;
+            // 裁剪外的判定谓词：**跳过已经 deleted 的行**（没必要重复标记），
+            // 与原来 `changed` 列表的语义逐行一致。
+            const outsideCrop = (i: number) => {
+                if ((state[i] & State.deleted) !== 0) {
+                    return false;
+                }
                 srcVec.set(xs[i], ys[i], zs[i]);
                 worldMat.transformPoint(srcVec, worldVec);
-                if (!cropBox.isPointInsideWorld(worldVec.x, worldVec.y, worldVec.z)) {
-                    state[i] |= State.deleted;
-                    changed.push(i);
-                }
-            }
+                return !cropBox.isPointInsideWorld(worldVec.x, worldVec.y, worldVec.z);
+            };
 
-            if (changed.length > 0) {
-                restoreFns.push(() => {
-                    for (const idx of changed) state[idx] = orig[idx];
-                });
+            // 先把"哪些行要被标记"采出来，再交给 SplatState 去写：
+            // 原来是自己 `state[i] |= State.deleted` 直接改字节，**绕过了 SplatState 的脏标记与计数**
+            // ⇒ 导出期间只要有一次排队的 flush（选中/隐藏/任何一次 setBits 都会排），这份"临时裁剪"
+            // 就被上传到 GPU 状态纹理；而恢复时又只是改回 CPU 字节、不再上传 ⇒ **画面停在裁剪后的样子**。
+            const ranges = IndexRanges.fromPredicate(n, outsideCrop);
+            if (ranges.empty) {
+                continue;
             }
+            splat.state.setBits(ranges, State.deleted);
+            marked.push({ splat, ranges });
         }
 
-        if (restoreFns.length === 0) return noop;
+        if (marked.length === 0) return noop;
+        // 标记完立刻上传：导出读的是 CPU 那份 state（序列化器跳过 deleted 的行），但**GPU 状态纹理
+        // 要靠 flush 才更新**，而 flush 只在 `Splat.updateState()` 里发生（由 `onPreRender` 按需触发）。
+        // 显式刷一次，两边才一致；否则"导出期间恰好有一帧"才会同步，时好时坏。
+        for (const { splat } of marked) {
+            splat.state.flush();
+        }
         return () => {
-            for (const fn of restoreFns) fn();
+            // 走 SplatState 清回来（同一批行），这样脏标记与计数都会被正确维护
+            for (const { splat, ranges } of marked) {
+                splat.state.clearBits(ranges, State.deleted);
+            }
+            // 再刷一次，把恢复后的状态真正传回 GPU（否则画面会停在裁剪后的样子，
+            // 这正是原来的 bug：直接改 CPU 字节、既不标脏也不上传）
+            for (const { splat } of marked) {
+                splat.state.flush();
+            }
             // the state array drives UI (deleted splats render red) — force a
             // refresh so the viewport returns to normal after the export
             scene.forceRender = true;

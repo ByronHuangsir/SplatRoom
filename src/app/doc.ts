@@ -213,6 +213,10 @@ const registerDocEvents = (scene: Scene, events: Events) => {
     const saveDocument = async (options: { stream?: FileSystemWritableFileStream, filename?: string }): Promise<boolean> => {
         events.fire('startSpinner');
 
+        // 保存过程里创建的写入器：失败时必须在 catch 里收尾（下面解释为什么），所以放在 try 外面
+        let saveWriter: { abort?: () => Promise<void> } | null = null;
+        let saveZipFs: { abort?: () => Promise<void> } | null = null;
+
         try {
             const splats = events.invoke('scene.allSplats') as Splat[];
 
@@ -239,6 +243,8 @@ const registerDocEvents = (scene: Scene, events: Events) => {
             const browserFs = new BrowserFileSystem(options.filename, options.stream);
             const browserWriter = await browserFs.createWriter(options.filename);
             const zipFs = new ZipFileSystem(browserWriter);
+            saveWriter = browserWriter as unknown as { abort?: () => Promise<void> };
+            saveZipFs = zipFs as unknown as { abort?: () => Promise<void> };
 
             // Write document.json
             const docWriter = await zipFs.createWriter('document.json');
@@ -257,6 +263,23 @@ const registerDocEvents = (scene: Scene, events: Events) => {
             // NOTE: createWritable() replaces the file on disk as soon as
             // writing starts, so a failure here means the previous .ssproj is
             // already gone — warn the user explicitly.
+            //
+            // **收尾写入器**：原来失败路径只是弹窗，那条 `FileSystemWritableFileStream` 既不 close
+            // 也不 abort ⇒ 文件句柄的写入槽位一直被占着，而弹窗恰恰在邀请用户"再存一次"，
+            // 重试的 `createWritable()` 可能直接抛 `NoModificationAllowedError`（要重启应用才好）。
+            // 下面两步都是 best-effort：`abort()` 会释放流锁，抛了也吞掉（本来就在失败路径上）。
+            try {
+                if (saveZipFs && typeof saveZipFs.abort === 'function') {
+                    await saveZipFs.abort();
+                } else if (saveWriter && typeof saveWriter.abort === 'function') {
+                    // 上游的 ZipFileSystem 没有 abort()：直接中止底层写入器，目的只是释放流锁。
+                    // zip 的中央目录没写完，这份档案本来就已损坏（弹窗里已经这么写了）。
+                    await saveWriter.abort();
+                }
+            } catch (abortErr) {
+                console.warn('[doc.save] 失败后收尾写入器出错（忽略）：', abortErr);
+            }
+
             const permissionDenied = error instanceof Error && error.name === 'NotAllowedError';
             const message = permissionDenied ?
                 i18n.t('doc.save-permission-denied') :

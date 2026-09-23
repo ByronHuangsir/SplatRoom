@@ -35,6 +35,7 @@
         "verify:render": "node docs/verify/verify-model-renders.cjs http://localhost:3100/",
         "verify:overlay": "node docs/verify/verify-overlay-missing-order-texture.cjs http://localhost:3100/",
         "verify:motion-removed": "node docs/verify/verify-motion-render-removed.cjs http://localhost:3100/",
+        "verify:crop-export": "node docs/verify/verify-crop-export-state.cjs http://localhost:3100/",
         "postinstall": "node scripts/apply-patches.js",
         "patched": "node scripts/apply-patches.js"
     },
