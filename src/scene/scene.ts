@@ -662,8 +662,14 @@ class Scene {
             this.forceRender = false;
             this.forceRenderFrames = 0;
         } else if (this.lockedRenderMode) {
-            this.app.renderNextFrame = this.lockedRender;
-            this.lockedRender = false;
+            // **只有在真的会被渲染时才清旗标**：原来无条件 `lockedRender = false`，
+            // 而这一帧的 `renderNextFrame` 可能已经被别处（上一帧残留、或 `forceRenderFrames`）
+            // 置真 ⇒ 请求被静默吞掉。视频/360 导出等的是"下一帧的 postrender"，
+            // 吞一帧就意味着编码进一个位姿已经变了的画面（360 还会是错的那个立方体面）。
+            this.app.renderNextFrame = this.lockedRender || this.app.renderNextFrame;
+            if (this.app.renderNextFrame) {
+                this.lockedRender = false;
+            }
         } else if (!this.app.renderNextFrame) {
             this.app.renderNextFrame = this.forceRender || all.size > 0;
         }
@@ -1096,20 +1102,27 @@ class Scene {
 
         // handle eyedropper pick request
         if (this.pickColorRequest) {
-            const device = this.app.graphicsDevice;
-            const gl = (device as any).gl as WebGL2RenderingContext;
-            const pixels = new Uint8Array(4);
-            gl.readPixels(
-                this.pickColorRequest.x,
-                this.pickColorRequest.y,
-                1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels
-            );
-            this.events.fire('pickColor.result', {
-                r: pixels[0] / 255,
-                g: pixels[1] / 255,
-                b: pixels[2] / 255
-            });
+            // **先取走请求再读像素**：原来清标志在读取之后，`gl` 在 WebGPU 上不存在 ⇒
+            // `readPixels` 抛异常 ⇒ 标志永远不清、每帧重入（`pickColor.request` 还会置
+            // forceRender）⇒ 吸管一直没反应 + 控制台每 5 s 一条渲染异常。
+            const request = this.pickColorRequest;
             this.pickColorRequest = null;
+
+            const device = this.app.graphicsDevice as any;
+            if (!device.isWebGL2 || !device.gl) {
+                // WebGPU 后端没有 gl.readPixels。**明确不做**而不是静默失败：告诉调用方这次
+                // 取色不可用（走 picker 那条 GPU 回读通路是另一件事，见 docs/待办）。
+                console.warn('[Scene] 吸管取色在 WebGPU 后端不可用（gl.readPixels 不存在），本次请求已丢弃');
+            } else {
+                const gl = device.gl as WebGL2RenderingContext;
+                const pixels = new Uint8Array(4);
+                gl.readPixels(request.x, request.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                this.events.fire('pickColor.result', {
+                    r: pixels[0] / 255,
+                    g: pixels[1] / 255,
+                    b: pixels[2] / 255
+                });
+            }
         }
 
         this.events.fire('postrender');

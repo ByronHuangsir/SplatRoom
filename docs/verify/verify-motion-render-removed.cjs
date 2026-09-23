@@ -119,27 +119,25 @@ const check = (name, pass, detail) => {
         const read = () => ({ blend: material.blendType, depthWrite: material.depthWrite });
 
         const parked = read();
-        // hold the tracker in its moving state and nudge the pose, so the frame really is
-        // a "camera is moving" frame (the old feature switched material state exactly then).
-        // `renderNextFrame` is poked every tick on purpose: this app renders on demand and a
-        // small fixture settles immediately, so without it no frame is produced, the motion
-        // tracker is never fed, and `cameraMotion.moving` reads false after the 200 ms window
+        // Hold the tracker in its moving state and nudge the pose, so the frame really is a
+        // "camera is moving" frame (the old feature switched material state exactly then).
+        //
+        // 帧必须**自己驱动**：`cameraMotion.moving` 是"200 ms 内动过"的时间戳判定，
+        // 而这个应用是按需渲染 —— 只设 `userDragging` 而不管帧，稳定窗口一过就读成 false，
+        // 后面的断言就变成空话（这条本来是偶发失败，根因就在这里）。
         const cam = scene.camera;
         cam.userDragging = true;
         let flip = 0;
-        const timer = setInterval(() => {
+        let movingFlag = false;
+        for (let i = 0; i < 90 && !movingFlag; i++) {
             flip = -flip || 0.05;
             cam.setAzimElev(30 + flip, -15, 0);
             scene.app.renderNextFrame = true;
-        }, 16);
-        await new Promise((r) => setTimeout(r, 1500));
-        // read flag and material state in the same synchronous step, with the
-        // nudge loop and the drag flag both still active: the settle window is
-        // only 200 ms, so anything that yields first can read `moving === false`
-        // and turn the assertions below into empty statements
-        const movingFlag = scene.cameraMotion.moving;
+            await new Promise((r) => requestAnimationFrame(r));
+            // 在**同一同步步**里读两个值：先让出控制权再读，就会读到窗口过期后的状态
+            movingFlag = scene.cameraMotion.moving;
+        }
         const whileMoving = read();
-        clearInterval(timer);
         cam.userDragging = false;
         cam.setAzimElev(30, -15, 0);
         await new Promise((r) => setTimeout(r, 1200));

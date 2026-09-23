@@ -572,17 +572,19 @@ class Camera extends Element {
                     const dstWidth = device.width;
                     const dstHeight = device.height;
                     // 运动帧随机透明的 resolve（见 blit-shader.ts）当前**恒为 0**：产生哨兵 alpha 的
-                    // 那条运动期写法（随机透明 / 硬边裁剪）已按用户判定删除。resolve 的实现留在 blit
-                    // 里备用——将来若有人重启引擎侧 compute 通路（见 docs/待办-引擎WebGPU-compute.md），
-                    // 上游那条通路的运动帧同样写哨兵 alpha，可直接复用这道 resolve。
-                    const resolve = false;
+                    // 那条运动期写法（随机透明 / 硬边裁剪）已按用户判定删除。
+                    // 这块 resolve 的实现**故意留着**：它是上游 compute 通路运动帧的必要配套，
+                    // 那条通路已立项为独立待办 `docs/待办-引擎WebGPU-compute.md` —— 将来它若能跑通，
+                    // 运动帧同样会写哨兵 alpha，这里直接改成读那个特性的开关即可。
+                    // 现在写死 0 = 最终 blit 逐像素纯拷贝，与历史行为一致。
+                    const resolveMode = 0 as const;
                     return {
                         srcTexture: this.mainTarget.colorBuffer,
                         blitScale: [
                             dstWidth > 0 ? this.mainTarget.width / dstWidth : 1,
                             dstHeight > 0 ? this.mainTarget.height / dstHeight : 1
                         ],
-                        resolveMode: resolve ? 1 : 0,
+                        resolveMode,
                         srcTexel: [1 / this.mainTarget.width, 1 / this.mainTarget.height]
                     };
                 }
