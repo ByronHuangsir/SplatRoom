@@ -31,7 +31,6 @@ import { CommandQueue } from '../core/command-queue';
 import { readDeviceFacts } from '../core/device-facts';
 import { Events } from '../core/events';
 import { GpuFrameTiming } from '../core/gpu-frame-timing';
-import { MotionOpaque, applyMotionOpaqueMaterial, registerMotionOpaqueEvents } from '../core/motion-opaque';
 import { MotionQuality } from '../core/motion-quality';
 import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePolicy } from '../core/splat-tier';
 import { DataProcessor } from '../data-processor/index';
@@ -143,8 +142,6 @@ class Scene {
     private _deviceFacts: DeviceFacts | null = null;
     /** 上一次应用的分级键（`tier|device`），避免每帧重算策略 */
     private _tierPolicyKey = '';
-    // 运动期"不依赖顺序"的渲染（不透明 + 深度写 + alpha 下限）。见 src/core/motion-opaque.ts。
-    readonly motionOpaque = new MotionOpaque();
     // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
     private _appliedRenderScale = 1;
     // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
@@ -194,9 +191,6 @@ class Scene {
         this.canvas = canvas;
         this.commandQueue = commandQueue;
         this.gpuFrameTiming = new GpuFrameTiming(graphicsDevice);
-
-        // 运动期渲染模式的设置面板通路（`motionRender.setMode` / `.mode`）
-        registerMotionOpaqueEvents(events, this.motionOpaque);
 
         // configure the playcanvas application. we render to an offscreen buffer so require
         // only the simplest of backbuffers.
@@ -944,26 +938,6 @@ class Scene {
         }
         if (settleSortPending || sortInFlight || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
             this.forceRender = true;
-        }
-
-        // ---- 运动期"不依赖顺序"的渲染（A 方案，见 src/core/motion-opaque.ts）------------------
-        // 打开条件：相机在动（顺序反正追不上），**或者**停手后那一帧"干净排序"还没上线
-        // （否则切回 alpha 混合的那一瞬间顺序还是旧的 ⇒ 会闪一下错序，就是用户报的"短暂停留后消失"）。
-        // 停手那一刻排序刚被派发 ⇒ sortInFlight 为真、补帧欠着时 settleSortPending 为真，
-        // 两个条件一起保证"顺序上线了才恢复半透明"。
-        {
-            const wantOpaque = this.motionOpaque.active &&
-                (this.cameraMotion.moving || settleSortPending || sortInFlight);
-            const alphaClip = this.motionOpaque.effectiveAlphaClip;
-            const mode = this.motionOpaque.effectiveMode;
-            this.motionOpaque.applied = wantOpaque;
-            const splats = this.getElementsByType(ElementType.splat) as Splat[];
-            for (let i = 0; i < splats.length; i++) {
-                splats[i].setMotionOpaque(wantOpaque, alphaClip, mode);
-            }
-            // 合并渲染（组模式）走的是另一个实例/材质，必须一起切，否则组模式下会一半实一半透
-            const mergedInstance = (this.groupRenderer as any)?.mergedEntity?.gsplat?.instance;
-            applyMotionOpaqueMaterial(mergedInstance?.material, wantOpaque, alphaClip, mode);
         }
 
         this.forEachElement(e => e.onPreRender());

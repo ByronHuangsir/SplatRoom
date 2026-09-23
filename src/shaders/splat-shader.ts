@@ -566,32 +566,6 @@ varying highp float vEllipE02;
 varying highp float vEllipE11;
 varying highp float vEllipE12;
 varying highp float vEllipE22;
-// 运动期"不依赖顺序"的渲染（见 src/core/motion-opaque.ts）：
-//   uMotionOpaque 0/1 开关；uMotionAlphaClip 是该路径下的 alpha 下限；
-//   uMotionStochastic 0/1 选**哪种**不依赖顺序的写法（见下面的分支说明）。
-// 打开时：片元按 alpha 取舍、其余按**不透明**写出（颜色不预乘、alpha 写 1），
-// 可见性完全交给深度测试（材质同时切到 BLEND_NONE + depthWrite）⇒ 与排序顺序无关。
-uniform float uMotionOpaque;
-uniform float uMotionAlphaClip;
-uniform float uMotionStochastic;
-
-/**
- * 运动期随机透明的阈值散列（对齐上游 SuperSplat 的 STOCHASTIC 分支，2026-09-22 第十九轮）。
- *
- * 用 vScreenOffset（屏幕像素坐标）+ vViewCenter.z（视深度）散列，**不用** gl_FragCoord：
- * 本仓库的 WGSL 版着色器是从 GLSL 转译的，pcPosition 没有透出，用 varying 才能两边一致。
- *   • 屏幕 2×2 quad 内四个像素取 [0,1) 的四个**分层**（stratified）样本 ⇒ 覆盖率量化误差小；
- *   • 视深度参与散列 ⇒ 前后重叠的两个高斯拿到不相关的阈值，不会退化成固定的"网点"；
- *   • 不含时间项 ⇒ 图案逐帧不变，不随时间闪。
- * 注意：这段注释在 GLSL 模板字符串里，**不能出现反引号**（会提前结束模板串）。
- */
-float srStochasticThreshold(vec2 screenPix, float viewZ) {
-    vec2 quad = floor(screenPix * 0.5);
-    vec2 inQuad = screenPix - quad * 2.0;
-    float h = fract(sin(dot(vec3(quad, viewZ * 17.0), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-    float stratum = inQuad.x + 2.0 * inQuad.y;
-    return (mod(stratum + floor(h * 4.0), 4.0) + h) * 0.25;
-}
 
 void main(void) {
     mediump float A = dot(texCoord_flags.xy, texCoord_flags.xy);
@@ -731,24 +705,6 @@ void main(void) {
                 pcFragColor0 = vec4(finalColor * alpha, alpha);
                 pcFragColor1 = vec4(0.0, 0.0, 0.0, 0.0);
             }
-        }
-
-        // 运动期的不透明路径（两条写法，都让可见性只由深度测试决定 ⇒ 与排序顺序无关）：
-        //   • 随机透明（uMotionStochastic=1）：以概率 alpha 保留片元，覆盖率在期望上无偏
-        //     （E = α·C + (1−α)·B），观感接近正常的 alpha 混合 —— 上游 SuperSplat 运动帧就是这个；
-        //   • 硬边裁剪（=0，A 方案）：低于下限直接丢，边缘硬、更透明的东西会变稀疏。
-        // RT1 保持与上面一致，选区/描边那条通路的行为不变。
-        if (uMotionOpaque > 0.5) {
-            if (uMotionStochastic > 0.5) {
-                if (alpha < srStochasticThreshold(vScreenOffset, vViewCenter.z)) {
-                    discard;
-                }
-            } else if (alpha < uMotionAlphaClip) {
-                discard;
-            }
-            // 随机透明路径写 **alpha 哨兵 2.0**（上游同款）：主目标是 RGBA16F，放得下 >1 的 alpha，
-            // blit 那道 resolve 靠它认出"这一像素来自随机采样"（见 src/shaders/blit-shader.ts）。
-            pcFragColor0 = vec4(finalColor, uMotionStochastic > 0.5 ? 2.0 : 1.0);
         }
     #endif
 }

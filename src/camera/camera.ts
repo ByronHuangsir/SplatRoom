@@ -571,9 +571,11 @@ class Camera extends Element {
                     // blit copies 1:1 and leaves the rest of the frame black (see blit-shader.ts).
                     const dstWidth = device.width;
                     const dstHeight = device.height;
-                    // 运动帧随机透明的 resolve（见 blit-shader.ts）：只有**随机透明模式 + 相机在动**
-                    // 时打开；其它任何时候都是 0 ⇒ 与历史行为逐字节相同的纯拷贝。
-                    const resolve = scene.motionOpaque.applied && scene.motionOpaque.effectiveMode === 'stochastic';
+                    // 运动帧随机透明的 resolve（见 blit-shader.ts）当前**恒为 0**：产生哨兵 alpha 的
+                    // 那条运动期写法（随机透明 / 硬边裁剪）已按用户判定删除。resolve 的实现留在 blit
+                    // 里备用——将来若有人重启引擎侧 compute 通路（见 docs/待办-引擎WebGPU-compute.md），
+                    // 上游那条通路的运动帧同样写哨兵 alpha，可直接复用这道 resolve。
+                    const resolve = false;
                     return {
                         srcTexture: this.mainTarget.colorBuffer,
                         blitScale: [

@@ -22,7 +22,6 @@ import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
-import { applyMotionOpaqueMaterial, type MotionMode } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
 import { suggestLodLevel } from '../lod/lod';
@@ -183,9 +182,6 @@ class Splat extends Element {
     private readonly _sortPendingDir = new Vec3(1, 0, 0);
     private _sortHasPending = false;
     private _sortSettleAt = 0;
-
-    /** 运动期"不依赖顺序"的渲染是否生效（见 setMotionOpaque） */
-    private _motionOpaque = false;
 
     // ---- 顺序延迟补偿的状态（见 SORT_PREDICT_* 那段的说明）----------------------------------
     // 位姿环形缓冲（速度估计的时间窗就是它的跨度）
@@ -953,21 +949,12 @@ class Splat extends Element {
     }
 
     /**
-     * 运动期"不依赖顺序"的渲染是否生效（Scene 每帧调用，见 src/core/motion-opaque.ts）。
-     *
-     * 生效时不仅切材质，还要**停掉运动期的排序派发**：既然可见性由深度测试决定，运动帧的排序
-     * 就纯属浪费（一次 20M worker 排序 155 ms + 完成时 80 MB 主线程上传）。停手后由
-     * `forceSettleSort()` 补的那一帧把精确顺序补回来 —— 而 Scene 会把不透明路径一直保持到
-     * 那一帧**真正上线**为止，所以不会出现"切回 alpha 混合时顺序还是旧的"那一闪。
+     * 当前是否处于"运动期不透明"路径 —— 那个功能已删除（见
+     * docs/运动期不透明-删除记录-2026-09-23.md），这里保留一个恒 false 的读口，
+     * 让旧探针/套件读到"未启用"而不是 `undefined`（静默失效比报错更难查）。
      */
-    setMotionOpaque(on: boolean, alphaClip: number, mode: MotionMode = 'clip') {
-        this._motionOpaque = on;
-        applyMotionOpaqueMaterial(this.entity?.gsplat?.instance?.material, on, alphaClip, mode);
-    }
-
-    /** 当前是否处于"运动期不透明"路径（诊断/套件用） */
     get motionOpaque() {
-        return this._motionOpaque;
+        return false;
     }
 
     /**
@@ -1175,16 +1162,14 @@ class Splat extends Element {
      * 为什么不是固定间隔：用户实测"快速旋转时背面内容跑到前面"，而固定 800 ms 在快转时能转过很大角度；
      * 固定间隔还解释不了"整段手势一次都没派发"（实测 4 秒旋转只派发 1~2 次、有时 0 次）。
      */
+    /**
+     * 运动期排序准入。运动期"不依赖顺序"的那两条写法（随机透明 / 硬边裁剪）已按用户判定删除
+     * （观感伤害太大，见 docs/运动期不透明-删除记录-2026-09-23.md），所以运动期照常派发排序。
+     */
     private _sortAdmit(now: number, localPos: Vec3, localDir: Vec3) {
         const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
         const minIntervalMs = typeof tune.minIntervalMs === 'number' ? tune.minIntervalMs : SORT_MIN_INTERVAL_MS;
         const moveDeg = typeof tune.moveDeg === 'number' ? tune.moveDeg : SORT_MOVE_DEG;
-        // 运动期走"不依赖顺序"的渲染（深度测试决定可见性）⇒ 这段时间排序纯属浪费
-        // （一次 20M 排序 155 ms + 80 MB 主线程上传）。停手那一帧由补帧路径补回精确顺序，
-        // 且不透明路径会一直保持到它上线（见 scene.ts）。
-        if (this._motionOpaque) {
-            return false;
-        }
         if (now - this._sortLastDispatch < minIntervalMs) {
             return false;
         }

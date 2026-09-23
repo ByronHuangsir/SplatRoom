@@ -439,25 +439,6 @@ uniform hslLumB: vec4f;
     uniform uEffectFade: f32;
 #endif
 
-// 运动期"不依赖顺序"的渲染（见 src/core/motion-opaque.ts）：
-//   uMotionOpaque 0/1 开关；uMotionAlphaClip 是该路径下的 alpha 下限；
-//   uMotionStochastic 0/1 选哪种写法（随机透明 / 硬边裁剪）。
-// 打开时：片元按 alpha 取舍、其余按**不透明**写出，可见性交给深度测试 ⇒ 与排序顺序无关。
-uniform uMotionOpaque: f32;
-uniform uMotionAlphaClip: f32;
-uniform uMotionStochastic: f32;
-
-// 随机透明的阈值散列，与 splat-shader.ts 的 srStochasticThreshold 逐字对应
-//（屏幕 2×2 quad 分层 + 视深度参与散列；不含时间项 ⇒ 图案稳定不闪）。
-// 注意：这段注释在模板字符串里，不能出现反引号。
-fn srStochasticThreshold(screenPix: vec2f, viewZ: f32) -> f32 {
-    let quad: vec2f = floor(screenPix * 0.5);
-    let inQuad: vec2f = screenPix - quad * 2.0;
-    let h: f32 = fract(sin(dot(vec3f(quad, viewZ * 17.0), vec3f(12.9898, 78.233, 37.719))) * 43758.5453);
-    let stratum: f32 = inQuad.x + 2.0 * inQuad.y;
-    return (fract((stratum + floor(h * 4.0)) * 0.25) * 4.0 + h) * 0.25;
-}
-
 // oriented crop-box clipping (same declarations as the vertex stage)
 uniform uCropBoxEnabled: f32;
 uniform uCropBoxPreview: f32;
@@ -755,22 +736,6 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
         }
 
-        // 运动期的不透明路径（两条写法，都让可见性只由深度测试决定 ⇒ 与排序顺序无关）：
-        //   • 随机透明（uMotionStochastic=1）：以概率 alpha 保留片元，覆盖率在期望上无偏
-        //     （E = α·C + (1−α)·B）—— 上游 SuperSplat 运动帧就是这个；
-        //   • 硬边裁剪（=0）：低于下限直接丢。color1 两种写法都与上面一致，选区/描边不受影响。
-        if (uniform.uMotionOpaque > 0.5) {
-            if (uniform.uMotionStochastic > 0.5) {
-                if (alpha < srStochasticThreshold(vScreenOffset, vViewCenter.z)) {
-                    discard;
-                }
-            } else if (alpha < uniform.uMotionAlphaClip) {
-                discard;
-            }
-            // 随机透明路径写 alpha 哨兵 2.0（上游同款；主目标是 RGBA16F，放得下 >1 的 alpha），
-            // blit 那道 resolve 靠它认出"这一像素来自随机采样"。
-            output.color = vec4f(graded, select(1.0, 2.0, uniform.uMotionStochastic > 0.5));
-        }
     #endif
 
     return output;
