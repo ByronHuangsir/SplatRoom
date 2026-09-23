@@ -58,7 +58,14 @@ const LOD_MAX_SPLATS = 20_000_000;
 
 // pick the most detailed LOD under the splat limit, or the least detailed
 // when all levels exceed it
-const defaultLodIndex = (lodCounts: readonly number[]) => {
+//
+// 空输入返回 `null`（= 没有可选的层）：原来最后那句 `reduce` 没有初值，空数组会直接抛
+// `TypeError: Reduce of empty array with no initial value`，而调用点（worker 客户端的 needLod
+// 分支）在没有别的兜底时会把整个导入挂到 10 分钟看门狗。返回 null 让调用方能干净地处理。
+const defaultLodIndex = (lodCounts: readonly number[]): number | null => {
+    if (lodCounts.length === 0) {
+        return null;
+    }
     const candidates = lodCounts.map((count, index) => ({ count, index }));
     const under = candidates.filter(c => c.count < LOD_MAX_SPLATS);
     if (under.length > 0) {

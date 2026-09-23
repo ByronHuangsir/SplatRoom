@@ -134,7 +134,9 @@ class AssetLoader {
                         message: i18n.t('popup.lod-select-message'),
                         icon: false,
                         select: {
-                            value: String(defaultLodIndex(lodCounts)),
+                            // `defaultLodIndex` 现在可能返回 null（元数据里没有任何层）：
+                            // 那种情况下别把字符串 "null" 塞进下拉框的初值
+                            value: String(defaultLodIndex(lodCounts) ?? 0),
                             options: lodCounts.map((count, i) => ({
                                 v: String(i),
                                 t: `LOD ${i} (${count.toLocaleString()} ${i18n.t('popup.lod-select-splats')})`

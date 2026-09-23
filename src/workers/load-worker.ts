@@ -38,7 +38,13 @@ WorkerQueue.maxWorkers = 0;
 
 const LOD_MAX_SPLATS = 20_000_000;
 
-const defaultLodIndex = (lodCounts: readonly number[]): number => {
+// 与 `src/io/read/loader.ts` 里同名函数保持一致：空输入返回 null。
+// 这两份是**重复实现**（worker 不能 import 主线程的 io 层），改一处必须改另一处 ——
+// 原来两边都少了空数组守卫，`reduce` 无初值会直接抛。
+const defaultLodIndex = (lodCounts: readonly number[]): number | null => {
+    if (lodCounts.length === 0) {
+        return null;
+    }
     const candidates = lodCounts.map((count, index) => ({ count, index }));
     const under = candidates.filter(c => c.count < LOD_MAX_SPLATS);
     if (under.length > 0) {
@@ -99,7 +105,10 @@ const handleLoad = async (msg: any) => {
         try {
             let single = sources[0];
             if (source.meta.numLods > 1) {
-                single = selectLod(source, lod ?? defaultLodIndex(source.meta.lodCounts));
+                // 没有明确层号时才回退；`defaultLodIndex` 现在可能返回 null（元数据里没有任何层），
+                // 那种情况下 `selectLod(source, null)` 会拿 null 当层号 —— 明确退回第一层
+                const fallbackLod = defaultLodIndex(source.meta.lodCounts);
+                single = selectLod(source, lod ?? fallbackLod ?? 0);
             }
 
             // 导入预算：超过本机能力时**在物化之前**按等距抽样降行数
