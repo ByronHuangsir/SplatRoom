@@ -103,6 +103,18 @@ let worker: Worker | null = null;
 let msgId = 0;
 const pending = new Map<number, Pending>();
 
+// 每个请求的 10 分钟看门狗定时器；请求正常结束时必须清掉（否则它挂着的闭包会一直攥着
+// `fileSystem` 直到超时 —— 见 loadGSplatDataAsync 里的说明）
+const watchdogTimers = new Map<number, ReturnType<typeof setTimeout>>();
+
+const clearWatchdog = (id: number) => {
+    const timer = watchdogTimers.get(id);
+    if (timer !== undefined) {
+        clearTimeout(timer);
+        watchdogTimers.delete(id);
+    }
+};
+
 const workerUrl = (): string => {
     const base =
         typeof document !== 'undefined' ?
@@ -149,13 +161,28 @@ const handleWorkerMessage = async (e: MessageEvent) => {
     if (!p) return;
 
     if (msg.type === 'needLod') {
-        const lod = p.pickLod ? await p.pickLod(msg.lodCounts) : defaultLodIndex(msg.lodCounts);
+        // `pickLod` 是主线程弹窗（`asset-loader` 里 await 一个 showPopup）：用户取消、弹窗被
+        // 销毁、或它自己抛异常时，**必须仍然回一条 `lod` 消息**，否则 worker 永远等在那里：
+        // 只有 10 分钟看门狗兜底 ⇒ 那 10 分钟里主线程会在 worker 还占着文件的同时再解码一遍
+        // （峰值内存 ≈ 2 倍）。抛异常也吞在这里，改成"让 worker 用默认层"。
+        let lod: number | null = null;
+        try {
+            lod = p.pickLod ? await p.pickLod(msg.lodCounts) : defaultLodIndex(msg.lodCounts);
+        } catch (err) {
+            console.warn('[load-worker] pickLod 失败，回退默认 LOD 层：', err);
+            try {
+                lod = defaultLodIndex(msg.lodCounts);
+            } catch {
+                lod = null;
+            }
+        }
         getWorker().postMessage({ id: msg.id, type: 'lod', lod });
         return;
     }
 
     if (msg.type === 'result') {
         pending.delete(msg.id);
+        clearWatchdog(msg.id);
         // 两个探针可读的全局：走了几次 worker、worker 原样传回来的 transform
         // （套件用后者证明"普通对象 → 还原成 Quat"这一步真的发生了）
         (window as any).__LW_WORKER_RESULTS__ = ((window as any).__LW_WORKER_RESULTS__ || 0) + 1;
@@ -195,6 +222,7 @@ const handleWorkerMessage = async (e: MessageEvent) => {
 
     if (msg.type === 'cancelled') {
         pending.delete(msg.id);
+        clearWatchdog(msg.id);
         p.resolve(null);
         return;
     }
@@ -235,9 +263,9 @@ export const loadGSplatDataAsync = async (
     }
 
     const inputFormat = getInputFormat(filename);
+    const id = ++msgId;
 
     const result = new Promise<LoadResult | null>((resolve, reject) => {
-        const id = ++msgId;
         pending.set(id, { resolve, reject, pickLod, filename, fileSystem, skipReorder, onProgress: options?.onDecimateProgress, onBudget: options?.onBudget });
         try {
             // `Blob` 是结构化克隆的（引用传递，不复制字节）；transfer 列表为空。
@@ -265,13 +293,17 @@ export const loadGSplatDataAsync = async (
         // spinner would spin forever. Reject after a generous timeout so the
         // caller falls back to the main-thread decode path. When the worker
         // responds normally, pending is cleared and this timer no-ops.
-        setTimeout(() => {
+        //
+        // 正常结束时要把定时器**清掉**：它闭包捕获着 `fileSystem`，一次成功导入会让它多挂 10 分钟
+        // （多次导入就是多个），没必要。
+        watchdogTimers.set(id, setTimeout(() => {
+            watchdogTimers.delete(id);
             const entry = pending.get(id);
             if (entry) {
                 pending.delete(id);
                 entry.reject(new Error('load worker timed out'));
             }
-        }, 600000);
+        }, 600000));
     });
 
     try {
@@ -279,5 +311,8 @@ export const loadGSplatDataAsync = async (
     } catch {
         // Worker path failed — last-resort main-thread decode.
         return loadGSplatData(filename, fileSystem, skipReorder, pickLod, options);
+    } finally {
+        // 无论成功/失败/取消，看门狗都不该继续挂着（成功路径上它原本要挂满 10 分钟）
+        clearWatchdog(id);
     }
 };

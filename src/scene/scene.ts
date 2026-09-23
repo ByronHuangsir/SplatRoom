@@ -219,6 +219,9 @@ class Scene {
     private _tierPolicyKey = '';
     // 当前实际生效的渲染分辨率缩放（1 = 全分辨率），用于幂等地施加/恢复 targetSizeOverride
     private _appliedRenderScale = 1;
+    // 施加缩放时用的基准 targetSize：窗口在降级期间变了要重算覆盖值（见 applyRenderScale）
+    private _appliedRenderScaleBaseWidth = 0;
+    private _appliedRenderScaleBaseHeight = 0;
     // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
     private _wasMoving = false;
     // 停手补帧的武装时刻（0 = 没有欠着的补帧）；用于在补帧落地前持续出帧，并给它一个上限
@@ -742,18 +745,29 @@ class Scene {
     // 0.5/0.35 时帧时间反而涨到 242/472 ms 且画面整体变化），不能当交互旋钮用。
     // 缩放为 1 时置回 null，恢复是逐像素精确的（实测 mean|ΔRGB| = 0）。
     private applyRenderScale(scale: number) {
-        if (Math.abs(scale - this._appliedRenderScale) < 1e-3) {
+        // 覆盖值是按**当时**的 targetSize 算出来的绝对像素，所以判"是否已施加"必须把基准尺寸也算进去：
+        // 原来只比 scale ⇒ 降级期间改窗口大小（拖动时间线面板、改窗口尺寸）时这里会早退，
+        // 覆盖值留在旧尺寸上 ⇒ 画面被拉伸 + 过度模糊；而且 `_appliedRenderScale !== 1` 会让
+        // 上面那条"强制出帧"恒真 ⇒ 按需渲染悄悄退化成持续渲染（白烧电）。
+        const baseWidth = this.targetSize.width;
+        const baseHeight = this.targetSize.height;
+        const sameScale = Math.abs(scale - this._appliedRenderScale) < 1e-3;
+        const sameBase = this._appliedRenderScaleBaseWidth === baseWidth &&
+            this._appliedRenderScaleBaseHeight === baseHeight;
+        if (sameScale && sameBase) {
             return;
         }
         this._appliedRenderScale = scale;
+        this._appliedRenderScaleBaseWidth = baseWidth;
+        this._appliedRenderScaleBaseHeight = baseHeight;
 
         const cam = this.camera;
         if (scale >= 1) {
             cam.targetSizeOverride = null;
         } else {
             cam.targetSizeOverride = {
-                width: Math.max(1, Math.round(this.targetSize.width * scale)),
-                height: Math.max(1, Math.round(this.targetSize.height * scale))
+                width: Math.max(1, Math.round(baseWidth * scale)),
+                height: Math.max(1, Math.round(baseHeight * scale))
             };
         }
         cam.rebuildRenderTargets();
