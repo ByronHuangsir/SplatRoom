@@ -293,9 +293,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         check('settled: alpha blending, no depth write, uMotionOpaque = 0',
             settled.transparent === true && settled.depthWrite === false && settled.uniform === 0,
             `transparent=${settled.transparent} depthWrite=${settled.depthWrite} uMotionOpaque=${settled.uniform}`);
-        // 默认**开着**（2026-09-22 第十九轮改的）：用户报"旋转时依然错序，即便转得很慢"，
-        // 而顺序在运动期本来就追不上（20M 实测 λ≈160 ms）⇒ 结构性的解只有一个：运动帧不依赖顺序。
-        // 随机透明的观感代价远小于硬边裁剪，所以它成了默认；设置面板里三档可关。
+        // 默认必须是**关**的（2026-09-22 当天回归）：先试过默认"随机透明"，用户实测
+        // "完全不可看，全是大面积的实心盘" —— 1 spp 随机透明没有上游那道 quad-resolve 时，
+        // 高斯内部 alpha 高的地方整片通过 ⇒ 退化成实心圆盘、软边全丢。
+        // 所以两种运动期写法都只作为**用户自选**留在设置面板里，默认不碰画面。
         const defaultMode = await page.evaluate(() => {
             delete window.__SPLATROOM_MOTION_OPAQUE__;
             delete window.__SPLATROOM_MOTION_MODE__;
@@ -305,21 +306,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 active: window.scene.motionOpaque.active
             };
         });
-        check('default mode is stochastic (movement frames stop depending on the sort order)',
-            defaultMode.mode === 'stochastic' && defaultMode.panelValue === 'stochastic' && defaultMode.active === true,
+        check('default mode is OFF (the 1-spp stochastic path is unusable without upstream\'s quad resolve)',
+            defaultMode.mode === 'off' && defaultMode.panelValue === 'off' && defaultMode.active === false,
             `effectiveMode=${defaultMode.mode}、events.invoke('motionRender.mode')=${defaultMode.panelValue}、active=${defaultMode.active}`);
 
-        // ---- 运动帧（默认模式）：切到不透明 + 随机透明写法 ----
+        // 运动帧（显式打开随机透明）：切到不透明 + 随机透明写法
+        await page.evaluate(() => { window.__SPLATROOM_MOTION_MODE__ = 'stochastic'; });
+        await sleep(200);
         const spin = rotate(1200);
         await sleep(400);
         const movingState = await state();
         await spin;
-        check('moving (stochastic default): opaque + depth write, uMotionOpaque = 1 & uMotionStochastic = 1',
+        check('moving (stochastic, explicitly enabled): opaque + depth write, uMotionOpaque = 1 & uMotionStochastic = 1',
             movingState.moving === true && movingState.motionOpaque === true &&
             movingState.transparent === false && movingState.depthWrite === true &&
             movingState.uniform === 1 && movingState.stochasticUniform === 1,
             `moving=${movingState.moving} applied=${movingState.motionOpaque} transparent=${movingState.transparent} ` +
             `depthWrite=${movingState.depthWrite} uMotionOpaque=${movingState.uniform} uMotionStochastic=${movingState.stochasticUniform}`);
+        await page.evaluate(() => { delete window.__SPLATROOM_MOTION_MODE__; });
 
         // ---- 设置面板那条通路：改模式要真的落到材质上 ----
         const wired = await page.evaluate(async () => {

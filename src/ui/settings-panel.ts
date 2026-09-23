@@ -182,12 +182,12 @@ class SettingsPanel extends Container {
 
         const motionSelection = new SelectInput({
             class: 'settings-panel-row-select',
-            defaultValue: 'stochastic'
+            defaultValue: 'off'
         });
         i18n.bindOptions(motionSelection, () => [
+            { v: 'off', t: i18n.t('panel.settings.motion-render.off') },
             { v: 'stochastic', t: i18n.t('panel.settings.motion-render.stochastic') },
-            { v: 'clip', t: i18n.t('panel.settings.motion-render.clip') },
-            { v: 'off', t: i18n.t('panel.settings.motion-render.off') }
+            { v: 'clip', t: i18n.t('panel.settings.motion-render.clip') }
         ]);
 
         motionRow.append(motionLabel);
@@ -816,7 +816,7 @@ class SettingsPanel extends Container {
         });
 
         // 运动期渲染：初值从 Scene 取（`motionRender.mode` 是 invoke 型），改动回灌给 Scene
-        motionSelection.value = events.invoke('motionRender.mode') ?? 'stochastic';
+        motionSelection.value = events.invoke('motionRender.mode') ?? 'off';
         events.on('motionRender.modeChanged', (mode: string) => {
             motionSelection.value = mode;
         });
