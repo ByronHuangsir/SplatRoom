@@ -98,12 +98,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             // 引擎的 getParameter 返回的是 { scopeId, data } 包装，不是裸值
             const raw = inst.material.getParameter('uMotionOpaque');
             const rawClip = inst.material.getParameter('uMotionAlphaClip');
+            const rawStoch = inst.material.getParameter('uMotionStochastic');
             return {
                 motionOpaque: splat.motionOpaque,
+                mode: scene.motionOpaque.effectiveMode,
                 transparent: inst.material.transparent,
                 depthWrite: inst.material.depthWrite,
                 uniform: raw && typeof raw === 'object' ? raw.data : raw,
                 alphaClip: rawClip && typeof rawClip === 'object' ? rawClip.data : rawClip,
+                stochasticUniform: rawStoch && typeof rawStoch === 'object' ? rawStoch.data : rawStoch,
                 moving: scene.cameraMotion.moving,
                 viewBands: scene.events.invoke('view.bands')
             };
@@ -182,29 +185,33 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const scene2 = window.scene;
             const wasEnabled = scene2.motionOpaque.enabled;
             const wasHatch = window.__SPLATROOM_MOTION_OPAQUE__;
+            const wasModeHatch = window.__SPLATROOM_MOTION_MODE__;
             const measure = async (mode) => {
-                // 策略默认 + 逃生开关**两处都要控**：只改 `enabled` 时，先前的 `hatch = true`
-                // 依然会让 active 为真（第一版就是这么让"alpha 基准"跑在不透明路径上的）。
-                scene2.motionOpaque.enabled = mode === 'opaque';
-                window.__SPLATROOM_MOTION_OPAQUE__ = mode === 'opaque';
-                if (mode === 'opaque') {
+                // 策略 + 逃生开关**都要控**：只改一处时，另一处依然会让 active 为真
+                // （第一版就是这么让"alpha 基准"跑在不透明路径上的）。
+                //   'alpha'      → off（半透明基准，顺序有影响）
+                //   'opaque'     → clip（旧 A 方案）
+                //   'stochastic' → 随机透明（当前默认）
+                window.__SPLATROOM_MOTION_MODE__ = mode === 'alpha' ? 'off' : (mode === 'opaque' ? 'clip' : 'stochastic');
+                scene2.motionOpaque.mode = mode === 'alpha' ? 'off' : (mode === 'opaque' ? 'clip' : 'stochastic');
+                if (mode !== 'alpha') {
                     await window.__jiggle(0.05);
                 } else {
                     await render(4);
                 }
                 const state = window.__state();
                 await window.__setOrder('identity');
-                if (mode === 'opaque') {
+                if (mode !== 'alpha') {
                     await window.__jiggle(0.05);
                 }
                 const a = await window.__grab();
                 await window.__setOrder('scrambled');
-                if (mode === 'opaque') {
+                if (mode !== 'alpha') {
                     await window.__jiggle(0.05);
                 }
                 const b = await window.__grab();
                 await window.__setOrder('zeros');
-                if (mode === 'opaque') {
+                if (mode !== 'alpha') {
                     await window.__jiggle(0.05);
                 }
                 const z = await window.__grab();
@@ -214,22 +221,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                     zeros: window.__meanAbs(a, z),
                     transparent: state.transparent,
                     applied: state.motionOpaque,
-                    moving: state.moving
+                    moving: state.moving,
+                    stochasticUniform: state.stochasticUniform
                 };
             };
 
             const alpha = await measure('alpha');
             const opaque = await measure('opaque');
+            const stochastic = await measure('stochastic');
             scene2.motionOpaque.enabled = wasEnabled;
             if (wasHatch === undefined) {
                 delete window.__SPLATROOM_MOTION_OPAQUE__;
             } else {
                 window.__SPLATROOM_MOTION_OPAQUE__ = wasHatch;
             }
+            if (wasModeHatch === undefined) {
+                delete window.__SPLATROOM_MOTION_MODE__;
+            } else {
+                window.__SPLATROOM_MOTION_MODE__ = wasModeHatch;
+            }
 
             return {
                 alpha,
                 opaque,
+                stochastic,
                 n,
                 targetKind: target ? target.constructor.name : 'none',
                 scrambledHead: Array.from(scrambled.slice(0, 4))
@@ -278,28 +293,61 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         check('settled: alpha blending, no depth write, uMotionOpaque = 0',
             settled.transparent === true && settled.depthWrite === false && settled.uniform === 0,
             `transparent=${settled.transparent} depthWrite=${settled.depthWrite} uMotionOpaque=${settled.uniform}`);
-        // 默认必须是关的：用户 2026-09-21 反馈观感太难受 ⇒ 没有显式打开时不得进入不透明路径
-        const defaultOff = await page.evaluate(() => {
-            const s = window.scene.getElementsByType('splat').slice(-1)[0];
+        // 默认**开着**（2026-09-22 第十九轮改的）：用户报"旋转时依然错序，即便转得很慢"，
+        // 而顺序在运动期本来就追不上（20M 实测 λ≈160 ms）⇒ 结构性的解只有一个：运动帧不依赖顺序。
+        // 随机透明的观感代价远小于硬边裁剪，所以它成了默认；设置面板里三档可关。
+        const defaultMode = await page.evaluate(() => {
             delete window.__SPLATROOM_MOTION_OPAQUE__;
-            return { policyDefault: window.scene.motionOpaque.enabled, hatch: window.__SPLATROOM_MOTION_OPAQUE__ };
+            delete window.__SPLATROOM_MOTION_MODE__;
+            return {
+                mode: window.scene.motionOpaque.effectiveMode,
+                panelValue: window.scene.events.invoke('motionRender.mode'),
+                active: window.scene.motionOpaque.active
+            };
         });
-        check('default is OFF (the opaque look needs an explicit opt-in)',
-            defaultOff.policyDefault === false && defaultOff.hatch === undefined,
-            `motionOpaque.enabled=${defaultOff.policyDefault} hatch=${defaultOff.hatch}`);
-        await page.evaluate(() => { window.__SPLATROOM_MOTION_OPAQUE__ = true; });
-        await sleep(300);
+        check('default mode is stochastic (movement frames stop depending on the sort order)',
+            defaultMode.mode === 'stochastic' && defaultMode.panelValue === 'stochastic' && defaultMode.active === true,
+            `effectiveMode=${defaultMode.mode}、events.invoke('motionRender.mode')=${defaultMode.panelValue}、active=${defaultMode.active}`);
 
-        // ---- 运动帧：切到不透明 ----
+        // ---- 运动帧（默认模式）：切到不透明 + 随机透明写法 ----
         const spin = rotate(1200);
         await sleep(400);
         const movingState = await state();
         await spin;
-        check('moving: opaque + depth write, uMotionOpaque = 1',
+        check('moving (stochastic default): opaque + depth write, uMotionOpaque = 1 & uMotionStochastic = 1',
             movingState.moving === true && movingState.motionOpaque === true &&
-            movingState.transparent === false && movingState.depthWrite === true && movingState.uniform === 1,
+            movingState.transparent === false && movingState.depthWrite === true &&
+            movingState.uniform === 1 && movingState.stochasticUniform === 1,
             `moving=${movingState.moving} applied=${movingState.motionOpaque} transparent=${movingState.transparent} ` +
-            `depthWrite=${movingState.depthWrite} uMotionOpaque=${movingState.uniform}`);
+            `depthWrite=${movingState.depthWrite} uMotionOpaque=${movingState.uniform} uMotionStochastic=${movingState.stochasticUniform}`);
+
+        // ---- 设置面板那条通路：改模式要真的落到材质上 ----
+        const wired = await page.evaluate(async () => {
+            const sleep2 = (ms) => new Promise(r => setTimeout(r, ms));
+            const scene = window.scene;
+            scene.events.fire('motionRender.setMode', 'clip');
+            await sleep2(200);
+            const clipMode = scene.motionOpaque.effectiveMode;
+            scene.events.fire('motionRender.setMode', 'off');
+            await sleep2(200);
+            const offMode = scene.motionOpaque.effectiveMode;
+            scene.events.fire('motionRender.setMode', 'stochastic');
+            await sleep2(200);
+            return { clipMode, offMode, back: scene.motionOpaque.effectiveMode };
+        });
+        const spinWired = rotate(900);
+        await sleep(300);
+        const wiredState = await state();
+        await spinWired;
+        check('the settings row drives it: motionRender.setMode reaches the material',
+            wired.clipMode === 'clip' && wired.offMode === 'off' && wired.back === 'stochastic' &&
+            wiredState.uniform === 1 && wiredState.stochasticUniform === 1,
+            `setMode clip→${wired.clipMode} off→${wired.offMode} stochastic→${wired.back}；` +
+            `运动帧 uMotionOpaque=${wiredState.uniform} uMotionStochastic=${wiredState.stochasticUniform}`);
+
+        // 硬边裁剪那条路（旧 A 方案）用旧逃生开关验：`__SPLATROOM_MOTION_OPAQUE__ = true` ⇒ clip
+        await page.evaluate(() => { window.__SPLATROOM_MOTION_OPAQUE__ = true; });
+        await sleep(300);
 
         // ---- 运动期不派发排序 / 停手仍补一帧：都是一次旋转里的两段计数 ----
         // 计数窗口要避开两类噪声：
@@ -380,9 +428,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
                 order.opaque.scrambled <= Math.max(0.5, order.alpha.scrambled * 0.25),
                 `alpha-path ${order.alpha.scrambled.toFixed(2)} vs opaque-path ${order.opaque.scrambled.toFixed(2)} ` +
                 `(opaque must be <= 25% of alpha; applied=${order.opaque.applied}) | ${orderDiag}`);
+            check('order independence: the stochastic path (new default) is immune to the sort order too',
+                order.stochastic.applied === true && order.stochastic.stochasticUniform === 1 &&
+                order.stochastic.scrambled <= Math.max(0.5, order.alpha.scrambled * 0.25),
+                `alpha-path ${order.alpha.scrambled.toFixed(2)} vs stochastic-path ${order.stochastic.scrambled.toFixed(2)} ` +
+                `(must be <= 25% of alpha; uMotionStochastic=${order.stochastic.stochasticUniform}) | ${orderDiag}`);
         } else {
             check('order independence: not measurable on this backend from the suite (probe has the assertion)',
-                order.opaque.applied === true && order.opaque.scrambled <= 0.5,
+                order.opaque.applied === true && order.opaque.scrambled <= 0.5 &&
+                order.stochastic.applied === true && order.stochastic.scrambled <= 0.5,
                 `the suite cannot drive the order target here (all-zeros control = ${order.alpha.zeros.toFixed(2)}, ` +
                 `target=${order.targetKind}) ⇒ measured "0.00" would be meaningless; the decisive pixel numbers are in ` +
                 `docs/probes/motion-opaque.cjs | ${orderDiag}`);

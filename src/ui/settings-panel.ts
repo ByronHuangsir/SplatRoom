@@ -169,6 +169,30 @@ class SettingsPanel extends Container {
         tonemappingRow.append(tonemappingLabel);
         tonemappingRow.append(tonemappingSelection);
 
+        // 运动期渲染（顺序追不上时的替代画法，见 src/core/motion-opaque.ts）
+        // 三档对齐上游 SuperSplat 的 "stochastic alpha" 设置（那边是 4 档，多一个"始终"）。
+        const motionRow = new Container({
+            class: 'settings-panel-row'
+        });
+
+        const motionLabel = new Label({
+            class: 'settings-panel-row-label'
+        });
+        i18n.bindText(motionLabel, 'panel.settings.motion-render');
+
+        const motionSelection = new SelectInput({
+            class: 'settings-panel-row-select',
+            defaultValue: 'stochastic'
+        });
+        i18n.bindOptions(motionSelection, () => [
+            { v: 'stochastic', t: i18n.t('panel.settings.motion-render.stochastic') },
+            { v: 'clip', t: i18n.t('panel.settings.motion-render.clip') },
+            { v: 'off', t: i18n.t('panel.settings.motion-render.off') }
+        ]);
+
+        motionRow.append(motionLabel);
+        motionRow.append(motionSelection);
+
         // camera fov
 
         const fovRow = new Container({
@@ -583,6 +607,7 @@ class SettingsPanel extends Container {
         this.append(languageRow);
         this.append(clrRow);
         this.append(tonemappingRow);
+        this.append(motionRow);
         this.append(fovRow);
         this.append(fovDollyRow);
         this.append(shBandsRow);
@@ -788,6 +813,15 @@ class SettingsPanel extends Container {
 
         tonemappingSelection.on('change', (value: string) => {
             events.fire('camera.setTonemapping', value);
+        });
+
+        // 运动期渲染：初值从 Scene 取（`motionRender.mode` 是 invoke 型），改动回灌给 Scene
+        motionSelection.value = events.invoke('motionRender.mode') ?? 'stochastic';
+        events.on('motionRender.modeChanged', (mode: string) => {
+            motionSelection.value = mode;
+        });
+        motionSelection.on('change', (value: string) => {
+            events.fire('motionRender.setMode', value);
         });
 
         // reset preferences

@@ -31,7 +31,7 @@ import { CommandQueue } from '../core/command-queue';
 import { readDeviceFacts } from '../core/device-facts';
 import { Events } from '../core/events';
 import { GpuFrameTiming } from '../core/gpu-frame-timing';
-import { MotionOpaque, applyMotionOpaqueMaterial } from '../core/motion-opaque';
+import { MotionOpaque, applyMotionOpaqueMaterial, registerMotionOpaqueEvents } from '../core/motion-opaque';
 import { MotionQuality } from '../core/motion-quality';
 import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePolicy } from '../core/splat-tier';
 import { DataProcessor } from '../data-processor/index';
@@ -194,6 +194,9 @@ class Scene {
         this.canvas = canvas;
         this.commandQueue = commandQueue;
         this.gpuFrameTiming = new GpuFrameTiming(graphicsDevice);
+
+        // 运动期渲染模式的设置面板通路（`motionRender.setMode` / `.mode`）
+        registerMotionOpaqueEvents(events, this.motionOpaque);
 
         // configure the playcanvas application. we render to an offscreen buffer so require
         // only the simplest of backbuffers.
@@ -952,14 +955,15 @@ class Scene {
             const wantOpaque = this.motionOpaque.active &&
                 (this.cameraMotion.moving || settleSortPending || sortInFlight);
             const alphaClip = this.motionOpaque.effectiveAlphaClip;
+            const mode = this.motionOpaque.effectiveMode;
             this.motionOpaque.applied = wantOpaque;
             const splats = this.getElementsByType(ElementType.splat) as Splat[];
             for (let i = 0; i < splats.length; i++) {
-                splats[i].setMotionOpaque(wantOpaque, alphaClip);
+                splats[i].setMotionOpaque(wantOpaque, alphaClip, mode);
             }
             // 合并渲染（组模式）走的是另一个实例/材质，必须一起切，否则组模式下会一半实一半透
             const mergedInstance = (this.groupRenderer as any)?.mergedEntity?.gsplat?.instance;
-            applyMotionOpaqueMaterial(mergedInstance?.material, wantOpaque, alphaClip);
+            applyMotionOpaqueMaterial(mergedInstance?.material, wantOpaque, alphaClip, mode);
         }
 
         this.forEachElement(e => e.onPreRender());

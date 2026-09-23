@@ -22,7 +22,7 @@ import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
-import { applyMotionOpaqueMaterial } from '../core/motion-opaque';
+import { applyMotionOpaqueMaterial, type MotionMode } from '../core/motion-opaque';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
 import { suggestLodLevel } from '../lod/lod';
@@ -953,9 +953,9 @@ class Splat extends Element {
      * `forceSettleSort()` 补的那一帧把精确顺序补回来 —— 而 Scene 会把不透明路径一直保持到
      * 那一帧**真正上线**为止，所以不会出现"切回 alpha 混合时顺序还是旧的"那一闪。
      */
-    setMotionOpaque(on: boolean, alphaClip: number) {
+    setMotionOpaque(on: boolean, alphaClip: number, mode: MotionMode = 'clip') {
         this._motionOpaque = on;
-        applyMotionOpaqueMaterial(this.entity?.gsplat?.instance?.material, on, alphaClip);
+        applyMotionOpaqueMaterial(this.entity?.gsplat?.instance?.material, on, alphaClip, mode);
     }
 
     /** 当前是否处于"运动期不透明"路径（诊断/套件用） */

@@ -30,15 +30,32 @@ import { BLEND_NONE, BLEND_PREMULTIPLIED } from 'playcanvas';
 const DEFAULT_ALPHA_CLIP = 0.5;
 
 /**
+ * 运动期"不依赖顺序"的两种写法（2026-09-22 第十九轮补上 `stochastic`）：
+ *
+ *   `off`        关掉这条路 —— 运动帧照常 alpha 混合、照常排序，顺序必然落后 ω·λ（用户报的"旋转时错序"）。
+ *   `stochastic` **1 spp 随机透明**：以概率 = alpha 保留片元、其余丢弃，写不透明、深度测试定可见性。
+ *                覆盖率在期望上无偏（E = α·C + (1−α)·B）⇒ 观感接近正常混合，只是有细颗粒噪点。
+ *                **这就是上游 SuperSplat 运动帧的做法**（`projected-splat-renderer.ts:874`
+ *                `setStochastic(scene.movingRender)` + `projected-splat-shader.ts` 的 `STOCHASTIC` 分支），
+ *                也是"旋转时看不到错序"的**结构性**原因：运动帧根本不依赖顺序。
+ *   `clip`       硬边裁剪（A 方案，2026-09-21）：低于 `alphaClip` 直接丢。更省（无噪声），
+ *                但边缘硬、很透明的东西会变稀疏 —— 上一轮用户看过之后说"太难受"，所以不再是默认。
+ */
+type MotionMode = 'off' | 'stochastic' | 'clip';
+
+/**
  * `alpha` = `norm * color.a`，而 `norm = exp(-A)`（`A` = 归一化半径平方）⇒ **足迹边缘处
  * alpha ≈ 0.368**。所以下限低于 0.368 等于"整块足迹全留"（只是把边缘 alpha 被压低的那些丢掉），
  * 高于它才会真正把高斯缩小。0.5 对应半径 ≈ 0.83 倍，是"保覆盖 + 硬边"的折中。
  */
 class MotionOpaque {
-    /** 默认**关闭**：观感代价大，要用户自己点头（见文件头说明） */
-    enabled = false;
+    /**
+     * 默认**随机透明**：这条路是"旋转时不出现错序"的唯一结构性办法（顺序本来就追不上），
+     * 而随机透明的观感代价远小于硬边裁剪。设置面板里给了三档，用户可随时关掉。
+     */
+    mode: MotionMode = 'stochastic';
 
-    /** alpha 下限（见上面的取值说明） */
+    /** alpha 下限（只对 `clip` 模式有效；见上面的取值说明） */
     alphaClip = DEFAULT_ALPHA_CLIP;
 
     /** 诊断：上一帧实际是否处于不透明路径 */
@@ -51,20 +68,47 @@ class MotionOpaque {
     }
 
     /**
+     * 当前生效的模式。优先级：
+     *   `__SPLATROOM_MOTION_MODE__ = 'off' | 'clip' | 'stochastic'`（新逃生开关，探针/套件用）
+     * → `__SPLATROOM_MOTION_OPAQUE__ = true | false`（旧逃生开关，历史包袱：true 等价 `clip`）
+     * → `this.mode`（设置面板/程序入口）
+     */
+    get effectiveMode(): MotionMode {
+        const mode = (globalThis as any).__SPLATROOM_MOTION_MODE__;
+        if (mode === 'off' || mode === 'clip' || mode === 'stochastic') {
+            return mode;
+        }
+        const hatch = (globalThis as any).__SPLATROOM_MOTION_OPAQUE__;
+        if (hatch === true) {
+            return 'clip';
+        }
+        if (hatch === false) {
+            return 'off';
+        }
+        return this.mode;
+    }
+
+    /**
+     * 旧接口兼容（2026-09-21 那批套件/探针用的就是 `enabled`）：
+     *   读 = 这条路是否开着（mode !== 'off'）；写 true = 切到 `clip`（当时只有这一种写法）。
+     * 保留它是为了**不让旧断言静默失效**（直接删掉的话 `x.enabled = true` 会变成无害的无效赋值）。
+     */
+    get enabled() {
+        return this.mode !== 'off';
+    }
+
+    set enabled(value: boolean) {
+        this.mode = value ? 'clip' : 'off';
+    }
+
+    /**
      * 当前是否允许启用。语义是**三态**：
      *   `__SPLATROOM_MOTION_OPAQUE__ === true`  → 强制开（覆盖 `enabled`）
      *   `__SPLATROOM_MOTION_OPAQUE__ === false` → 强制关（覆盖 `enabled`）
-     *   未设置 → 用 `enabled`（默认 false）
+     *   未设置 → 用 `effectiveMode !== 'off'`
      */
     get active() {
-        const hatch = (globalThis as any).__SPLATROOM_MOTION_OPAQUE__;
-        if (hatch === true) {
-            return true;
-        }
-        if (hatch === false) {
-            return false;
-        }
-        return this.enabled;
+        return this.effectiveMode !== 'off';
     }
 }
 
@@ -75,13 +119,14 @@ class MotionOpaque {
  * 原始 blend/depth 状态存在材质对象上（`__srMotionOpaqueOrig`），恢复时按原值还原 ——
  * 这样即使将来上游把默认值改掉（例如开了 dither 的 `BLEND_NONE`），恢复也不会跑偏。
  */
-const applyMotionOpaqueMaterial = (material: any, on: boolean, alphaClip: number) => {
+const applyMotionOpaqueMaterial = (material: any, on: boolean, alphaClip: number, mode: MotionMode = 'clip') => {
     if (!material) {
         return;
     }
-    const params = { on, alphaClip };
-    const prev = material.__srMotionOpaque as { on: boolean, alphaClip: number } | undefined;
-    if (prev && prev.on === params.on && prev.alphaClip === params.alphaClip) {
+    const stochastic = on && mode === 'stochastic';
+    const params = { on, alphaClip, stochastic };
+    const prev = material.__srMotionOpaque as { on: boolean, alphaClip: number, stochastic: boolean } | undefined;
+    if (prev && prev.on === params.on && prev.alphaClip === params.alphaClip && prev.stochastic === params.stochastic) {
         return;
     }
     if (material.__srMotionOpaqueOrig === undefined) {
@@ -95,10 +140,28 @@ const applyMotionOpaqueMaterial = (material: any, on: boolean, alphaClip: number
     const orig = material.__srMotionOpaqueOrig;
     material.setParameter('uMotionOpaque', on ? 1 : 0);
     material.setParameter('uMotionAlphaClip', alphaClip);
+    material.setParameter('uMotionStochastic', stochastic ? 1 : 0);
     material.blendType = on ?
         BLEND_NONE :
         (orig.blendType === BLEND_NONE ? BLEND_PREMULTIPLIED : orig.blendType);
     material.depthWrite = on ? true : orig.depthWrite;
 };
 
-export { MotionOpaque, applyMotionOpaqueMaterial, DEFAULT_ALPHA_CLIP };
+/**
+ * 把设置面板那条通路接上（Scene 构造函数里调一次）：
+ *   `motionRender.setMode`（fire）改模式并回灌 `motionRender.modeChanged`；
+ *   `motionRender.mode`（invoke）给面板取初值。
+ * 模式**不写偏好、不进 `.ssproj`**（纯渲染期行为，和上一轮的处理一致）。
+ */
+const registerMotionOpaqueEvents = (events: any, motionOpaque: MotionOpaque) => {
+    events.on('motionRender.setMode', (value: string) => {
+        if (value === 'off' || value === 'clip' || value === 'stochastic') {
+            motionOpaque.mode = value;
+        }
+        events.fire('motionRender.modeChanged', motionOpaque.effectiveMode);
+    });
+    events.function('motionRender.mode', () => motionOpaque.effectiveMode);
+};
+
+export { MotionOpaque, applyMotionOpaqueMaterial, registerMotionOpaqueEvents, DEFAULT_ALPHA_CLIP };
+export type { MotionMode };
