@@ -767,7 +767,9 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             } else if (alpha < uniform.uMotionAlphaClip) {
                 discard;
             }
-            output.color = vec4f(graded, 1.0);
+            // 随机透明路径写 alpha 哨兵 2.0（上游同款；主目标是 RGBA16F，放得下 >1 的 alpha），
+            // blit 那道 resolve 靠它认出"这一像素来自随机采样"。
+            output.color = vec4f(graded, select(1.0, 2.0, uniform.uMotionStochastic > 0.5));
         }
     #endif
 

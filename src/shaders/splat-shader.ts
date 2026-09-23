@@ -746,7 +746,9 @@ void main(void) {
             } else if (alpha < uMotionAlphaClip) {
                 discard;
             }
-            pcFragColor0 = vec4(finalColor, 1.0);
+            // 随机透明路径写 **alpha 哨兵 2.0**（上游同款）：主目标是 RGBA16F，放得下 >1 的 alpha，
+            // blit 那道 resolve 靠它认出"这一像素来自随机采样"（见 src/shaders/blit-shader.ts）。
+            pcFragColor0 = vec4(finalColor, uMotionStochastic > 0.5 ? 2.0 : 1.0);
         }
     #endif
 }

@@ -571,12 +571,17 @@ class Camera extends Element {
                     // blit copies 1:1 and leaves the rest of the frame black (see blit-shader.ts).
                     const dstWidth = device.width;
                     const dstHeight = device.height;
+                    // 运动帧随机透明的 resolve（见 blit-shader.ts）：只有**随机透明模式 + 相机在动**
+                    // 时打开；其它任何时候都是 0 ⇒ 与历史行为逐字节相同的纯拷贝。
+                    const resolve = scene.motionOpaque.applied && scene.motionOpaque.effectiveMode === 'stochastic';
                     return {
                         srcTexture: this.mainTarget.colorBuffer,
                         blitScale: [
                             dstWidth > 0 ? this.mainTarget.width / dstWidth : 1,
                             dstHeight > 0 ? this.mainTarget.height / dstHeight : 1
-                        ]
+                        ],
+                        resolveMode: resolve ? 1 : 0,
+                        srcTexel: [1 / this.mainTarget.width, 1 / this.mainTarget.height]
                     };
                 }
             });
