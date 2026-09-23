@@ -92,7 +92,12 @@ const normalize = (axis: Axis, limits: Limits): Axis => {
     // 有效窗口本身不能比一个步长还窄，否则芯也给不出厚度
     if (next.outerHigh - next.outerLow < MIN_THICKNESS) {
         const centre = (next.outerLow + next.outerHigh) / 2;
-        next.outerLow = round1(Math.max(limits.min, Math.min(limits.max, centre - MIN_THICKNESS / 2)));
+        // 上界必须给 MIN_THICKNESS 留位置：原来只夹到 limits.max，在**贴着轴最大值**时
+        // （{150,150,150,150}）`round1(149.95)` 又是 150 ⇒ 两端一起夹到 150、厚度仍然是 0，
+        // 而镜像的那一端（-50）是修得好的。厚度为 0 的深度窗口选不中任何东西，且两端重合后
+        // 拖不开（见本文件开头的说明），状态会一直粘着。UI 那份同样的修法已经带了这道保护
+        // （src/ui/range-slider.ts 的注释就写着"否则在 150 这种边界上两端会一起夹到同一个值"）。
+        next.outerLow = round1(Math.max(limits.min, Math.min(limits.max - MIN_THICKNESS, centre - MIN_THICKNESS / 2)));
         next.outerHigh = round1(Math.min(limits.max, next.outerLow + MIN_THICKNESS));
     }
     // 芯至少一个步长：先顶高端，顶不动（贴到值域上限）就把低端收回来

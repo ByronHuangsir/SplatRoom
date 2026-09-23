@@ -221,8 +221,14 @@ class UnhideAllOp extends StateOp {
     name = 'unhideAll';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => (state[i] & (State.locked | State.deleted)) === State.locked), State.locked, BitOp.CLEAR, State.locked);
+        // 作用行在 do() 里数（见 StateOp.captureRanges 的说明）：op 是排队执行的，
+        // 构造与执行之间可能插进别的 op
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.locked, BitOp.CLEAR, State.locked);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => (state[i] & (State.locked | State.deleted)) === State.locked);
     }
 }
 
@@ -341,8 +347,12 @@ class UndeleteSelectionOp extends StateOp {
     // restore splats that are both selected AND deleted (state = 5).
     // clears the deleted bit, leaving them as just selected (state = 1).
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => state[i] === (State.selected | State.deleted)), State.deleted, BitOp.CLEAR, State.deleted);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.deleted, BitOp.CLEAR, State.deleted);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => state[i] === (State.selected | State.deleted));
     }
 }
 
@@ -350,8 +360,12 @@ class ResetOp extends StateOp {
     name = 'reset';
 
     constructor(splat: Splat) {
-        const state = splat.splatData.getProp('state') as Uint8Array;
-        super(splat, IndexRanges.fromPredicate(splat.splatData.numSplats, i => (state[i] & State.deleted) !== 0), State.deleted, BitOp.CLEAR, State.deleted);
+        super(splat, IndexRanges.fromPredicate(0, () => false), State.deleted, BitOp.CLEAR, State.deleted);
+    }
+
+    captureRanges() {
+        const state = this.splat.splatData.getProp('state') as Uint8Array;
+        this.ranges = IndexRanges.fromPredicate(this.splat.splatData.numSplats, i => (state[i] & State.deleted) !== 0);
     }
 }
 
