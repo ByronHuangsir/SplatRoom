@@ -39,6 +39,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.waitForFunction('!!window.scene', { timeout: 120000, polling: 500 });
     await sleep(1500);
 
+    // A/B：把闸门/外推参数注入页面（`__SPLATROOM_SORT_TUNE__`）；不注入就用代码里的默认值。
+    // 例：SORT_TUNE='{"centerWeight":0,"minIntervalMs":200,"moveDeg":2.5}' 回到第二十轮之前的行为。
+    if (process.env.SORT_TUNE) {
+        const tune = JSON.parse(process.env.SORT_TUNE);
+        await page.evaluate((t) => { window.__SPLATROOM_SORT_TUNE__ = t; }, tune);
+        console.log('tune=' + JSON.stringify(tune));
+    }
+
     await page.evaluate(async (m) => {
         const head = await fetch('./' + m, { headers: { Range: 'bytes=0-0' } });
         const total = parseInt(head.headers.get('content-range').split('/')[1], 10);

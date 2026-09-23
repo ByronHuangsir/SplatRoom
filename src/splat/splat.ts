@@ -59,11 +59,14 @@ const _predictDir = new Vec3();
 //     worker 不会被请求淹没（它自己的 1e-3 门限在快速旋转时等于"每帧都排"）。
 //   • 代价：快速旋转时排序次数会向 worker 的上限（20M ≈2.5 次/秒）靠拢，每次完成仍有一次
 //     ~80 MB 主线程上传 —— 用户明确说"排序错误比卡帧更严重"，所以先保正确性。
-const SORT_MIN_INTERVAL_MS = 200;
+const SORT_MIN_INTERVAL_MS = 100;
 const SORT_SETTLE_MS = 200;
-// 相机自上次派发以来转过的角度超过这个值才值得再排一次（度）。取值理由：20M 一次排序 ~0.4 s，
-// 快速拖动时 2.5° 大约对应"顺序该刷新了"的观感阈值；慢速平移几乎不触发消耗。
-const SORT_MOVE_DEG = 2.5;
+// 相机自上次派发以来转过的角度超过这个值才值得再排一次（度）。
+// 2026-09-22 第二十轮：2.5° → **0.75°**。原来那条注释里的"2.5° 是观感阈值"是被实测推翻的：
+// 慢转（30°/s）时 2.5° 要 83 ms 才攒够，而闸门地板 200 ms 才是真正的约束；把地板与这个阈值一起降下来，
+// 慢转时的派发间隔从 ~200 ms 掉到 ~100 ms（**顺序被替换的整段寿命 D 直接决定错位角的范围**，
+// 见 `_sortPredictHorizon` 的"居中"说明）。
+const SORT_MOVE_DEG = 0.75;
 // 派发后等不到完成事件时，多久之后认为 worker 空闲（异常兜底，避免闸门永久锁死）
 const SORT_INFLIGHT_TIMEOUT_MS = 3000;
 
@@ -87,6 +90,10 @@ const SORT_MOTION_SAMPLES = 16;         // 位姿环形缓冲长度（120 ms 窗
 const SORT_MOTION_BLEND = 0.5;          // 窗口估计之间的混合权重（只做轻度平滑）
 const SORT_PREDICT_MIN_DEG = 0.5;       // 外推角小于这个值就不改位姿（静止时保持逐字节一致）
 const SORT_PREDICT_MIN_RADIUS = 0.002;  // 外推位移小于模型半径的这个比例也不改（同上）
+// 派发间隔的估计权重（第二十轮，见 `_sortPredictHorizon` 的"居中"推导）：
+// 顺序从落地到被下一份替换，中间**整段寿命 D** 都用它，而它对齐的只是落地那一刻 ⇒ 平均错位 D/2。
+// 把 horizon 往前推 D/2，错位就从 [0, D] 变成 [−D/2, +D/2]（平均 0、峰值减半），**不花任何额外代价**。
+const SORT_PREDICT_CENTER_WEIGHT = 0.25;
 
 const boundingPoints =
     [-1, 1].map((x) => {
@@ -1121,22 +1128,42 @@ class Splat extends Element {
     }
 
     /**
-     * 当前该外推多少毫秒 —— **两步**：
+     * 当前该外推多少毫秒 —— **三步**（第二十轮加了第三步）：
      *
      *   第一步 `_sortLatencyMs`：派发 → worker 回包（= worker 排序耗时，20M 实测 ~161 ms）；
      *   第二步 `_sortConsumeMs`：回包 → **某一帧真的把它上传并拿去渲染**（实测 ~24 ms：
      *     按需渲染下总要等下一帧的 `GSplatInstance.update()`）。
+     *   第三步 **`D/2`（居中）**：一份顺序从"落地"到"被下一份替换"之间**整段寿命 D** 都在用，
+     *     而前两步只把它对齐到落地那一刻 ⇒ 错位角从 0 一路长到 D（缓转 30°/s、D=200 ms 就是 6°，
+     *     峰值 11.5°）。把 horizon 再往前推 D/2，错位区间就变成 [−D/2, +D/2]：
+     *     **平均错位 0、峰值减半，且不多排一次序、不花任何额外代价。**
      *
-     * 只算第一步会系统性偏早一个帧长 —— 顺序对齐的是"回包那一刻"的相机，而用户看到的是
-     * "上传完那一帧"的相机。375°/s 下这 24 ms 就是 **9°** 的固定偏差。
+     *   D 取"下一次派发大概还要多久"：闸门地板 `SORT_MIN_INTERVAL_MS`、攒够 `SORT_MOVE_DEG` 所需时间
+     *   （用当次角速度估）、以及上一次排序的往返 `λ+消费`（在飞期间不会再派发）三者取大。
      *
-     * 两项都可被 `window.__SPLATROOM_SORT_TUNE__` 覆盖（只给探针/套件调参用，见 sort-tune.cjs）。
+     * 三项都可被 `window.__SPLATROOM_SORT_TUNE__` 覆盖（只给探针/套件调参用，见 sort-tune.cjs）。
      */
     private _sortPredictHorizon() {
         const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
         const consumeWeight = typeof tune.consumeWeight === 'number' ? tune.consumeWeight : 1;
         const extraMs = typeof tune.extraMs === 'number' ? tune.extraMs : 0;
-        const total = this._sortLatencyMs + consumeWeight * this._sortConsumeMs + extraMs;
+        const base = this._sortLatencyMs + consumeWeight * this._sortConsumeMs;
+
+        const intervalMs = typeof tune.minIntervalMs === 'number' ? tune.minIntervalMs : SORT_MIN_INTERVAL_MS;
+        const moveDeg = typeof tune.moveDeg === 'number' ? tune.moveDeg : SORT_MOVE_DEG;
+        const centerWeight = typeof tune.centerWeight === 'number' ? tune.centerWeight : SORT_PREDICT_CENTER_WEIGHT;
+
+        // 下一次派发大概还要多久（D）：角速度越大、攒够 moveDeg 越快；在飞期间被 λ+消费 挡住
+        const rlen = Math.sqrt(
+            this._sortRotRate.x * this._sortRotRate.x +
+            this._sortRotRate.y * this._sortRotRate.y +
+            this._sortRotRate.z * this._sortRotRate.z
+        );
+        const rateDegPerMs = (rlen * 180) / Math.PI;
+        const rotateMs = rateDegPerMs > 1e-6 ? moveDeg / rateDegPerMs : Infinity;
+        const dMs = Math.max(intervalMs, Math.min(rotateMs, SORT_PREDICT_MAX_MS), base);
+
+        const total = base + centerWeight * dMs + extraMs;
         return Math.min(SORT_PREDICT_MAX_MS, Math.max(0, total));
     }
 
@@ -1149,19 +1176,22 @@ class Splat extends Element {
      * 固定间隔还解释不了"整段手势一次都没派发"（实测 4 秒旋转只派发 1~2 次、有时 0 次）。
      */
     private _sortAdmit(now: number, localPos: Vec3, localDir: Vec3) {
+        const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
+        const minIntervalMs = typeof tune.minIntervalMs === 'number' ? tune.minIntervalMs : SORT_MIN_INTERVAL_MS;
+        const moveDeg = typeof tune.moveDeg === 'number' ? tune.moveDeg : SORT_MOVE_DEG;
         // 运动期走"不依赖顺序"的渲染（深度测试决定可见性）⇒ 这段时间排序纯属浪费
         // （一次 20M 排序 155 ms + 80 MB 主线程上传）。停手那一帧由补帧路径补回精确顺序，
         // 且不透明路径会一直保持到它上线（见 scene.ts）。
         if (this._motionOpaque) {
             return false;
         }
-        if (now - this._sortLastDispatch < SORT_MIN_INTERVAL_MS) {
+        if (now - this._sortLastDispatch < minIntervalMs) {
             return false;
         }
         if (this._sortInFlight(now)) {
             return false;
         }
-        if (this._sortAngleSinceDispatch(localDir) > SORT_MOVE_DEG) {
+        if (this._sortAngleSinceDispatch(localDir) > moveDeg) {
             return true;
         }
         // 纯平移（视角方向不变）也要能刷新顺序：按模型半径的 1% 作为"动够了"的位置阈值
