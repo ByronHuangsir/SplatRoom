@@ -27,6 +27,7 @@
 | `verify-webgpu-fallback.cjs [url] [model]` | WebGPU 偏好被拒绝并回退 WebGL2 + 弹窗说明 + `?gpu=webgpu` 仍可用（7 项）| 是 |
 | `verify-overlay-missing-order-texture.cjs` | 复现"选中早于实例就绪"的加载崩溃，断言不崩 + 待命 + 恢复 | 是 |
 | `verify-motion-render-removed.cjs` | **删除护栏**：运动期"随机透明 / 硬边裁剪"确实不存在了（面板行、事件、uniform、材质切换、运动期排序全部反过来断言）| 是 |
+| `verify-group-sort-dispatch.cjs` | **合并（组）渲染排序护栏**：转动时合并实体的 sorter 必须被派发多次且每次带 `forceUpdate`（旧实现 `ws._sortInFlight` 不存在 ⇒ 第一次之后永久不发）| 是 |
 | `verify-render-diagnostics.mts` | 渲染诊断逻辑单元检查（含 WebGPU 上限分支，7 例）| 否（Node strip-types 直跑）|
 | `verify-blackscreen.cjs` / `verify-measure-online*.cjs` / `verify-merge-ui.cjs` | 早期线上/合并工具验证（保留作参考）| 视目标 URL |
 
