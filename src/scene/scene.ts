@@ -222,6 +222,8 @@ class Scene {
     // 施加缩放时用的基准 targetSize：窗口在降级期间变了要重算覆盖值（见 applyRenderScale）
     private _appliedRenderScaleBaseWidth = 0;
     private _appliedRenderScaleBaseHeight = 0;
+    // 上一次调用是否因为"导出/锁定渲染模式"而跳过（跳过之后必须重新施加一次，见 applyRenderScale）
+    private _renderScaleSkippedForLock = false;
     // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
     private _wasMoving = false;
     // 停手补帧的武装时刻（0 = 没有欠着的补帧）；用于在补帧落地前持续出帧，并给它一个上限
@@ -751,6 +753,29 @@ class Scene {
     // 0.5/0.35 时帧时间反而涨到 242/472 ms 且画面整体变化），不能当交互旋钮用。
     // 缩放为 1 时置回 null，恢复是逐像素精确的（实测 mean|ΔRGB| = 0）。
     private applyRenderScale(scale: number) {
+        // 导出/360/快照期间**不要碰分辨率**：`startOffscreenMode()` 已经把 `targetSizeOverride`
+        // 设成目标尺寸、并关掉了最终 blit，此时若发生"相机停手恢复"（导出的动画相机一直在动，
+        // 降级阶梯每 300 ms 就可能走一级），这里会把覆盖值改回视口尺寸 ⇒ 导出画面分辨率不对、
+        // 尺寸与内容对不上。别的每帧子系统都做了这道守卫（splat.ts / camera-preview.ts /
+        // editor-lod.ts 都在 `lockedRenderMode` 时早退），这里补齐。
+        if (this.lockedRenderMode) {
+            // 缓存按"未施加"记账：这样离开锁定模式后第一帧会重新施加一次，不会把锁定期的
+            // 值当成已生效（那会让下面的强制出帧条件恒真、按需渲染退化成持续渲染）。
+            // `applyRenderScale` 的早退只看缩放值，所以还要记住"这次是跳过的"：否则锁定模式
+            // 结束时若降级档位没变（同一档恢复），那一次施加会被早退吃掉、低分辨率覆盖值要等
+            // 下一次档位变化才回来。
+            this._renderScaleSkippedForLock = true;
+            this._appliedRenderScale = 1;
+            this._appliedRenderScaleBaseWidth = 0;
+            this._appliedRenderScaleBaseHeight = 0;
+            return;
+        }
+        // 锁定模式刚结束：上一档缩放必须重新施加一遍（可能被上面的跳过分录掩盖了）
+        if (this._renderScaleSkippedForLock) {
+            this._renderScaleSkippedForLock = false;
+            this._appliedRenderScale = NaN;
+        }
+
         // 覆盖值是按**当时**的 targetSize 算出来的绝对像素，所以判"是否已施加"必须把基准尺寸也算进去：
         // 原来只比 scale ⇒ 降级期间改窗口大小（拖动时间线面板、改窗口尺寸）时这里会早退，
         // 覆盖值留在旧尺寸上 ⇒ 画面被拉伸 + 过度模糊；而且 `_appliedRenderScale !== 1` 会让

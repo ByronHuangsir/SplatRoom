@@ -113,6 +113,7 @@ const registerDocEvents = (scene: Scene, events: Events) => {
             const document = JSON.parse(new TextDecoder().decode(docData));
 
             // run through each splat and load it
+            let loadedSplats = 0;
             for (let i = 0; i < document.splats.length; ++i) {
                 const filename = `splat_${i}.ply`;
                 const splatSettings = document.splats[i];
@@ -146,8 +147,23 @@ const registerDocEvents = (scene: Scene, events: Events) => {
                 }
 
                 await scene.add(splat);
+                loadedSplats++;
 
                 splat.docDeserialize(splatSettings);
+            }
+
+            // 文档里记着 splat、但一个都没加载出来 ⇒ **必须报失败**。
+            // 否则：空场景 + 报成功 + 调用方绑定文件句柄 + 名字设上；接着用户按 Ctrl+S，
+            // 那份空文档就覆盖掉了原档案 —— 正是本文件上面那条注释想防的事。
+            // 走到这里的现实路径：所有高斯都被删掉后保存（`writeSplatFile` 在没有可导出的行时
+            // 不写任何 PLY 条目），于是打开时每个 splat 都落到上面的 `MISSING_PLY` 静默跳过。
+            if (document.splats.length > 0 && loadedSplats === 0) {
+                await events.invoke('showPopup', {
+                    type: 'error',
+                    header: i18n.t('doc.load-failed'),
+                    message: `'${document.splats.length} 个 splat 的 PLY 都没能在档案里找到（通常是"高斯全部被删除后保存"留下的空文档）'`
+                });
+                return false;
             }
 
             // FIXME: trigger scene bound calc in a better way

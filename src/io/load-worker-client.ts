@@ -176,6 +176,12 @@ const handleWorkerMessage = async (e: MessageEvent) => {
                 lod = null;
             }
         }
+        // `undefined` 与 `null` 在 worker 侧**不是**同一件事（worker 只判 `lod === null` 才算取消），
+        // 弹窗实现若是"resolve 但没给值"就会解析成 undefined ⇒ 落进"拿 undefined 当层号"的路。
+        // 这里统一收敛成 null（取消）或一个合法层号。
+        if (typeof lod !== 'number' || !Number.isFinite(lod)) {
+            lod = null;
+        }
         getWorker().postMessage({ id: msg.id, type: 'lod', lod });
         return;
     }
