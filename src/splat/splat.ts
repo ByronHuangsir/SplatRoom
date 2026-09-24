@@ -471,6 +471,13 @@ class Splat extends Element {
         // 顺序滞后结构性地消失，但**我们定制的 per-instance 材质接不上**（曲线/裁剪/选区/
         // 状态贴图都在那边），画面会变成引擎默认材质的样子（实测亮度偏低约 1/3，几何一致）。
         // 只用来做"同场景两条通路对比"，不是可交付的功能路径。
+        //
+        // ⚠️ 2026-09-25 实测**这个开关会让导入本身失败**：`addComponent('gsplat', { unified: true })`
+        // 那条路在建组件时就断了（导入后 elements 只有 8 个、没有 splat 元素、`findComponents('gsplat')`
+        // 返回 0），而且卡在导入里不返回。已确认与材质无关（短路掉整个材质钩子照样卡），
+        // 就是 flag 进到 addComponent 造成的。**所以现在不要用 URL 开关做 A/B**，
+        // 要走"先正常导入、再就地翻转 `comp.unified`"那条已验证可用的路。
+        // 细节与下一步：docs/待办-引擎WebGPU-compute.md §4c。
         const useUnified = (new URLSearchParams(window.location.search).get('unified') === '1') ||
             (globalThis as any).__SPLATROOM_UNIFIED__ === true;
 
