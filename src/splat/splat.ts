@@ -421,9 +421,19 @@ class Splat extends Element {
             this.entity.setLocalRotation(rotation);
         }
 
+        // **实验开关**（2026-09-23，见 docs/排序错序-结构性解法-引擎GPU排序通路-2026-09-23.md）：
+        // 引擎里有两条 splat 通路 —— per-instance + worker 排序（现状，顺序有滞后），
+        // 以及 unified 世界缓冲 + **引擎自带 GPU 基数排序**（顺序与绘制同帧，没有滞后）。
+        // 打开 `?unified=1` 或 `__SPLATROOM_UNIFIED__ = true` 就走后者：
+        // 顺序滞后结构性地消失，但**我们定制的 per-instance 材质接不上**（曲线/裁剪/选区/
+        // 状态贴图都在那边），画面会变成引擎默认材质的样子（实测亮度偏低约 1/3，几何一致）。
+        // 只用来做"同场景两条通路对比"，不是可交付的功能路径。
+        const useUnified = (new URLSearchParams(window.location.search).get('unified') === '1') ||
+            (globalThis as any).__SPLATROOM_UNIFIED__ === true;
+
         this.entity.addComponent('gsplat', {
             asset,
-            unified: false
+            unified: useUnified
         });
 
         if (!this.entity.gsplat) {
