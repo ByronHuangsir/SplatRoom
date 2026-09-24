@@ -60,6 +60,26 @@ const _predictDir = new Vec3();
 //     ~80 MB 主线程上传 —— 用户明确说"排序错误比卡帧更严重"，所以先保正确性。
 const SORT_MIN_INTERVAL_MS = 100;
 const SORT_SETTLE_MS = 200;
+// ---- 排序节奏自适应（2026-09-24 第二十二轮）-----------------------------------------------------
+//
+// 实测一根链条（`_tmp/probe-order-lifetime.cjs`，30°/s 匀速旋转，三条模型）：
+//
+//   模型            D=派发间隔   L=派发→回包   apply→帧   每份顺序寿命        错位角
+//   test-model(2k)     100 ms        0.8 ms      16.7 ms   6 帧 / 100 ms      3.0°
+//   test-layered(600k) 117 ms        3.8 ms      55 ms     2–3 帧 / 115 ms    3.5°
+//   test-20m(20M)      189 ms      149 ms        50 ms     3–4 帧 / 153 ms    4.6°
+//
+// 关键结论：**小模型上 D 完全由闸门地板（100 ms）决定，排序本身只要 0.8 ms**。
+// 也就是"顺序新鲜度"本来可以再挤 3–5 倍，却白送给了那条为 2000 万点写的恒定地板
+// （地板是防止 worker 被淹没的，而单飞 + 引擎 worker 的 1e-3 门限已经在那件事上兜底了）。
+//
+// 所以地板改成**按实测代价自适应**：一次顺序从派发到上线要花 λ+消费（实测值），
+// 地板块就取它的 `SORT_INTERVAL_COST_FACTOR` 倍。小模型自然落在一帧附近、
+// 大模型自然退化回原来那条地板 —— 不需要任何按点数写死的阈值，换台机器也成立。
+const SORT_MIN_INTERVAL_FLOOR_MS = 16;   // 地板下限：一帧（60 Hz），再密等于每帧都排
+const SORT_MIN_INTERVAL_CEIL_MS = 100;   // 地板上限：原来那条恒定地板，大模型不会比从前更密
+const SORT_INTERVAL_COST_FACTOR = 1;     // 地板 = (λ + 消费) × 这个倍率
+
 // 相机自上次派发以来转过的角度超过这个值才值得再排一次（度）。
 // 2026-09-22 第二十轮：2.5° → **0.75°**。原来那条注释里的"2.5° 是观感阈值"是被实测推翻的：
 // 慢转（30°/s）时 2.5° 要 83 ms 才攒够，而闸门地板 200 ms 才是真正的约束；把地板与这个阈值一起降下来，
@@ -93,6 +113,26 @@ const SORT_PREDICT_MIN_RADIUS = 0.002;  // 外推位移小于模型半径的这�
 // 顺序从落地到被下一份替换，中间**整段寿命 D** 都用它，而它对齐的只是落地那一刻 ⇒ 平均错位 D/2。
 // 把 horizon 往前推 D/2，错位就从 [0, D] 变成 [−D/2, +D/2]（平均 0、峰值减半），**不花任何额外代价**。
 const SORT_PREDICT_CENTER_WEIGHT = 0.25;
+// "居中"要推 D/2，而 D 是**真实派发间隔**、不是闸门地板：地板只是"最早可以派"的时间，
+// 单飞会让真实间隔常常是它的两倍。这里对真实间隔做滑动平均（第二十二轮，实测修正见 `_sortPredictHorizon`）。
+const SORT_CADENCE_ALPHA = 0.25;
+
+/**
+ * 自适应排序地板的**纯函数**版本（`Splat._sortMinIntervalMs` 包一层实例状态调它）。
+ *
+ * 抽出来的原因：这是"顺序新鲜度"的唯一定义处，而闸门、horizon 的 D 估计、在飞补发
+ * 三个调用点都必须拿到同一个值 —— 本仓库吃过"同一条规则在多处各写一遍、只改了被点名的那个"
+ * 的亏（见 `docs/bug排查-2026-09-23.md`）。纯函数也让它能被套件直接断言。
+ */
+function sortMinIntervalMs(latencyMs: number, consumeMs: number, tune: any = {}) {
+    if (typeof tune.minIntervalMs === 'number') {
+        return tune.minIntervalMs;
+    }
+    const factor = typeof tune.intervalCostFactor === 'number' ? tune.intervalCostFactor : SORT_INTERVAL_COST_FACTOR;
+    const cost = latencyMs + consumeMs;
+    const scaled = factor > 0 ? cost * factor : 0;
+    return Math.max(SORT_MIN_INTERVAL_FLOOR_MS, Math.min(SORT_MIN_INTERVAL_CEIL_MS, scaled));
+}
 
 const boundingPoints =
     [-1, 1].map((x) => {
@@ -198,6 +238,9 @@ class Splat extends Element {
     private readonly _sortLinRate = new Vec3();
     /** 一次排序从派发到落地的实测延迟（滑动平均，ms） */
     private _sortLatencyMs = SORT_LATENCY_DEFAULT_MS;
+    // 实测派发间隔的滑动平均（顺序延迟补偿里"居中"那一步用的 D，见 `_sortPredictHorizon`）
+    private _sortCadenceMs = 0;
+    private _sortCadenceSamples = 0;
     private _sortLatencySamples = 0;
     /** 回包 → 被某帧消费（上传并用于渲染）的实测延迟（滑动平均，ms）；外推的第二步 */
     private _sortConsumeMs = 0;
@@ -900,9 +943,10 @@ class Splat extends Element {
      * 4 秒内 6 帧 >33 ms（同机 idle median 16.6 ms）。
      * 所以只在"我们自己的派发"上做限流是没用的（实测：限流后仍 45 次/秒 postMessage）。
      *
-     * 闸门规则（2026-09-21 起，见 `_sortAdmit`）：**不早于 SORT_MIN_INTERVAL_MS + 没有排序在飞 +
+     * 闸门规则（2026-09-21 起，见 `_sortAdmit`）：**不早于 `_sortMinIntervalMs()` + 没有排序在飞 +
      * 自上次派发以来相机转够了角度（或位移够多）**；被挡下的调用记住最新位姿，相机停稳 SORT_SETTLE_MS
      * 后补发一帧 —— 静止画面用的仍是最终位姿的顺序。
+     * （那条地板 2026-09-24 起是自适应的：见 `_sortMinIntervalMs` 的推导，小模型上从 100 ms 降到 ~16 ms。）
      * 旧版是"最快每 800 ms 放行一次"（纯时间间隔）：用户实测"快速旋转时背面内容跑到前面"，
      * 因为 800 ms 内相机能转过很大角度；而且实测整段手势有时一次都没派发（4 秒旋转只 1~2 次、甚至 0 次）。
      * 新规则把顺序新鲜度绑在**动了多远**上，并靠完成事件保证 worker 不被淹没。
@@ -1090,6 +1134,17 @@ class Splat extends Element {
         _predictPos.copy(pos);
         _predictDir.copy(dir);
 
+        // 探针锚点（`__SPLATROOM_SORT_TUNE__.probeAnchor = true`，默认关闭、零开销）：
+        // 把**未外推**的位姿留在全局上，供 `_tmp/probe-order-lifetime.cjs` 量
+        // "这份顺序被画出来时相机已经又转了多少" —— 顺序延迟补偿的唯一地面真值。
+        if ((globalThis as any).__SPLATROOM_SORT_TUNE__?.probeAnchor === true) {
+            const anchor = (globalThis as any).__SPLATROOM_SORT_ANCHOR__ ?? ((globalThis as any).__SPLATROOM_SORT_ANCHOR__ = []);
+            anchor.push({ t: performance.now(), pos: pos.clone(), dir: dir.clone() });
+            if (anchor.length > 64) {
+                anchor.shift();
+            }
+        }
+
         if ((globalThis as any).__SPLATROOM_SORT_PREDICT__ === false) {
             return;
         }
@@ -1135,10 +1190,16 @@ class Splat extends Element {
      *     峰值 11.5°）。把 horizon 再往前推 D/2，错位区间就变成 [−D/2, +D/2]：
      *     **平均错位 0、峰值减半，且不多排一次序、不花任何额外代价。**
      *
-     *   D 取"下一次派发大概还要多久"：闸门地板 `SORT_MIN_INTERVAL_MS`、攒够 `SORT_MOVE_DEG` 所需时间
-     *   （用当次角速度估）、以及上一次排序的往返 `λ+消费`（在飞期间不会再派发）三者取大。
+     *   D 取"下一次派发大概还要多久"：**实测的派发间隔**（`_sortCadenceMs`，见 `_noteSortDispatched`）、
+     *   闸门地板、攒够 `SORT_MOVE_DEG` 所需时间（用当次角速度估）、以及上一次排序的往返 `λ+消费`
+     *   （在飞期间不会再派发）四者取大。
      *
-     * 三项都可被 `window.__SPLATROOM_SORT_TUNE__` 覆盖（只给探针/套件调参用，见 sort-tune.cjs）。
+     *   ⚠️ 2026-09-24：原来这里的 D **不含实测派发间隔**，只用地板估；而闸门地板只是"最早可以派"的时间，
+     *   真正的派发间隔经常是它的两倍（单飞：这一帧派了，下一帧还在飞 ⇒ 派不出去）。
+     *   实测小模型：地板 16 ms、真实间隔 33.3 ms ⇒ 居中项把 horizon 多推了 8 ms（≈0.25°），
+     *   方向是**过冲**（`disp` 从 0.003 抬到 0.006）。现在改用实测间隔，"居中"才真的居中。
+     *
+     * 四项都可被 `window.__SPLATROOM_SORT_TUNE__` 覆盖（只给探针/套件调参用，见 sort-tune.cjs）。
      */
     private _sortPredictHorizon() {
         const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
@@ -1146,7 +1207,8 @@ class Splat extends Element {
         const extraMs = typeof tune.extraMs === 'number' ? tune.extraMs : 0;
         const base = this._sortLatencyMs + consumeWeight * this._sortConsumeMs;
 
-        const intervalMs = typeof tune.minIntervalMs === 'number' ? tune.minIntervalMs : SORT_MIN_INTERVAL_MS;
+        const intervalMs = this._sortMinIntervalMs(tune);
+        const observedCadenceMs = typeof tune.cadenceMs === 'number' ? tune.cadenceMs : this._sortCadenceMs;
         const moveDeg = typeof tune.moveDeg === 'number' ? tune.moveDeg : SORT_MOVE_DEG;
         const centerWeight = typeof tune.centerWeight === 'number' ? tune.centerWeight : SORT_PREDICT_CENTER_WEIGHT;
 
@@ -1158,7 +1220,7 @@ class Splat extends Element {
         );
         const rateDegPerMs = (rlen * 180) / Math.PI;
         const rotateMs = rateDegPerMs > 1e-6 ? moveDeg / rateDegPerMs : Infinity;
-        const dMs = Math.max(intervalMs, Math.min(rotateMs, SORT_PREDICT_MAX_MS), base);
+        const dMs = Math.max(intervalMs, observedCadenceMs, Math.min(rotateMs, SORT_PREDICT_MAX_MS), base);
 
         const total = base + centerWeight * dMs + extraMs;
         return Math.min(SORT_PREDICT_MAX_MS, Math.max(0, total));
@@ -1178,7 +1240,7 @@ class Splat extends Element {
      */
     private _sortAdmit(now: number, localPos: Vec3, localDir: Vec3) {
         const tune = (globalThis as any).__SPLATROOM_SORT_TUNE__ ?? {};
-        const minIntervalMs = typeof tune.minIntervalMs === 'number' ? tune.minIntervalMs : SORT_MIN_INTERVAL_MS;
+        const minIntervalMs = this._sortMinIntervalMs(tune);
         const moveDeg = typeof tune.moveDeg === 'number' ? tune.moveDeg : SORT_MOVE_DEG;
         if (now - this._sortLastDispatch < minIntervalMs) {
             return false;
@@ -1201,11 +1263,40 @@ class Splat extends Element {
     }
 
     /**
+     * 派发间隔地板（**自适应**，第二十二轮）。原来是一条为 2000 万点写的恒定 100 ms，
+     * 实测在小模型上它是唯一的约束（排序本身只要 0.8 ms），白送了 3–5 倍的新鲜度。
+     *
+     * 取"一次顺序从派发到上线实测要花多久"（λ + 消费）作为地板块，
+     * 上下夹在 `[SORT_MIN_INTERVAL_FLOOR_MS, SORT_MIN_INTERVAL_CEIL_MS]`：
+     * 小模型 → 一帧；大模型 → 自然退化回原来那条地板（20M 实测 λ+消费 ≈ 250 ms，比原来还长，
+     * 但那边真正的约束本来就是 worker 吞吐 + 单飞，不是这条地板）。
+     *
+     * 可被 `__SPLATROOM_SORT_TUNE__.minIntervalMs` 直接覆盖（探针 A/B 用），
+     * 或用 `.intervalCostFactor` 调倍率（0 = 永远取地板下限）。
+     */
+    private _sortMinIntervalMs(tune: any = {}) {
+        if (typeof tune.minIntervalMs === 'number') {
+            return tune.minIntervalMs;
+        }
+        return sortMinIntervalMs(this._sortLatencyMs, this._sortConsumeMs, tune);
+    }
+
+    /**
      * 记下"顺序以这个位姿为准"（簿记）。**不**设置在飞标记 —— 在飞标记只有真正发出请求时才置位
      * （见 postSort），否则 `dispatchSort` 会把自己刚记的簿记误判成"已有排序在飞"而永远只排队不发送
      * （第一版就是这么写错的，实测 posts 恒为 0）。
      */
     private _noteSortDispatched(now: number, localPos: Vec3, localDir: Vec3) {
+        // 真实派发间隔的滑动平均（间隔太长/太短都不采：停手几秒后的"下一次"不是节奏）
+        if (this._sortLastDispatch > 0) {
+            const gap = now - this._sortLastDispatch;
+            if (gap > 0 && gap < SORT_PREDICT_MAX_MS) {
+                this._sortCadenceSamples++;
+                this._sortCadenceMs = this._sortCadenceSamples === 1 ?
+                    gap :
+                    this._sortCadenceMs + (gap - this._sortCadenceMs) * SORT_CADENCE_ALPHA;
+            }
+        }
         this._sortLastDispatch = now;
         this._sortDispatchPos.copy(localPos);
         this._sortDispatchDir.copy(localDir);
@@ -1230,7 +1321,7 @@ class Splat extends Element {
         this._sortPendingSince = 0;
         // 在飞期间攒下的最新位姿在这里补发（这就是 `_sortInFlight` 那个不存在的字段本想做的事）。
         // 仍然尊重最小间隔：否则在"排序很快、相机一直在动"的场景下会变成完成即发的自旋。
-        if (this._sortHasPending && performance.now() - this._sortLastDispatch >= SORT_MIN_INTERVAL_MS) {
+        if (this._sortHasPending && performance.now() - this._sortLastDispatch >= this._sortMinIntervalMs()) {
             this._sortHasPending = false;
             this.postSort(this._sortPendingPos, this._sortPendingDir);
         }

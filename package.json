@@ -1,6 +1,6 @@
 {
     "name": "splatroom",
-    "version": "3.23.42",
+    "version": "3.23.43",
     "author": "摄影师黄Sir <1924705842@qq.com>",
     "homepage": "https://github.com/photographer-huangsir/splatroom",
     "description": "3D Gaussian Splat Editor - 调色与后期工作流",
@@ -36,6 +36,8 @@
         "verify:overlay": "node docs/verify/verify-overlay-missing-order-texture.cjs http://localhost:3100/",
         "verify:motion-removed": "node docs/verify/verify-motion-render-removed.cjs http://localhost:3100/",
         "verify:crop-export": "node docs/verify/verify-crop-export-state.cjs http://localhost:3100/",
+        "verify:sort-predict": "node docs/verify/verify-sort-predict.cjs http://localhost:3100/",
+        "verify:sort-cadence": "node docs/verify/verify-sort-cadence.cjs http://localhost:3100/",
         "postinstall": "node scripts/apply-patches.js",
         "patched": "node scripts/apply-patches.js"
     },
