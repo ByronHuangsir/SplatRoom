@@ -133,6 +133,48 @@ pipeline**，于是每次派发都是静默空跑。修法与自检代码在 `2d
 * 二期：状态类（选区染色/删除/裁剪盒）＋ varyings 通路。
 * 三期：几何类（变换调色板/三种特效）＋ 拾取通道 ＋ 合并渲染，最后才谈"把默认切过去"。
 
+### 4c. 一期做到哪一步（2026-09-25 实测记录）
+
+> **代码位置**：一期的骨架（材质替换 + 自写片元 + Scene 钩子）**没有留在工作树里**，
+> 收在 `git stash` 里（`stash@{0}`，说明写着为什么收起来）：
+> `git stash show -p stash@{0}` 看内容，`git stash pop` 取回来。
+> 收起来的理由：它**没验证通过**（uniform 读不到，见下），而且它的开关一旦打开会让
+> **导入卡死**（下面最后一条）—— 一个"打开就把应用搞坏"的未完成代码不该留在主线。
+> 走这条路时先 `git stash pop`，再按下面的"下一步实验"接着做。
+
+**已经打通（都是实测）**：
+
+| 事实 | 证据 |
+| --- | --- |
+| 能找到那条通路的材质 | 探针句柄 `__SPLATROOM_UNIFIED_MATERIAL__` 拿得到；debug 计数 `seenManagers=1, seenRenderers=1, seenGpuSort=1, seenMaterials=1, picked=1` |
+| 能换掉它的 shader | 早期一版片元写坏时，引擎连续报 `[Invalid RenderPipeline]`（说明我们的源码**确实**进了管线）；修好后报错消失 |
+| 开关必须"读取时判定" | `_unifiedMaterialEnabled` 一开始写成字段初始化，Scene 构造早于探针设 flag ⇒ 钩子一次都不跑。改成 getter 立刻生效。**这是本仓库的第二类同类坑**：构造期读到的全局变量，永远不是探针后来设的那个 |
+| 片元**不能** #include 引擎 chunk | 引擎给 ShaderMaterial 会自动带上 `gsplatPS` / `gsplatModifyPS`；再 include 一次 ⇒ `normExp` / `modifySplatColor` 重复定义 ⇒ 编译失败、每帧 invalid pipeline。自写片元只依赖 varying 名 + 自己的函数 |
+| 引擎的 Lint 面向 TS 源码 | WGSL 模板串里的**制表符**会触发 `no-tabs`（引擎源码是 tab 缩进，抄过来必须换成空格）|
+
+**卡在哪（下一步的唯一阻塞）**：材质换上了，但 **uniform 读不到 / 我们那份片元似乎没在跑**——
+把 `uProbeGain` 设成 0.25，画面**逐像素零变化**（`meanAbsDiff = 0`）。
+对照：unified 相对 per-instance 的差是 `meanAbsDiff = 43.8`，所以"零变化"不是量不出来。
+
+**下一步先做这个实验（唯一能分清两种可能）**：把 `uProbeGain` 的**默认值直接写成 0.25**
+（不用 setParameter）：
+* 画面立刻变暗 ⇒ 我们的片元在跑，**只是 uniform 没绑上**（怀疑 uniform 布局是建材质时按引擎源码
+  反射出来的，后换的 `shaderDesc` 里新增的 uniform 不在那份 layout 里）⇒ 解法是让新 uniform
+  在**建材质之前**就存在于引擎源码里，或换用引擎已有的 uniform 名。
+* 画面仍然不变 ⇒ 材质**根本没被用于绘制**，要往 `copyMaterialSettings` 的覆盖时机、
+  或 `meshInstance.material` 是否指向同一个对象去查。
+
+已排除：引擎覆盖时机晚于我们的钩子（试过"手动跑一次 onPreRender 再立刻设参数"，仍零变化）。
+
+**另外发现一个独立 bug（与材质无关，但挡路）**：`?unified=1` 这条 URL 开关会让**导入本身失败** ——
+`addComponent('gsplat', { unified: true })` 那条路在建组件时就断了（elements 只有 8 个、没有 splat 元素、
+`findComponents('gsplat')` = 0），实测两次都卡在导入里不返回。已定位到"**flag 在导入前为 true 就卡**"，
+与材质钩子无关（用短路开关 `__SPLATROOM_UNIFIED_MATERIAL_DISABLED__` 把整个钩子体短路掉，照样卡）。
+所以一期探针走的是"**先正常导入、再就地翻转 `comp.unified`**"那条已验证可用的路。
+这个 bug 值得单独查 —— 它挡住了"用 URL 开关做 A/B"这个最顺手的手段。
+
+## 5. 与本项目当前状态的关系
+
 ## 5. 与本项目当前状态的关系
 
 * 本项目主线**不含任何 compute 通路代码**（已回滚，`master @ b692601` 之后的工作树里没有 `spike/`）。
