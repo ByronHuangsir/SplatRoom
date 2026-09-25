@@ -52,6 +52,12 @@ const ATTRS = { vertex_position: 'POSITION' } as const;
 let cachedVertexSource: string | null = null;
 
 /**
+ * 已经强制重建过 work buffer 的 world → 版本号（幂等用）。
+ * 用 WeakMap 是为了不把引擎对象钉在内存里（world 销毁后条目自动消失）。
+ */
+const forcedWorldVersions = new WeakMap<object, number>();
+
+/**
  * 取引擎 hybrid 顶点着色器**已展开 #include** 之后的源码。
  *
  * 取的是全局 chunk 注册表里的那一份：它已经在启动时被 `ShaderChunks` 注册过，
@@ -283,4 +289,67 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
 /** 是否已经装在 unified 材质上（探针/套件断言用） */
 export function isUnifiedMaterialInstalled(scene: any): boolean {
     return collectUnifiedMaterials(scene).every(m => m.__splatRoomUnified === UNIFIED_MATERIAL_NAME);
+}
+
+/**
+ * unified 通路的**数据首传**：逼引擎把 splat 数据真正填进 work buffer 的三张贴图。
+ *
+ * ## 为什么必须补这一下（2026-09-25 实测，见 `docs/待办-引擎WebGPU-compute.md` §4t）
+ *
+ * 引擎只在 `GSplatWorld.markSorted()` 里做首传，且条件是 `!worldState.sortedBefore`：
+ *
+ *     markSorted(version, count, camera, updateBounds, result) {
+ *         const worldState = this._worldStates.get(version);
+ *         if (worldState && !worldState.sortedBefore) {          // ← 只有"从没排过序"才首传
+ *             worldState.sortedBefore = true;
+ *             this.rebuildWorkBuffer(worldState, count, false, camera, updateBounds);
+ *         }
+ *     }
+ *     bake(version, camera, updateBounds, result) {              // 之后每帧走这里
+ *         if (sortedState?.sortedBefore) {
+ *             if (this._workBufferRebuildRequired) this.rebuildWorkBuffer(sortedState, count, true, ...);
+ *             else result.sortNeeded = this.applyWorkBufferUpdates(sortedState, camera);
+ *         }
+ *     }
+ *
+ * 我们的用法是**导入完成后再把 `comp.unified` 翻成 true**，那一刻 worldState 已经
+ * `sortedBefore = true`（它是给别的通路建的、早就算过）⇒ 首传被永久跳过，
+ * 之后每帧只走增量路径 ⇒ 数据贴图全空 ⇒ 投影器把每个 splat 都判无效
+ * （实测 `renderCounter = 0`）⇒ `ProjectorWriteIndirectArgs` 把
+ * `numSplatsBuf[0]` / 间接绘制参数写成 0 ⇒ **一个图元都没有**（画面全空、且不报任何错）。
+ *
+ * 引擎自己留了强制入口：`world.invalidate({ workBuffer: true })` 会把
+ * `_workBufferRebuildRequired` 置真，下一帧 `bake()` 就走 `forceFullRebuild` 那条路。
+ *
+ * 幂等：**每个 world 每个版本只强制一次**（版本变了说明模型/放置集合变了，需要重传一次）。
+ *
+ * @returns 这一次是否真的触发了强制重建
+ */
+export function ensureUnifiedWorkBuffer(scene: any): boolean {
+    const director = scene?.app?.renderer?.gsplatDirector;
+    if (!director?.camerasMap) {
+        return false;
+    }
+    let forced = 0;
+    director.camerasMap.forEach((cameraData: any) => {
+        cameraData?.layersMap?.forEach((layerData: any) => {
+            const manager = layerData?.gsplatManager;
+            const world = manager?.world;
+            // 只认 GPU 排序那条路（与材质侧同一判据），别的通路没有 work buffer 这回事
+            if (!world || !manager?.renderer?.usesGpuSort) {
+                return;
+            }
+            const version = Number(world.currentVersion ?? 0);
+            if (forcedWorldVersions.get(world) === version) {
+                return;
+            }
+            if (typeof world.invalidate !== 'function') {
+                return;
+            }
+            world.invalidate({ workBuffer: true });
+            forcedWorldVersions.set(world, version);
+            forced++;
+        });
+    });
+    return forced > 0;
 }

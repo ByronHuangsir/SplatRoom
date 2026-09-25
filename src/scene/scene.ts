@@ -39,7 +39,7 @@ import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
 import { SplatOverlay } from '../splat/splat-overlay';
-import { ensureUnifiedMaterial } from '../splat/unified-material';
+import { ensureUnifiedMaterial, ensureUnifiedWorkBuffer } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
 // sort meshInstances by the aabb corner furthest from the camera
@@ -748,6 +748,7 @@ class Scene {
         return (globalThis as any).__SPLATROOM_UNIFIED__ === true;
     }
     private _unifiedMaterialInstalledLogged = false;
+    private _unifiedWorkBufferLogged = false;
 
     private onPreRender() {
         try {
@@ -789,6 +790,18 @@ class Scene {
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;
             console.log('[SplatRoom] unified 通路材质已装（引擎 GPU 排序 + 我们的着色器）');
+        }
+        // 同一条通路上还有一个**必须补的一次性动作**：让引擎把 splat 数据真正传进 work buffer。
+        // 引擎只在 `GSplatWorld.markSorted()` 里做这件事，且条件苛刻：
+        //     if (worldState && !worldState.sortedBefore) { ... rebuildWorkBuffer(...) }
+        // 我们是"导入完成后再把 comp.unified 翻成 true"，那一刻 worldState 已经 sortedBefore = true，
+        // 于是首传被永久跳过，之后每帧只走增量路径 ⇒ 三张数据贴图全空 ⇒ 投影器把每个 splat 都判无效
+        // （实测 renderCounter = 0）⇒ 间接绘制参数 instanceCount = 0 ⇒ **一个图元都没有**。
+        // 强制入口是 `world.invalidate({ workBuffer: true })`（下一帧走 forceFullRebuild 那条路）；
+        // 幂等靠"每个 world 每版本只强制一次"。
+        if (ensureUnifiedWorkBuffer(this) && !this._unifiedWorkBufferLogged) {
+            this._unifiedWorkBufferLogged = true;
+            console.log('[SplatRoom] unified 通路：已请求引擎全量重建 work buffer（补上被跳过的首传）');
         }
     }
 

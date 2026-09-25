@@ -934,40 +934,26 @@ raw = [0,0,0,0,0,0,0,0]
 | cull 输入 | JS 层截 `boundsBuffer.write` / `transformsBuffer.write` + 读 `frustumPlanes` | bound = `{center:(-0.0005, 0, -0.30), radius:1.1563, transformIndex:0}`；transforms = 单位阵（y 翻转）；6 个平面的有符号距离全为正（最小 0.549） | 按 cull 的 WGSL（`dist <= -radius` 才判不可见）**应当 visible = true** |
 | 派发 | 数 compute pass / `dispatchWorkgroups` / 提交 | 每 2 帧 20 个 compute pass、14 次 dispatch（cull 是 1 个 workgroup）、**这些 compute 与渲染在同一个 command buffer 里，且该 buffer 确实被 `queue.submit`** | 派发与提交都发生了 |
 | 校验错误 | `uncapturederror`（稳态重置后） | 0 条 | 没有报错可循 |
-| 链尾输出 | 读带 `COPY_SRC` 的 `numSplatsBuffer` / `sortElementCountBuffer`（每帧由 `writeIndirectArgs` 写） | 恒为 0 | 计数确实没产出 |
-| scatter | 读 `compactedSplatIds` | 仍是 `[0,1,2,...]` 初值 | scatter 从没写进去 |
-| **金丝雀** | 把区间表的 `splatCount` 改成 7（合法范围内）后渲染 1 帧 | 链尾仍是 0 | cull 没把金丝雀吞进去 |
-| **裸 compute A/B** | 用**完全不经过引擎**的裸管线（`data[0] = 42u`）写引擎自己的 `numSplatsBuffer`，再读回 | **读到 42** | 设备、buffer、提交、读回链路**全部正常** |
+| 链尾输出 | 读带 `COPY_SRC` 的 `numSplatsBuffer` / `sortElementCountBuffer`（每帧由 `writeIndirectArgs` 写） | 恒为 0 | 见 §4t：这是**结果**，不是原因 |
+| **偷换 writeArgs 的输出** | 把 `numSplatsBuf` 参数换成我自己可读的 buffer，再渲染 2 帧 | **收到 2000** | `IntervalWriteIndirectArgs` **执行正常、值也对** |
+| **裸 compute 读引擎自己的 buffer** | 裸管线把 `intervalsBuffer` / `countBuffer` 抄进我可读的 buffer | `intervals={splatCount:2000}`、**`countBuffer=[0,2000]`** | cull 与前缀和**都跑通了**（2000 个可见 splat 就在 `countBuffer[1]`） |
+| 投影器 | 读 `renderCounter` | **0** | 2048 个线程里没有一个判定为有效 splat ⇒ 它把 `numSplatsBuf[0]` 覆盖成 0 |
+| work buffer 上传 | 拦 `queue.writeTexture` / `copyBufferToTexture` | unified 期间 48×48 的数据贴图**一次上传都没有** | 投影器的输入是空的 |
 
-⇒ **结论：设备与缓冲都没问题；"compute 不落地"发生在引擎那批 compute 上** ——
-JS 层输入全对、dispatch 与 submit 都发生、0 条校验错，但 GPU 侧一个字节都没变。
-这正是本文档 §1 在阶段 0 spike 里量到的那个现象（标题里的"引擎侧 WebGPU compute 不落地"），
-现在用金丝雀 + 裸 compute 对照把它**在应用内的具体位置**（splat 区间压缩链）
-重新钉了一遍。
+⇒ **结论见 §4t**：JS 层输入全对、compute 全部正常执行、设备与缓冲都没问题；
+第一个 0 出现在**最前面**——引擎的 work buffer 首传被跳过，投影器因此没有任何输入数据。
 
-**⚠️ 本轮三次"读数无效"的教训（都会制造出"全 0"的假象，必须记下来）**：
+**⚠️ 本轮四次"读数无效"的教训（都会制造出"全 0"的假象，必须记下来）**：
 
 1. `copyBufferToBuffer` 的**拷贝长度不能超过目标 buffer 大小**（16B 的 buffer 抄 32B ⇒ 拷贝被拒 ⇒ staging 保持新建时的 0）；
-2. 源 buffer **必须有 `COPY_SRC`**：`intervalsBuffer`（STORAGE|COPY_DST）与 `countBuffer`（只有 STORAGE）都读不回来；
-3. `writeBuffer(buf, off, view, dataOffset, size)` 的 `size` **按元素个数**算（实测：`size=4` + `Uint32Array([11,22,33,44])` ⇒ 四个全落盘），引擎传 `numIntervals * 4` 是对的。
+2. 源 buffer **必须有 `COPY_SRC`**：`intervalsBuffer`（STORAGE|COPY_DST）与 `countBuffer`（只有 STORAGE）都读不回来
+   —— 想读它们只能用 §4t 的"裸 compute 抄一份"；
+3. `writeBuffer(buf, off, view, dataOffset, size)` 的 `size` **按元素个数**算（实测：`size=4` + `Uint32Array([11,22,33,44])` ⇒ 四个全落盘），引擎传 `numIntervals * 4` 是对的；
+4. **"某个计数是 0"必须先确认不是仪器问题**，而且**不要停在第一个 0 上**：
+   本轮真正的原因在最前面，中间所有环节其实都是好的。
 
-读数前先自证仪器可用（大小、usage、长度），否则"全 0"极可能是仪器假象 —— 这一条和
-§4l/§4m/§4p/§4q 的教训是同一件事。**
-
-### 4r. 现在的结论：unified 通路**画面从来没活过**，一期要重开
-
-* §4n 的"画面活了"作废（见 4q）；§4j 里"unified 画面是死的"其实是**对的**，
-  只是当时把原因归给了 `[Invalid RenderPipeline]`。
-* §4h/§4k/§4l/§4m 那些**机制**结论仍然成立且有用（片元必须写 `output.color1`、
-  `uniqueName` 必须随源码变化、顶点源要从全局 chunk 注册表拿）。
-  它们修好的是"**管线合法**"这一层 —— **是必要条件，不是充分条件**。
-* **卡点已经收敛到"引擎侧 compute 不落地"**（见上表最后一行的 A/B 对照），
-  不是着色器、不是材质状态、不是渲染目标、也不是我们的相机/Pass 接错。
-* 下一步只有两条路，都**不适合继续在完整应用里试**（每轮 build 20s + 导入 + 截图 ≈ 3 分钟）：
-  1. **干净环境对照**：拿官方 gsplat 示例页（那里 unified 是活的）跑同一份模型，
-     逐项 diff 我们少了哪次调用/哪个初始化 —— 这是本文档开头就建议过的做法；
-  2. **引擎侧**：读 `Compute`/`WebgpuCompute` 的 `applyParameters` / `updateBindGroup` /
-     `dispatch` 在"命令编码器由外部渲染循环掌管"时的行为差异（我们的 app 自己驱动 render loop）。
+读数前先自证仪器可用（大小、usage、长度），否则"全 0"极可能是仪器假象 —— 这一条与
+§4l/§4m/§4p/§4q 的教训是同一件事。
 
 ### 4s. 本轮为探针加的钩子（都在 `?unified=1` 之内，默认全关）
 
@@ -984,3 +970,72 @@ JS 层输入全对、dispatch 与 submit 都发生、0 条校验错，但 GPU �
 `src/splat/unified-material.ts` 在 `vsCover > 0` 时改用**我们那一份**顶点源。
 这些常量都进了 `uniqueName` 的内容散列（`hashSource`），所以换值一定会重编译 ——
 这正是 §4p 那次假结论的病根。
+
+### 4t. ✅✅ **根因找到了，而且修好了**：unified 通路的 work buffer 首传被永久跳过（2026-09-25 深夜）
+
+**一句话**：引擎只在"这个 world 从没排过序"时（`!worldState.sortedBefore`）才把 splat 数据传进
+work buffer；我们是**导入完成后再把 `comp.unified` 翻成 true**，那一刻它早就 `sortedBefore = true`，
+于是首传被永久跳过 ⇒ 三张数据贴图全空 ⇒ 投影器把每个 splat 都判无效（`renderCounter = 0`）
+⇒ `ProjectorWriteIndirectArgs` 把计数写成 0 ⇒ 间接绘制 `instanceCount = 0` ⇒ **一个图元都没有**。
+整条链上**没有任何一步报错**，这就是这个 bug 藏了这么久的原因。
+
+**引擎侧的代码（playcanvas.mjs）**：
+
+```js
+markSorted(version, count, camera, updateBounds, result) {        // :84995
+    const worldState = this._worldStates.get(version);
+    if (worldState && !worldState.sortedBefore) {                 // ← 只有"从没排过序"才首传
+        worldState.sortedBefore = true;
+        this.rebuildWorkBuffer(worldState, count, false, camera, updateBounds);
+    }
+}
+bake(version, camera, updateBounds, result) {                     // :85018  之后每帧走这里
+    const sortedState = this._worldStates.get(version);
+    if (sortedState?.sortedBefore) {
+        if (this._workBufferRebuildRequired) this.rebuildWorkBuffer(sortedState, count, true, ...);
+        else result.sortNeeded = this.applyWorkBufferUpdates(sortedState, camera);   // 增量，通常传 0 块
+    }
+}
+```
+
+**怎么钉到这一步的（每一步都是有效读数）**：
+
+| # | 手段 | 读数 |
+| --- | --- | --- |
+| 1 | 拦 `GPUQueue.writeTexture` / `copyBufferToTexture` | unified 期间 48×48 的三张数据贴图**一次上传都没有**（只有一张 2×1） |
+| 2 | 裸 compute 把 `countBuffer` 抄进可读 buffer | `[0, 2000]` ⇒ cull 与前缀和都跑通了 |
+| 3 | 偷换 `IntervalWriteIndirectArgs` 的 `numSplatsBuf` 参数 | 我的 buffer 收到 **2000** ⇒ 它也正常 |
+| 4 | 读 `renderCounter`（投影器自己的原子计数器） | **0** ⇒ 投影器一个有效 splat 都没算出 |
+| 5 | 读 `world.bufferCopyUploaded / bufferCopyTotal` 与 worldState | 首传那条路没走（`sortedBefore` 已经是 true） |
+
+**修复（入库，一行级）**：`src/splat/unified-material.ts` 新增 `ensureUnifiedWorkBuffer(scene)`，
+在渲染前的钩子里对每个 GPU-排序 world 做一次 `world.invalidate({ workBuffer: true })`
+（幂等：每个 world 每个版本只强制一次），下一帧 `bake()` 就走 `forceFullRebuild` 那条路。
+
+**验收（`_tmp/probe-unified-verified.cjs`，跑的是仓库代码，探针**没有**手动 invalidate）**：
+
+| 判据 | 修前 | 修后 |
+| --- | --- | --- |
+| `renderCounter`（投影器算出的有效 splat） | 0 | **1809** |
+| `numSplatsBuffer` / `sortElementCountBuffer`（= 绘制 instanceCount） | 0 | **1809** |
+| 画面亮度 `litPct`（luma > 60 的像素占比） | 3.84% | **42.79%** |
+| 画面均值 RGB | `[32.7, 31.9, 31.6]`（纯背景） | `[124.4, 113.2, 114.5]` |
+| **转相机 30° 的画面变化**（与着色无关的阳性对照） | 9.39%（那是世界层的房间，不是 splat） | **25.89%** |
+
+**意义**：这是这条通路第一次**真的画出 splat**（此前 §4n 那次"活了"是误判，见 §4q）。
+顺序与绘制同帧 ⇒ 理论上没有那 2 帧的排序滞后 —— 一期的**技术障碍到这里才算清掉**，
+后面的工作是"把我们的着色/几何/状态接到这条路上"（二期）。
+
+**同一个探针在大模型上也验过**（`test-layered.ply`，32 MB）：`renderCounter = numSplats =
+sortElementCount = 549230`、画面 `litPct` 43.2%、转 30° 变化 5.1%（该模型铺满视野，转动本身
+改变的比例就小）。⇒ 不是小模型才通的偶然。
+
+**已知的二期差距（不是 bug，是还没接）**：unified 通路的画面均值偏灰偏亮
+（`test-layered`：unified `[125,125,125]` vs per-instance `[50,69,120]`）——
+因为我们的调色/色彩管线在 per-instance 材质里，而这条路上目前只有"与引擎默认逐位等价"的片元。
+把调色（曲线/HSL/饱和度/对比）搬过来是一期之后的第一步。
+
+**顺带记一条工程教训**：这个 bug 之所以难找，是因为**失败模式完全静默** ——
+数据没传进贴图 → 投影器判无效 → 计数为 0 → 间接绘制画 0 个图元 → WebGPU 认为一切正常。
+排查这类问题的正确姿势是**从"链尾"往"链头"逐级读中间量**，而不是盯着最终画面猜。
+
