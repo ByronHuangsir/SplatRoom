@@ -154,42 +154,68 @@ pipeline**，于是每次派发都是静默空跑。修法与自检代码在 `2d
 
 **卡在哪（下一步的唯一阻塞）** —— 2026-09-25 走了三条路，全部失败，但每一步都留下了可复用的结论：
 
+> ### ⚠️⚠️ 2026-09-25 第五轮：**上面这张表的三条结论全部作废**
+>
+> 起因是我终于去做了本该**最先**做的那件事：**先证明探针看得见 unified 通路的新帧**。
+> 用的是与着色完全无关的阳性对照 —— **转相机 30°**，构图必须变。
+>
+> 新探针 `_tmp/probe-frame-visibility.cjs` 的结果：
+>
+> | 通路 | 转 30° 后的整屏变化 |
+> | --- | --- |
+> | per-instance | mad **14.97**，30.8% 像素变化 ✓ 探针能看见新帧 |
+> | unified | mad **0.116**，**0.48%** 像素变化 ✗ **探针看不到新帧** |
+>
+> 也就是说：**在 unified 通路下，相机转了 30° 画面几乎不动** —— 这不是"着色改动没生效"，
+> 而是**那条路的画面本身没有跟着相机更新**。用一个与着色无关的观测量做阳性对照，
+> 一眼就分开了"我的改动没生效"与"这条路的画面是死的"。
+>
+> 为什么画面是死的：**`[Invalid RenderPipeline]`**（WebGPU 校验错误，两条通路都有，
+> 但 unified 下画面因此停住）。一条渲染管线的校验错误会让那次 draw 被跳过，
+> 帧缓冲保留上一帧内容 ⇒ 表现为"画面冻结/停在旧帧"，只有 UI 之类少数像素在变
+> （正好对上那 0.48%）。
+>
+> **所以那三条着色覆盖路（`shaderDesc` / `gsplatModifyPS` / `gsplatModifyVS`）的"逐像素零变化"
+> 完全不能说明"引擎不采用我们的源码" —— 它们是在一条根本没在正常渲染的通路上量的。**
+> 我拿一个坏掉的量具下了三次结论，这是这一轮最该记住的教训。
+>
+> **正确的下一步顺序**：
+> 1. 先修 unified 通路的 `Invalid RenderPipeline`（拿到它的 WGSL 编译/校验报错原文，
+>    `device.createShaderModule` + `getCompilationInfo` 或者 `pushErrorScope('validation')`）；
+> 2. 再用"转相机"确认那条路的画面是活的（mad 应当与 per-instance 同量级）；
+> 3. **只有到这一步之后**，才重新做着色覆盖实验 —— 否则量出来的还是坏量具的读数。
+>
+> 顺带：`?unified=1`（URL 开关）那条路当初是能正常渲染的（meanLuma 25.95 / lit 51%），
+> 而 `comp.unified = true` 的**就地翻转**这条路画面是死的。两者不是同一件事 ——
+> 一期探针一直在用后者，这也是"零变化"的来源之一。
+
 | 试过的路 | 做法 | 结果 | 留下的结论 |
 | --- | --- | --- | --- |
-| ① 换 `material.shaderDesc` | 用我们自写的 vertex+fragment 整套换掉源码 | **画面逐像素零变化** | 引擎绘制时**不采用** `shaderDesc` 里的源码（三条证据：默认值写死 0.25 / 输出纯红 / 都零变化） |
-| ② 覆盖 `gsplatModifyPS` | 材质级 chunk 覆盖（引擎的默认片元会调 `modifySplatColor`） | 画面零变化 | **这条通路的颜色不是片元阶段决定的** —— 片元根本不参与着色 |
-| ③ 覆盖 `gsplatModifyVS` | 走投影 compute 的钩子（引擎 `_updateMaterial` 真的会读它） | 画面零变化 | 机制上是对的（见下），但要么 compute 没重编、要么**探针读到的不是新帧** |
+| ① 换 `material.shaderDesc` | 用我们自写的 vertex+fragment 整套换掉源码 | 画面逐像素零变化（**见上面的更正：在死画面上量的**） | 待重测 |
+| ② 覆盖 `gsplatModifyPS` | 材质级 chunk 覆盖 | 画面零变化（**同上，作废**） | 待重测 |
+| ③ 覆盖 `gsplatModifyVS` | 走投影 compute 的钩子 | 画面零变化（**同上，作废**） | 待重测 |
 
-**关键机制（这一轮最有价值的产出，已核过引擎源码）**：unified 通路的颜色**在投影 compute 里烘进
-`projCache`**，而那个 compute 的用户 chunk 取自**绘制材质**的同名 chunk ——
-`GSplatHybridRenderer` 投影派发时调 `_updateMaterial(material)`，而它（`playcanvas.mjs:86540-86553`）：
+**仍然成立的机制事实**（这些是从引擎源码读出来的，不依赖上面的测量）：
+unified 通路的颜色**在投影 compute 里烘进 `projCache`**，而那个 compute 的用户 chunk 取自
+**绘制材质**的同名 chunk —— `_updateMaterial`（`playcanvas.mjs:86540-86553`）读的是
+`gsplatModifyVS`，**不是** `gsplatModifyPS`。所以真要改那条路的颜色，入口是 `gsplatModifyVS`。
 
-```js
-const wgslChunks = material?.getShaderChunks?.(SHADERLANGUAGE_WGSL);
-this._userModifySource = wgslChunks?.get('gsplatModifyVS') ?? null;   // ← 读的是 VS，不是 PS
-```
+**探针有效性检查 —— 已做，结论是"看不见"**（所以上面那三条路的读数全部作废）：
 
-⇒ **想改 unified 通路的颜色必须覆盖 `gsplatModifyVS`**；覆盖 `gsplatModifyPS` 毫无作用
-（片元不参与着色）。这条以前不知道，是撞了几次才从源码里读出来的。
+用**与着色完全无关**的阳性对照（转相机 30°，构图必须变）量两条通路：
+per-instance mad **14.97** / 30.8% 像素变化（探针看得见）；
+unified mad **0.116** / **0.48%**（探针看不见）。
+⇒ 不是"探针截到缓存帧"这么简单，而是**unified 那条路的画面本身没跟着相机更新**
+（`[Invalid RenderPipeline]` 让 draw 被跳过、帧缓冲停在旧内容）。
 
-**我怀疑真正卡住的是探针而不是产品代码**（下一次必须先排除它）：
+**所以下一步的顺序是**：
+1. 修 unified 通路的 `Invalid RenderPipeline`（拿到 WGSL 编译/校验报错的原文）；
+2. 用"转相机"确认那条路的画面是活的（mad 应与 per-instance 同量级）；
+3. **然后**才重新做着色覆盖实验。
 
-三条**机制完全不同**的路（改材质源码 / 改片元 chunk / 改 compute chunk）得到的画面
-**完全一致到小数点后两位**（`meanLuma` 恒为 28.98、`litPct` 恒为 56.81）。
-而同一个探针在别处是有效的（导入模型让画面从 29.51 变到 69.83）。
-⇒ 高度怀疑 `shoot()` 截到的是**同一张缓存帧**：unified 通路的出帧可能与 per-instance 不同，
-探针那套"设 `renderNextFrame` 再等两帧 rAF"在 unified 下不足以保证画布真的更新。
-
-**下一次开工的第一件事（不是改产品代码）**：
-拿一个**与画面无关**的判据确认"探针真能读到 unified 通路的新帧" —— 例如
-在 unified 下把相机转 30° 再截图（构图必须变），或直接读 `projCache` / 用一个已知会变的状态。
-**只有先证明"探针能看见变化"，前面三条路的"零变化"才有意义**；
-否则我们可能一直在给一个读不出新帧的探针白改代码。
-
-**另一条并行思路（如果 ③ 确认没生效）**：绕开"改引擎材质"，直接用自己的
-`ShaderMaterial` 替换 `renderer._material` 整个对象（引擎每帧的 `copyMaterialSettings`
-会从组件材质拷设置过来，而组件的 `get/set material` 在 unified 下被引擎硬断开了，
-所以要挂到 renderer 上并自己管生命周期）。这条路代价更高但最彻底。
+**另一条并行思路**：绕开"改引擎材质"，直接用自己的 `ShaderMaterial` 替换 `renderer._material`
+整个对象（引擎每帧的 `copyMaterialSettings` 会从组件材质拷设置，而组件的 `get/set material`
+在 unified 下被引擎硬断开了，所以要挂到 renderer 上并自己管生命周期）。代价更高但最彻底。
 
 **为什么这一段值得单独开项目 / 建议先在干净环境里做**：
 本轮在一个完整的应用里做这种引擎级实验，每一轮都是 **build(20s) + 导入 + 截图** 约 3 分钟，
