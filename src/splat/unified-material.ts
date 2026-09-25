@@ -222,4 +222,3 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
 export function isUnifiedMaterialInstalled(scene: any): boolean {
     return collectUnifiedMaterials(scene).every(m => m.__splatRoomUnified === UNIFIED_MATERIAL_NAME);
 }
-
