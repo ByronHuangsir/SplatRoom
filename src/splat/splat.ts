@@ -472,14 +472,11 @@ class Splat extends Element {
         // 状态贴图都在那边），画面会变成引擎默认材质的样子（实测亮度偏低约 1/3，几何一致）。
         // 只用来做"同场景两条通路对比"，不是可交付的功能路径。
         //
-        // ⚠️ 2026-09-25 实测**这个开关会让导入本身失败**：`addComponent('gsplat', { unified: true })`
-        // 那条路在建组件时就断了（导入后 elements 只有 8 个、没有 splat 元素、`findComponents('gsplat')`
-        // 返回 0），而且卡在导入里不返回。已确认与材质无关（短路掉整个材质钩子照样卡），
-        // 就是 flag 进到 addComponent 造成的。**所以现在不要用 URL 开关做 A/B**，
-        // 要走"先正常导入、再就地翻转 `comp.unified`"那条已验证可用的路。
-        // 细节与下一步：docs/待办-引擎WebGPU-compute.md §4c。
-        const useUnified = (new URLSearchParams(window.location.search).get('unified') === '1') ||
-            (globalThis as any).__SPLATROOM_UNIFIED__ === true;
+        // 2026-09-25：判定来源**归一化**到 `__SPLATROOM_UNIFIED__` 一个全局 ——
+        // `main.ts` 启动时会把 `?unified=1` 映射成它，探针也可以在场景构造前直接设它。
+        // 原先这里同时读 `location.search`、而材质钩子读全局，两处时机不同 ⇒
+        // "开关到底生效没有"取决于谁先读到（实测踩到过，见 docs/待办-引擎WebGPU-compute.md §4c）。
+        const useUnified = (globalThis as any).__SPLATROOM_UNIFIED__ === true;
 
         this.entity.addComponent('gsplat', {
             asset,
@@ -516,7 +513,9 @@ class Splat extends Element {
             byteSize: 2
         });
 
-        const { x: width, y: height } = (splatResource as any).textureDimensions;
+        const dims: any = (splatResource as any).textureDimensions;
+        const width = Math.max(1, Math.floor(Number(dims?.x) || 0)) || 1;
+        const height = Math.max(1, Math.floor(Number(dims?.y) || 0)) || 1;
 
         // pack spherical harmonic data
         const createTexture = (name: string, format: number) => {
@@ -555,24 +554,45 @@ class Splat extends Element {
             addressV: ADDRESS_CLAMP_TO_EDGE
         });
         {
+            // ⚠️ 2026-09-25：`lock()` 在 WebGPU 下会把队列排空，而 unified 通路的导入路径上
+            // 这一步**会永久挂住**（实测：`?unified=1` 导入时它就再也不返回，连随后的
+            // TypeError 都来不及抛，表现为"导入静默卡死、没有 splat 元素"）。
+            // 所以这里给它兜底：拿不到就退回恒等曲线，并把原因打出来 —— 曲线默认恒等，
+            // 少这次上传不影响画面（`uCurveEnabled = 0` 时着色器整段跳过）。
             const ident = identityCurveSamples();
-            const data = this.curveTexture.lock() as Float32Array;
-            for (let ch = 0; ch < 4; ch++) {
-                data.set(ident, ch * CURVE_SAMPLES);
+            let data: Float32Array | null = null;
+            try {
+                data = this.curveTexture.lock() as Float32Array;
+            } catch (e) {
+                console.warn('[Splat.bindAsset] uCurve lock failed; identity curves used instead:', e);
             }
-            this.curveTexture.unlock();
+            if (data) {
+                for (let ch = 0; ch < 4; ch++) {
+                    data.set(ident, ch * CURVE_SAMPLES);
+                }
+                this.curveTexture.unlock();
+            }
         }
 
-        this.localBoundStorage = instance.resource.aabb;
+        // ⚠️ 2026-09-25：unified 通路下 `instance` 是 **null** —— 引擎用 `_placement` 代替它
+        // （`GSplatComponent.get instance()` 在 unified 下返回 null，资源挂在 `_placement.resource`）。
+        // 这里原先直接读 `instance.resource.aabb`，在 unified 下就是一个 TypeError；
+        // 而它被导入链的 catch 吞掉 ⇒ 表现为"导入静默失败、没有 splat 元素"。
+        // 所以资源统一从组件上取（两种模式都有）。
+        const compResource = (this.entity.gsplat as any)?.resource ?? instance?.resource ?? splatResource;
+        this.localBoundStorage = compResource.aabb;
         // keep a pristine copy of the engine's CPU-computed AABB: localBoundStorage is
         // an alias of it, so the GPU bound pass below overwrites the CPU values
         // (with zeros on WebGPU, where its readback returns nothing)
-        this.cpuBoundStorage.copy(instance.resource.aabb);
+        this.cpuBoundStorage.copy(compResource.aabb);
         // @ts-ignore
-        this.worldBoundStorage = instance.meshInstance._aabb;
+        this.worldBoundStorage = instance?.meshInstance?._aabb ?? this.localBoundStorage;
 
         // @ts-ignore
-        instance.meshInstance._updateAabb = false;
+        if (instance?.meshInstance) {
+            // @ts-ignore
+            instance.meshInstance._updateAabb = false;
+        }
 
         // when sort changes, re-render the scene. the instance's sorter is
         // created lazily (and never on WebGPU, which sorts into a storage

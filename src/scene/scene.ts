@@ -39,6 +39,7 @@ import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
 import { SplatOverlay } from '../splat/splat-overlay';
+import { ensureUnifiedMaterial } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
 // sort meshInstances by the aabb corner furthest from the camera
@@ -735,15 +736,51 @@ class Scene {
         }
     }
 
+    // unified（引擎 GPU 排序）实验通路的开关：**只认 `__SPLATROOM_UNIFIED__` 这一个全局**，默认全关。
+    // `main.ts` 启动时会把 `?unified=1` 归一化成它（唯一判定来源），探针也可以在场景构造前直接设。
+    //
+    // ⚠️ 必须是**读取时判定**（getter），不能在字段初始化时算一次 —— Scene 在页面加载早期就构造完，
+    // 那时 `__SPLATROOM_UNIFIED__` 还没被探针/脚本设上，算一次就永远为 false
+    // （实测踩过：钩子一次都不跑、句柄永远拿不到）。
+    // ⚠️ 也**不要**在这里再读一次 `location.search`：两处判定来源不同、时机不同，
+    // "开关到底生效没有"就取决于谁先读到（这正是 2026-09-25 踩到的那个坑）。
+    private get _unifiedMaterialEnabled(): boolean {
+        return (globalThis as any).__SPLATROOM_UNIFIED__ === true;
+    }
+    private _unifiedMaterialInstalledLogged = false;
+
     private onPreRender() {
         try {
             this.onPreRenderInner();
+            this.ensureUnifiedMaterialHook();
         } catch (e) {
             // 渲染循环全局防崩溃：onPreRender 内的任何异常都不允许向上抛给
             // PlayCanvas 渲染循环（否则整个 app.render() 中断，画面冻结黑屏）。
             // 记录告警并清理关键状态，让下一帧恢复。
             this.reportRenderError('prerender', e);
             this.canvasResize = null;
+        }
+    }
+
+    /**
+     * unified（引擎 GPU 排序）实验通路：每帧渲染前确保那条路用的是我们的材质。
+     *
+     * 为什么必须**每帧**：引擎的 `GSplatManager.update()` 每帧都会拿自己新建的 source material
+     * 去覆盖 hybrid renderer 的材质（`copyMaterialSettings`），一次性装会在下一帧被冲掉。
+     * 为什么放这里而不是 element：那个材质是**按 layer** 建的
+     * （`app.renderer.gsplatDirector → camerasMap → layersMap → gsplatManager`），
+     * 不属于任何一个 splat 元素。
+     *
+     * 默认完全关闭（只认 `?unified=1` / `__SPLATROOM_UNIFIED__`），所以主线行为零变化。
+     */
+    private ensureUnifiedMaterialHook() {
+        if (!this._unifiedMaterialEnabled) {
+            return;
+        }
+        const ok = ensureUnifiedMaterial(this);
+        if (ok && !this._unifiedMaterialInstalledLogged) {
+            this._unifiedMaterialInstalledLogged = true;
+            console.log('[SplatRoom] unified 通路材质已装（引擎 GPU 排序 + 我们的着色器）');
         }
     }
 

@@ -203,6 +203,47 @@ this._userModifySource = wgslChunks?.get('gsplatModifyVS') ?? null;   // ← 读
 所以一期探针走的是"**先正常导入、再就地翻转 `comp.unified`**"那条已验证可用的路。
 这个 bug 值得单独查 —— 它挡住了"用 URL 开关做 A/B"这个最顺手的手段。
 
+### 4d. 那个"导入失败"的 bug 已定位到行（2026-09-25 第三轮）
+
+**现象**（最小复现 `_tmp/verify-unified-url-import.cjs`，A/B 同模型）：
+
+| 加载方式 | `import()` 结果 | elements | splat 元素 | gsplat 组件 |
+| --- | --- | --- | --- | --- |
+| `?gpu=webgpu` | **resolved**，1024 ms | 9 | 1 | 1 |
+| `?gpu=webgpu&unified=1` | **永远 pending**（30 s 无果） | 8 | 0 | 0 |
+
+**定位过程**（临时插桩 `[SRDBG]`，已全部撤除）：导入链一路走到
+`B:loadGSplatDataAsync → E:createGSplatAsset → F:new-Splat → J:before-bindAsset-call →
+G:addComponent → G2:addComponent-returned → I:textureDimensions → K1/K2/K3`，
+**之后不再有任何日志**。也就是说卡在 `curveTexture.lock()` 附近，而它**既不返回也不抛异常**。
+
+紧跟其后的那一段里有一处**确定的缺陷**（已修，见下）：unified 模式下
+`GSplatComponent.get instance()` 返回 **null**（引擎改用 `_placement`），而代码直接读
+`instance.resource.aabb` ⇒ 一个 TypeError。它被导入链的 catch 吞掉，
+所以表现正是"导入静默失败、没有 splat 元素"。
+
+**已修（本轮入库）**：
+1. 资源统一从组件上取：`(comp as any).resource ?? instance?.resource ?? splatResource`
+   —— 两种模式都有，不再假设 `instance` 存在；
+2. `instance.meshInstance` 相关三行全部加守卫；
+3. `curveTexture.lock()` 包 try/catch（拿不到就退回恒等曲线，曲线默认恒等，画面无差）。
+
+**仍然卡住**：修完上面三条，`?unified=1` 的导入**依旧 pending**。所以 `lock()` 不是抛异常而是
+**真的挂住** —— 说明此时 WebGPU 队列已经被堵死，`lock()` 在等一个永远不来的回读。
+下一步要查的是"unified 模式下导入时是什么把队列堵住的"：
+嫌疑最大的是在**没有 `instance` 的情况下仍然上传了 per-instance 的贴图/属性**
+（`splatState` / `splatTransform` / 顶点属性那些 `setParameter` 都还是按 per-instance 假定的），
+以及 `updateState()` / `updateMaterial` 在 placement 模式下被调用。
+
+**结论**：这个 bug 的真实性质不是"URL 开关坏了"，而是
+**unified 模式下的 `bindAsset` 整段都还是按 per-instance 写的**（instance / 贴图 / 属性 / 状态上传），
+所以"用 URL 开关做 A/B"在修完这一整段之前都不可靠 —— 一期探针继续走
+"先正常导入、再就地翻转 `comp.unified`"那条已验证可用的路。
+
+**开关判定来源已归一化（本轮入库）**：`main.ts` 启动时把 `?unified=1` 映射成
+`__SPLATROOM_UNIFIED__`，`splat.ts` 与 `scene.ts` 都只读这一个全局
+（原先两处各自读、时机不同，"开关到底生效没有"取决于谁先读到 —— 这也是本轮踩到的坑之一）。
+
 ## 5. 与本项目当前状态的关系
 
 ## 5. 与本项目当前状态的关系

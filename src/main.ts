@@ -205,6 +205,19 @@ const main = async () => {
     // browser without WebGPU still starts on WebGL2 instead of failing.
     const urlArgs = getURLArgs();
     const gpuOverride = (urlArgs as any)?.gpu;
+
+    // unified（引擎 GPU 排序）实验开关：**在这里就把 URL 参数归一化到全局**。
+    //
+    // 为什么必须归一化：这个开关原先被两处各自读一次 —— `splat.ts` 的 bindAsset 直接读
+    // `location.search`，`scene.ts` 的材质钩子读 `__SPLATROOM_UNIFIED__`。
+    // 两处判定来源不同、时机也不同（Scene 在页面加载早期就构造完），结果是
+    // "URL 开关到底生效了没有"取决于谁先读到 —— 实测就是这么踩到的
+    // （钩子一次都不跑、句柄永远拿不到；见 docs/待办-引擎WebGPU-compute.md §4c）。
+    // 归一化之后下游只认这一个全局，探针也可以在场景构造**之前**把它打开。
+    if ((urlArgs as any)?.unified === '1') {
+        (globalThis as any).__SPLATROOM_UNIFIED__ = true;
+    }
+
     const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
         gpuOverride :
         (getGpuBackendPref() ?? 'webgl2');
