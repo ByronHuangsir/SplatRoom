@@ -503,6 +503,51 @@ if (!shader) { … 真正建着色器 … programLibrary.setCachedShader(options
 这样就完全不需要第二个输出。代价是要知道 RT1 在 unified 下是否真的没人读
 （我们 per-instance 材质往 RT1 写选区覆盖，轮廓/底衬 pass 读它）。
 
+### 4l. ⚠️ 第十二轮：**我的探针没打开材质钩子的开关** —— 前面几轮的"修复无效"全部是无效读数
+
+按用户的要求动手实现（自写片元写两个输出 + 新 `uniqueName` + `fragmentOutputTypes: ['vec4','vec4']`），
+改完测了两轮，错误数**一点没动**（189~190、两类错误都在）。按惯例该继续查产品代码 ——
+但这次先查了**量具**，结果又是量具：
+
+**我的探针 `_tmp/probe-pipeline-error.cjs` 只翻转了组件字段 `comp.unified = true`，
+从来没有设 `window.__SPLATROOM_UNIFIED__`。** 而我们的材质钩子
+（`scene.ts` 的 `_unifiedMaterialEnabled`）**只认那个全局**（判定来源归一化之后就是这样）。
+⇒ 钩子在第一行 `if (!this._unifiedMaterialEnabled) return;` 就早退了
+⇒ **修复代码一次都没跑**。三条证据：
+
+1. 新加的 `__SPLATROOM_UNIFIED_HOOK_STATE__` 一直是 `null`（钩子没进函数体）；
+2. `__SPLATROOM_UNIFIED_INSTALL_STATE__` 也是 `null`（没走到安装那一步）；
+3. 但 `scene.ts` 与构建产物里这两个钩子都在。
+
+**所以结论要改**：§4i 里写的"补 `fragmentOutputTypes` 没生效"、§4k 里写的
+"路 A 是空操作"——**这两条的测量都是在"修复没运行"的状态下做的，都不能作为
+"这个修法不行"的证据**。（§4k 里"场景级材质 `shaderDesc` 为 null、我那个守卫会 early-return"
+这条**代码事实**仍然成立；但"错误数没降"不能归因于它。）
+
+**探针修好之后（真的设了全局）**，状态立刻可见了：
+
+| 观测 | 值 |
+| --- | --- |
+| `__SPLATROOM_UNIFIED_HOOK_STATE__` | `{reached: true, collected: 1}` ⇒ 钩子跑到了、收集到 1 块材质 |
+| `__SPLATROOM_UNIFIED_INSTALL_STATE__` | `{hasVertexSource: false, vertexLen: 0, currentName: null, wantName: "SplatRoomUnifiedMaterial-1700-292"}` |
+| shader modules | 12 → **27**（比之前多 2 个，说明确实多编译了东西） |
+| `createRenderPipeline` | 6 → 9 |
+| 目标错误 | **仍在**（4 条 `Color target … targets[1]` + 2 条 inherited） |
+
+⇒ **下一个明确的阻塞**：安装被我自己的守卫挡住了 —— `hasVertexSource: false`。
+我用的顶点源是 `material.shader?.definition?.vshader`（"引擎已展开的 hybrid 顶点"），
+**但那块材质在编译之前 `shader` 为空** ⇒ 永远拿不到 ⇒ `if (vs && …)` 永不成立。
+（顺带说明：这块材质**看起来确实就是绘制材质** —— 装它的过程让 `createRenderPipeline`
+从 6 涨到 9，说明我们改的东西进了编译。）
+
+**下一步（明确）**：换一个**不依赖已编译 shader** 的顶点源取法。三条候选：
+1. 用 `ShaderChunks.get(device, SHADERLANGUAGE_WGSL).get('gsplatHybridVS')` 拿原始 chunk，
+   交给材质自己展开（`shaderDesc` 的 `vertexCode` 支持含 `#include` 的源）；
+2. 引擎的 `shaderDesc` setter 不支持 `vertexChunk`，所以走 `ShaderUtils.createShader` 那条路；
+3. 干脆先不换顶点 —— 只把 `fragmentOutputTypes` 设成两路并发起编译（片元仍是引擎那份），
+   先看**错误是否减少**（这只验证"输出路数"这一环，不动顶点）。
+
+
 
 
 

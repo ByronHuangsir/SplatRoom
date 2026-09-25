@@ -197,3 +197,85 @@ fn modifySplatColor(center: vec3f, color: ptr<function, vec4f>) {
 `;
 
 export { unifiedModifyVS };
+
+// ===== 自写片元：必须同时写 `output.color` 与 `output.color1` =====
+//
+// 为什么必须自己写一整份（`docs/待办-引擎WebGPU-compute.md` §4h/§4k）：
+// splat pass 的目标是**两个颜色附件的 MRT**（`camera.ts` 的 splatTarget：
+// RT0 = 场景色、RT1 = 选区覆盖），而引擎自带那份片元（`gsplat_default3`）在 forward 路径里
+// **只写 `output.color`**（`output.color1` 只出现在 `#ifdef PICK_PASS` 里）
+// ⇒ RT1 有 writeMask 却没有对应输出 ⇒ WebGPU 校验失败：
+//   "Color target has no corresponding fragment stage output ... targets[1]"
+// 而 `createRenderPipeline` **不抛异常**（只返回无效管线）⇒ 画面冻死、错误隐身。
+//
+// 三条硬约束（都踩过）：
+//   1. **不能 `#include` 任何引擎 chunk** —— 材质已自动带上 `gsplatPS` / `gsplatModifyPS`，
+//      再 include 一次会重复定义 `normExp` / `modifySplatColor` ⇒ 编译失败。
+//      所以这一份只依赖 varying 名（引擎按声明生成顶点输出/片元输入结构）与自己的函数。
+//   2. **不要在这里再声明 `uProbeGain`** —— 顶点侧的 `gsplatModifyVS` chunk 已经声明过它，
+//      同一个 WGSL 模块里重复声明会编译失败（这正是"chunk 与自写片元同模块"的坑）。
+//      所以这一份用常量做增益，只作为"我们的片元真的在跑"的证据。
+//   3. 颜色语义：`gaussianColor` 是 `half4`，rgb **已经 gamma 处理、且已乘 alpha**
+//      （顶点里做的），`w` 是 alpha；本份输出约定 `vec4(rgb * a, a)`（预乘）。
+const unifiedFragmentShader = /* wgsl */ `
+varying gaussianUV: half2;
+varying gaussianColor: half4;
+
+#ifdef PICK_PASS
+    uniform alphaClip: f32;
+#else
+    uniform alphaClipForward: f32;
+#endif
+#if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
+    varying @interpolate(flat) vPickId: u32;
+#endif
+
+// 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
+fn srNormExp(x: half) -> half {
+    let e4: half = half(0.01831563888873418);
+    return (exp(x * half(-4.0)) - e4) / (half(1.0) - e4);
+}
+
+// 判定用增益：先设 1.0，确认错误归零；再改成 0.25 确认"我们的片元真的在跑"。
+const SR_FRAG_GAIN: f32 = 1.0;
+
+@fragment
+fn fragmentMain(input: FragmentInput) -> FragmentOutput {
+    var output: FragmentOutput;
+    let A: half = dot(gaussianUV, gaussianUV);
+    if (A > half(1.0)) {
+        discard;
+    }
+    let alpha: half = srNormExp(A) * gaussianColor.a;
+
+    #ifdef PICK_PASS
+        if (alpha < half(uniform.alphaClip)) {
+            discard;
+        }
+        #ifdef GSPLAT_UNIFIED_ID
+            let id: u32 = vPickId;
+            output.color = vec4f(
+                f32((id >> 0u) & 0xFFu) / 255.0,
+                f32((id >> 8u) & 0xFFu) / 255.0,
+                f32((id >> 16u) & 0xFFu) / 255.0,
+                f32((id >> 24u) & 0xFFu) / 255.0
+            );
+        #else
+            output.color = vec4f(0.0, 0.0, 0.0, 0.0);
+        #endif
+    #else
+        if (alpha < half(uniform.alphaClipForward)) {
+            discard;
+        }
+        // RT0：场景色（rgb 已含一次 alpha，这里再乘 alpha 得到预乘输出）
+        let a: f32 = f32(alpha) * SR_FRAG_GAIN;
+        output.color = vec4f(vec3f(gaussianColor.xyz) * a, a);
+        // RT1：选区覆盖。一期先写零（选区着色属于二期），但**这一行是这次修复的核心**：
+        // 没有它，RT1 就没有对应的片元输出，管线校验直接失败。
+        output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+    #endif
+    return output;
+}
+`;
+
+export { unifiedFragmentShader };
