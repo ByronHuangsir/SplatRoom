@@ -177,6 +177,37 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         //      `uniqueName` 缂撳瓨锛坄programLibrary.getCachedShader`锛夛紝鍚嶅瓧涓嶅彉灏辨案杩滃懡涓棫鐫€鑹插櫒锛?
         //      鏀规簮鐮佷篃涓嶄細閲嶇紪璇戙€?
         //   3. 姣忓抚閮借纭锛堝紩鎿庣殑 `copyMaterialSettings` 浼氳鐩栬繖鍧楁潗璐級銆?
+        // ===== 第 3 条最小验证（2026-09-25，§4l）：只改"输出路数"，不动顶点、不动片元 =====
+        // 目的：单独验证"把 fragmentOutputTypes 设成两路"能否消掉那条
+        // `Color target has no corresponding fragment stage output ... targets[1]`。
+        // 片元仍是引擎那份（只写 output.color）—— 如果错误数**下降**，说明片元结构声明两路
+        // 就够满足校验（WebGPU 只看"有没有对应的片元输出"这一层）；如果**不变**，说明
+        // 必须真的写第二个输出，那就得走 §4l 的"换顶点源取法 + 自写片元"那条。
+        // 这个开关只为实验存在，默认关闭。
+        if ((globalThis as any).__SPLATROOM_UNIFIED_OUT_TYPES_ONLY__ === true) {
+            const d: any = material.shaderDesc;
+            const have = d && Array.isArray(d.fragmentOutputTypes) ? d.fragmentOutputTypes.length : 0;
+            if (have < 2) {
+                const wantOnly = `${UNIFIED_MATERIAL_NAME}-outtypes`;
+                if (material.uniqueName !== wantOnly) {
+                    material.shaderDesc = {
+                        uniqueName: wantOnly,
+                        attributes: d?.attributes,
+                        vertexCode: d?.vertexWGSL ?? d?.vertexGLSL,
+                        fragmentCode: d?.fragmentWGSL ?? d?.fragmentGLSL,
+                        shaderLanguage: SHADERLANGUAGE_WGSL,
+                        fragmentOutputTypes: ['vec4', 'vec4']
+                    };
+                    material.update();
+                    (globalThis as any).__SPLATROOM_OUTTYPES_ONLY_DONE__ = {
+                        uniqueName: wantOnly,
+                        hadVertexCode: !!(d?.vertexWGSL ?? d?.vertexGLSL),
+                        hadFragmentCode: !!(d?.fragmentWGSL ?? d?.fragmentGLSL)
+                    };
+                }
+            }
+        }
+
         const vs = material.shader?.definition?.vshader ?? null;
         const wantName = `${UNIFIED_MATERIAL_NAME}-${unifiedFragmentShader.length}-${unifiedModifyVS.length}`;
         // 排查用状态（挂在全局，探针读）：看清到底卡在哪一步

@@ -547,6 +547,43 @@ if (!shader) { … 真正建着色器 … programLibrary.setCachedShader(options
 3. 干脆先不换顶点 —— 只把 `fragmentOutputTypes` 设成两路并发起编译（片元仍是引擎那份），
    先看**错误是否减少**（这只验证"输出路数"这一环，不动顶点）。
 
+### 4m. ✅ 第 3 条最小验证做完了：**光声明两路输出不够，片元必须真的写第二个输出**
+
+按 §4l 的第 3 条做了最小实验（`__SPLATROOM_UNIFIED_OUT_TYPES_ONLY__`）：只把
+`fragmentOutputTypes` 设成 `['vec4','vec4']`、**不动顶点、不动片元**（片元仍是引擎那份）。
+
+**这次能确认改动真的生效了**（上一轮的教训：先看记录再看数字）：
+
+```
+outTypes-only 记录: {"uniqueName":"SplatRoomUnifiedMaterial-outtypes",
+                     "hadVertexCode":true, "hadFragmentCode":true}
+```
+
+⇒ `hadVertexCode: true` 说明**这块材质的 `shaderDesc` 是有源码的**（与"场景级材质没有 shaderDesc"
+是两回事），改动确实写进去了。而 `shader modules 12 → 27`、`createRenderPipeline 6 → 9`
+也说明它进了编译。
+
+**错误数：没动**（190 条 submit 校验错误；未捕获错误仍是 4 条 `Color target … targets[1]`
++ 2 条 inherited）。
+
+**结论（这就是我们要的答案）**：WebGPU 那条校验**不认"声明了几路输出"**，
+它认的是**片元真的写了那个附件**。所以：
+
+* `fragmentOutputTypes` 设成两路是**必要但不充分**的；
+* **必须**换成自写片元（真的写 `output.color1`）—— 也就是 §4l 里已经写好的那份
+  `unifiedFragmentShader`；
+* 唯一还挡着的就是**顶点源的取法**（`material.shader.definition.vshader` 在编译前取不到）。
+  换掉这一个取法，自写片元就能装上，然后再看错误数是否归零。
+
+**所以下一步只剩一件事**：把顶点源改成"不依赖已编译 shader"的取法。
+最省的做法是拿原始 chunk 交给材质自己展开：
+
+```ts
+const raw = ShaderChunks.get(device, SHADERLANGUAGE_WGSL)?.get?.('gsplatHybridVS') ?? null;
+// 然后 shaderDesc.vertexCode = raw（它含 #include，材质编译时会展开）
+```
+
+
 
 
 
