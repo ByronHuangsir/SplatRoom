@@ -67,6 +67,39 @@ varying gaussianColor: half4;
     var colorRamp: texture_2d<f32>;
     var colorRampSampler: sampler;
 #endif
+
+// ===== 我们自己的调色参数（与 per-instance 材质**同名同语义**，由 scene.ts 的 unified 钩子喂）=====
+// 为什么放在顶点：per-instance 通路就是在顶点做这一段的（每组 splat 一次），而且必须在
+// prepareOutputFromGamma 之前（那是 gamma 解码 + 可选 tonemap，做过就逆不回去）。
+// 名字与 per-instance 完全一致，这样两边的取值逻辑可以共用一份（见 src/splat/color-params.ts）。
+#ifndef PICK_PASS
+    uniform clrOffset: vec3f;
+    uniform clrScale: vec4f;
+    uniform saturation: f32;
+    uniform uCurveEnabled: f32;
+    var uCurve: texture_2d<f32>;
+    var uCurveSampler: sampler;
+
+    // 曲线查表：行 = 通道（0 主 / 1 R / 2 G / 3 B），**与 per-instance 的 curveLookup 逐字一致**
+    // （那里用 textureLoad + 手工线性插值，因为 33 个采样点落在 32 段上；这里照抄，避免两条通路
+    // 在曲线边缘上出现系统性偏差）。
+    fn srCurveLookup(xIn: f32, ch: i32) -> f32 {
+        let t: f32 = clamp(xIn, 0.0, 1.0) * 32.0;
+        let i0: i32 = i32(floor(t));
+        let i1: i32 = min(i0 + 1, 32);
+        let a: f32 = textureLoad(uCurve, vec2i(i0, ch), 0).r;
+        let b: f32 = textureLoad(uCurve, vec2i(i1, ch), 0).r;
+        return mix(a, b, t - f32(i0));
+    }
+    fn srApplyCurve(c: vec3f) -> vec3f {
+        let m: vec3f = vec3f(srCurveLookup(c.x, 0), srCurveLookup(c.y, 0), srCurveLookup(c.z, 0));
+        return vec3f(srCurveLookup(m.x, 1), srCurveLookup(m.y, 2), srCurveLookup(m.z, 3));
+    }
+    fn srApplySaturation(c: vec3f) -> vec3f {
+        let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
+        return grey + (c - grey) * uniform.saturation;
+    }
+#endif
 const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
 // 探针烘焙 3（§4s）：**绕过 projCache / viewport_size 直接把实例铺满屏幕**。
 // 用来回答"这块材质到底能不能把像素写到可见目标上"——如果铺满屏幕也不上屏，
@@ -155,9 +188,27 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         let outAlpha = alpha * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
         output.gaussianColor = half4(half3(rampColor), outAlpha);
     #else
+        // ===== 我们自己的调色（**与 per-instance 顶点逐字同一套**，见 splat-shader-wgsl.ts:341-396）=====
+        // 顺序必须一致，否则两条通路的画面在对数上就不等价：
+        //   clrScale/clrOffset（染色+亮度+黑白场+透明度）→ 曲线 → 饱和度 → prepareOutputFromGamma
+        // 注意这条通路**每 splat 一次**（不是每像素），与 per-instance 的代价结构相同。
+        // 也正因为在这里做，这段必须在 prepareOutputFromGamma **之前** —— 后者是"gamma 解码 +
+        // 可选 tonemap"，一旦解码就不能再逆回去做线性域的调色。
+        // ⚠️ clr 是 **half4**、alpha 是 **half**，而我们的调色参数是 f32 —— 必须显式转换。
+        // 实测踩过：写成 vec4f(clr.xyz, alpha) 会报
+        //   no matching constructor for 'vec4<f32>(vec3<f16>, f16)' ⇒ 编译失败 ⇒ 管线无效 ⇒ 整帧被丢弃。
+        var tinted: vec4f = vec4f(vec3f(clr.xyz), f32(alpha));
+        tinted = tinted * uniform.clrScale + vec4f(uniform.clrOffset, 0.0);
+        #ifndef PICK_PASS
+            if (uniform.uCurveEnabled > 0.5) {
+                tinted = vec4f(srApplyCurve(tinted.xyz), tinted.w);
+            }
+            tinted = vec4f(srApplySaturation(tinted.xyz), tinted.w);
+        #endif
+        let gradedAlpha: half = half(clamp(tinted.w, 0.0, 1.0));
         output.gaussianColor = half4(
-            half3(prepareOutputFromGamma(max(vec3f(clr.xyz), vec3f(0.0)), viewDepth)),
-            alpha
+            half3(prepareOutputFromGamma(max(tinted.xyz, vec3f(0.0)), viewDepth)),
+            gradedAlpha
         );
     #endif
     #ifndef DITHER_NONE
@@ -351,13 +402,23 @@ varying gaussianColor: half4;
     uniform alphaClip: f32;
 #else
     uniform alphaClipForward: f32;
-    // ===== 一期调色参数（引擎常规 material.setParameter 通道）=====
-    // 为什么在这里而不是 compute 的 gsplatModifyVS：那条通道已实测**不影响画面**
-    // （见 docs/待办-引擎WebGPU-compute.md §4p）；而片元侧的 uniform 走引擎常规通道，
-    // 与 alphaClipForward 同一条路，是这条通路上唯一被验证过能改变画面的着色位置。
-    // 中性值：saturation = 1、contrast = 0 ⇒ 整条链恒等（默认观感逐像素不变）。
-    uniform saturation: f32;
+    // ===== 二期：与 per-instance **同一条**调色链的后半段（片元侧）=====
+    // 分工与 per-instance 完全一致（见 splat-shader-wgsl.ts）：
+    //   顶点（每 splat 一次，且在 gamma 解码之前）：clrScale/clrOffset → 曲线 → 饱和度
+    //   片元（每像素一次，且在 gamma 解码之后）：高光 → 阴影 → 对比 → 逐通道 HSL
+    // 这是唯一能让两条通路在**非中性参数**下也对齐的排法：prepareOutputFromGamma 是
+    // gamma 解码 + 可选 tonemap，做过就逆不回去，所以线性域的那几步必须在顶点、在它之前。
+    // 中性值全部恒等（clrScale=1、clrOffset=0、曲线关、对比=0、高光/阴影=0、HSL=0）。
+    uniform highlights: f32;
+    uniform shadows: f32;
     uniform contrast: f32;
+    // HSL 逐通道（8 个色区打包成 2 个 vec4；A = [R,O,Y,G]，B = [A,B,P,M]）
+    uniform hslHueA: vec4f;
+    uniform hslHueB: vec4f;
+    uniform hslSatA: vec4f;
+    uniform hslSatB: vec4f;
+    uniform hslLumA: vec4f;
+    uniform hslLumB: vec4f;
 #endif
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
     varying @interpolate(flat) vPickId: u32;
@@ -369,14 +430,125 @@ fn srNormExp(x: half) -> half {
     return (exp(x * half(-4.0)) - e4) / (half(1.0) - e4);
 }
 
-// ---- 调色（与 per-instance 片元逐字同一套公式）----
-fn srApplySaturation(c: vec3f) -> vec3f {
-    let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
-    return grey + (c - grey) * uniform.saturation;
+// ---- 调色（与 per-instance 片元逐字同一套公式，见 splat-shader-wgsl.ts:480-601）----
+fn srApplyHighlights(c: vec3f) -> vec3f {
+    let lum: f32 = dot(c, vec3f(0.299, 0.587, 0.114));
+    let mask: f32 = smoothstep(0.4, 0.8, lum);
+    return c + c * mask * uniform.highlights * 0.5;
+}
+
+fn srApplyShadows(c: vec3f) -> vec3f {
+    let lum: f32 = dot(c, vec3f(0.299, 0.587, 0.114));
+    let mask: f32 = 1.0 - smoothstep(0.2, 0.5, lum);
+    return c + c * mask * uniform.shadows * 0.5;
 }
 
 fn srApplyContrast(c: vec3f) -> vec3f {
     return (c - vec3f(0.5)) * (1.0 + uniform.contrast) + vec3f(0.5);
+}
+
+// ---- 逐通道 HSL（Lightroom 风格，8 色区）----
+// 色区中心（色相空间 [0,1]）
+const SR_ZC_RED: f32     = 0.0;
+const SR_ZC_ORANGE: f32  = 30.0 / 360.0;
+const SR_ZC_YELLOW: f32  = 60.0 / 360.0;
+const SR_ZC_GREEN: f32   = 120.0 / 360.0;
+const SR_ZC_AQUA: f32    = 180.0 / 360.0;
+const SR_ZC_BLUE: f32    = 225.0 / 360.0;
+const SR_ZC_PURPLE: f32  = 270.0 / 360.0;
+const SR_ZC_MAGENTA: f32 = 315.0 / 360.0;
+
+fn srHueDistance(h1: f32, h2: f32) -> f32 {
+    let d: f32 = abs(h1 - h2);
+    return min(d, 1.0 - d);
+}
+
+fn srZoneWeight(hue: f32, center: f32) -> f32 {
+    let d: f32 = srHueDistance(hue, center);
+    return 1.0 - smoothstep(15.0 / 360.0, 45.0 / 360.0, d);
+}
+
+fn srRgb2hsl(c: vec3f) -> vec3f {
+    let maxC: f32 = max(c.r, max(c.g, c.b));
+    let minC: f32 = min(c.r, min(c.g, c.b));
+    let l: f32 = (maxC + minC) * 0.5;
+    let d: f32 = maxC - minC;
+    var h: f32 = 0.0;
+    var s: f32 = 0.0;
+    if (d > 0.0001) {
+        if (maxC == c.r) {
+            h = (c.g - c.b) / d % 6.0;
+            if (h < 0.0) { h = h + 6.0; }
+            h = h / 6.0;
+        } else if (maxC == c.g) {
+            h = ((c.b - c.r) / d + 2.0) / 6.0;
+        } else {
+            h = ((c.r - c.g) / d + 4.0) / 6.0;
+        }
+        s = d / (1.0 - abs(2.0 * l - 1.0) + 0.0001);
+    }
+    return vec3f(h, s, l);
+}
+
+fn srHue2rgb(p: f32, q: f32, tIn: f32) -> f32 {
+    var t: f32 = tIn;
+    if (t < 0.0) { t = t + 1.0; }
+    if (t > 1.0) { t = t - 1.0; }
+    if (t < 1.0 / 6.0) { return p + (q - p) * 6.0 * t; }
+    if (t < 0.5) { return q; }
+    if (t < 2.0 / 3.0) { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    return p;
+}
+
+fn srHsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+    if (s < 0.0001) { return vec3f(l); }
+    let q: f32 = select(l + s - l * s, l * (1.0 + s), l < 0.5);
+    let p: f32 = 2.0 * l - q;
+    return vec3f(
+        srHue2rgb(p, q, h + 1.0 / 3.0),
+        srHue2rgb(p, q, h),
+        srHue2rgb(p, q, h - 1.0 / 3.0)
+    );
+}
+
+fn srApplyPerChannelHSL(cIn: vec3f) -> vec3f {
+    // early-out：所有调整都为 0 时直接返回（默认状态，零成本）
+    let sum: vec4f = uniform.hslHueA + uniform.hslHueB + uniform.hslSatA + uniform.hslSatB + uniform.hslLumA + uniform.hslLumB;
+    if (dot(sum, sum) < 0.0001) { return cIn; }
+
+    let c: vec3f = clamp(cIn, vec3f(0.0), vec3f(1.0));
+    let hsl: vec3f = srRgb2hsl(c);
+    var h: f32 = hsl.x;
+    var s: f32 = hsl.y;
+    var l: f32 = hsl.z;
+
+    let w0: f32 = srZoneWeight(h, SR_ZC_RED);
+    let w1: f32 = srZoneWeight(h, SR_ZC_ORANGE);
+    let w2: f32 = srZoneWeight(h, SR_ZC_YELLOW);
+    let w3: f32 = srZoneWeight(h, SR_ZC_GREEN);
+    let w4: f32 = srZoneWeight(h, SR_ZC_AQUA);
+    let w5: f32 = srZoneWeight(h, SR_ZC_BLUE);
+    let w6: f32 = srZoneWeight(h, SR_ZC_PURPLE);
+    let w7: f32 = srZoneWeight(h, SR_ZC_MAGENTA);
+
+    let totalW: f32 = w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7;
+    let totalHue: f32 =
+        w0 * uniform.hslHueA.x + w1 * uniform.hslHueA.y + w2 * uniform.hslHueA.z + w3 * uniform.hslHueA.w +
+        w4 * uniform.hslHueB.x + w5 * uniform.hslHueB.y + w6 * uniform.hslHueB.z + w7 * uniform.hslHueB.w;
+    let totalSat: f32 =
+        w0 * uniform.hslSatA.x + w1 * uniform.hslSatA.y + w2 * uniform.hslSatA.z + w3 * uniform.hslSatA.w +
+        w4 * uniform.hslSatB.x + w5 * uniform.hslSatB.y + w6 * uniform.hslSatB.z + w7 * uniform.hslSatB.w;
+    let totalLum: f32 =
+        w0 * uniform.hslLumA.x + w1 * uniform.hslLumA.y + w2 * uniform.hslLumA.z + w3 * uniform.hslLumA.w +
+        w4 * uniform.hslLumB.x + w5 * uniform.hslLumB.y + w6 * uniform.hslLumB.z + w7 * uniform.hslLumB.w;
+
+    if (totalW > 0.0001) {
+        h = fract(h + totalHue / totalW * 0.5);
+        s = clamp(s + totalSat / totalW, 0.0, 1.0);
+        l = clamp(l + totalLum / totalW * 0.5, 0.0, 1.0);
+    }
+
+    return srHsl2rgb(h, s, l);
 }
 
 // 判定用增益：先设 1.0，确认错误归零；再改成 0.25 确认"我们的片元真的在跑"。
@@ -425,12 +597,15 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         if (alpha < half(uniform.alphaClipForward)) {
             discard;
         }
-        // 调色：gaussianColor.xyz 已含一次 alpha，先除以 alpha 还原成"颜色本身"，
-        // 调完再乘回去（中性参数下这一步是恒等，可逐像素自证）。
-        let aRaw: f32 = max(f32(alpha), 1e-5);
-        var c: vec3f = vec3f(gaussianColor.xyz) / aRaw;
+        // 调色（片元侧这一段，与 per-instance 片元**同序同公式**：高光 → 阴影 → 对比 → 逐通道 HSL）。
+        // 顶点侧那一段（clrScale/clrOffset → 曲线 → 饱和度）已经在 gamma 解码之前做过，
+        // 所以这里拿到的 gaussianColor.xyz 就是"解码后待做这几步"的颜色。
+        // ⚠️ 不要除以 alpha（详见下面那段注释）：gaussianColor.xyz 是颜色本身、w 才是 alpha。
+        var c: vec3f = vec3f(gaussianColor.xyz);
+        c = srApplyHighlights(c);
+        c = srApplyShadows(c);
         c = srApplyContrast(c);
-        c = srApplySaturation(c);
+        c = srApplyPerChannelHSL(c);
         // 探针烘焙：朝纯红推（阳性对照）
         c = mix(c, vec3f(1.0, 0.0, 0.0), SR_FRAG_RED);
         // RT0：场景色（预乘输出）

@@ -18,6 +18,7 @@ import {
     Vec3
 } from 'playcanvas';
 
+import { applySplatColorParams, splatColorParams } from './color-params';
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
@@ -1687,57 +1688,12 @@ class Splat extends Element {
         material.setParameter('unselectedClr', [unselectedClr.r, unselectedClr.g, unselectedClr.b, unselectedClr.a]);
         material.setParameter('lockedClr', [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a]);
 
-        // combine black pointer, white point and brightness
-        if (this._colorGradeEnabled) {
-            // 黑场/白场 → 有序区间 + 最小间距（**唯一实现**，与导出/直方图/范围选择共用）。
-            // 原这里单独写了一份：`denom = max(0.001, whitePoint - blackPoint)`、
-            // `offset = -blackPoint + brightness`。两处都错：
-            //   • 两值相等时（UI 把黑场滑块拉到底正好落在那个边界上）denom 掉到 0.001 ⇒ scale = 1000；
-            //   • offset 没乘 scale ⇒ 范围 ≠ 1 时"拉黑场"会把中间调整体抬亮（实测 0.29 → 0.99）。
-            // 两件事合起来就是用户报的"黑场拉到底变成过曝"。
-            const tone = toneRange(this.blackPoint, this.whitePoint);
-            const offset = tone.offsetBase + this.brightness;
-            const scale = tone.scale;
-
-            material.setParameter('clrOffset', [offset, offset, offset]);
-            material.setParameter('clrScale', [
-                scale * this.tintClr.r * (1 + this.temperature),
-                scale * this.tintClr.g,
-                scale * this.tintClr.b * (1 - this.temperature),
-                this.transparency
-            ]);
-
-            material.setParameter('saturation', this.saturation);
-            material.setParameter('highlights', this.highlights);
-            material.setParameter('shadows', this.shadows);
-            material.setParameter('contrast', this.contrast);
-            material.setParameter('showDeleted', this._showDeleted ? 1 : 0);
-            material.setParameter('hslHueA', [this._hslHue[0], this._hslHue[1], this._hslHue[2], this._hslHue[3]]);
-            material.setParameter('hslHueB', [this._hslHue[4], this._hslHue[5], this._hslHue[6], this._hslHue[7]]);
-            material.setParameter('hslSatA', [this._hslSat[0], this._hslSat[1], this._hslSat[2], this._hslSat[3]]);
-            material.setParameter('hslSatB', [this._hslSat[4], this._hslSat[5], this._hslSat[6], this._hslSat[7]]);
-            material.setParameter('hslLumA', [this._hslLum[0], this._hslLum[1], this._hslLum[2], this._hslLum[3]]);
-            material.setParameter('hslLumB', [this._hslLum[4], this._hslLum[5], this._hslLum[6], this._hslLum[7]]);
-            // 曲线调色：没有曲线时开关为 0，着色器整段跳过（画面零改动）
-            material.setParameter('uCurveEnabled', this._curveTables ? 1 : 0);
-        } else {
-            // bypass all color grading 閳?neutral values
-            material.setParameter('clrOffset', [0, 0, 0]);
-            material.setParameter('clrScale', [1, 1, 1, 1]);
-            material.setParameter('saturation', 1);
-            material.setParameter('highlights', 0);
-            material.setParameter('shadows', 0);
-            material.setParameter('contrast', 0);
-            material.setParameter('showDeleted', this._showDeleted ? 1 : 0);
-            material.setParameter('hslHueA', [0, 0, 0, 0]);
-            material.setParameter('hslHueB', [0, 0, 0, 0]);
-            material.setParameter('hslSatA', [0, 0, 0, 0]);
-            material.setParameter('hslSatB', [0, 0, 0, 0]);
-            material.setParameter('hslLumA', [0, 0, 0, 0]);
-            material.setParameter('hslLumB', [0, 0, 0, 0]);
-            // 调色整体关闭 ⇒ 曲线也一起关（与"关掉调色"的语义一致）
-            material.setParameter('uCurveEnabled', 0);
-        }
+        // 颜色分级参数：**与 unified 通路共用同一份推导**（`src/splat/color-params.ts`）。
+        // 为什么要抽出去：`?unified=1` 那条路的参数写在引擎每层的材质上，由 `scene.ts` 的钩子喂；
+        // 两边各写一遍"色阶 + 染色 + 色温 + 饱和度 + HSL"必然漂移，这个仓库因此吃过亏。
+        // 这里改成调用共享函数，取值与以前逐项一致（`colorGradeEnabled` 为 false 时全部中性）。
+        applySplatColorParams(material, splatColorParams(this));
+        material.setParameter('showDeleted', this._showDeleted ? 1 : 0);
         material.setParameter('transformPalette', this.transformPalette.texture);
 
         // oriented crop-box clipping (SplatRoom)

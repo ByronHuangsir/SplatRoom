@@ -35,6 +35,7 @@ import { MotionQuality } from '../core/motion-quality';
 import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePolicy } from '../core/splat-tier';
 import { DataProcessor } from '../data-processor/index';
 import { PCApp } from '../pc-app';
+import { splatColorParams } from '../splat/color-params';
 import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
@@ -783,9 +784,11 @@ class Scene {
         // 多模型时这条通路目前只反映最后一个（一期已知边界，二期再谈聚合）。
         const splats = this.getElementsByType(ElementType.splat) as any[];
         const s = splats.length ? splats[splats.length - 1] : null;
+        // 调色参数：**与 per-instance 同一份推导**（`src/splat/color-params.ts` 是唯一实现），
+        // 曲线 LUT 纹理也从元素上取（`uCurveEnabled = 0` 时着色器整段跳过，纹理内容无所谓）。
         const ok = ensureUnifiedMaterial(this, s ? {
-            saturation: typeof s.saturation === 'number' ? s.saturation : 1,
-            contrast: typeof s.contrast === 'number' ? s.contrast : 0
+            color: splatColorParams(s),
+            curveTexture: s.curveTexture
         } : {});
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;

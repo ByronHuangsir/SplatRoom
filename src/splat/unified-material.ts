@@ -26,24 +26,29 @@
  * 取投影结果与颜色，和我们 per-instance 那套（顶点属性 + 贴图）完全不同，没有可复用性。
  * 它是**必须的底座**：放在 `unified-shaders.ts` 里，出处与版本标注在那边。
  *
- * ## 当前阶段（一期）
+ * ## 当前阶段（二期：把我们的调色接过来）
  *
- * 只做**着色**（片元侧调色），几何/状态（变换调色板、选区、裁剪盒、特效）都还没迁移。
- * 片元现在与引擎默认**逐位等价**（`uProbeGain = 1` 时），用来先把地基验空：
- * 我们的源码真的被编译、我们的 uniform 真的能被读到、装完之后每一帧都还在。
+ * 顶点用**我们自己那一份** hybrid 顶点（`unified-shaders.ts` 的逐字拷贝 + 我们在
+ * `prepareOutputFromGamma` 之前插进去的那几步），片元用我们自己那一份；
+ * 调色参数由 `scene.ts` 的钩子从 `src/splat/color-params.ts`（与 per-instance 共用的同一份推导）
+ * 喂进来，uniform 名与 per-instance 完全一致：
+ *   顶点（每 splat）：clrScale/clrOffset → 曲线 → 饱和度
+ *   片元（每像素）：高光 → 阴影 → 对比 → 逐通道 HSL
+ * 仍未迁移：几何/状态（变换调色板、选区、裁剪盒、特效、环选）—— 那些要 per-splat 的 varyings。
  */
 import { ShaderChunks, SHADERLANGUAGE_WGSL } from 'playcanvas';
 
+import { applySplatColorParams, type SplatColorParams } from './color-params';
 import { bakeUnifiedFragmentShader, bakeUnifiedModifyVS, bakeUnifiedVertexShader, hashSource } from '../shaders/unified-shaders';
 
-/** 装到 unified 材质上的 uniform（一期的调色参数；中性值 = 与引擎默认逐像素一致） */
+/** 装到 unified 材质上的 uniform（与 per-instance 材质同名同语义，见 src/splat/color-params.ts） */
 export type UnifiedMaterialParams = {
     /** 调试用总增益，1 = 引擎默认；不等于 1 时画面必须整体变化（验证用） */
     probeGain?: number;
-    /** 饱和度：1 = 中性（与 per-instance 材质同名同语义） */
-    saturation?: number;
-    /** 对比度：0 = 中性 */
-    contrast?: number;
+    /** 颜色分级参数（缺省即中性：clrScale=1、clrOffset=0、饱和度=1、其余 0、曲线关） */
+    color?: SplatColorParams;
+    /** 曲线 LUT 纹理（33×4 R32F；没有曲线时不绑也可以，`uCurveEnabled = 0`） */
+    curveTexture?: unknown;
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
@@ -232,11 +237,14 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
                 return null;
             }
         })();
-        // 探针烘焙（§4s）：只有"铺满屏幕"这个实验需要**我们这一份**顶点源（引擎那一份里没有开关）。
-        // 平时（bake 关闭）仍然用引擎的原始 chunk，逐字不变。
+        // 顶点源：**始终用我们那一份**拷贝（引擎的逐字拷贝 + 我们在 prepareOutputFromGamma
+        // 之前插入的调色步骤）。为什么不再用引擎的原始 chunk：顶点侧那几步（clrScale/clrOffset →
+        // 曲线 → 饱和度）必须在 gamma 解码之前做，引擎那一份没有这些代码。
+        // 探针的 `vsCover` 烘焙也走同一份（常量默认 0 = 不烘焙）。
         const bakeGlobal = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
         const vsCover = bakeGlobal && typeof bakeGlobal.vsCover === 'number' ? bakeGlobal.vsCover : 0;
-        const bakedVs = vsCover > 0 ? bakeUnifiedVertexShader() : null;
+        void vsCover;
+        const bakedVs = bakeUnifiedVertexShader();
         const vertexSource = bakedVs ?? rawVs;
         // ⚠️ 缓存键必须含**内容散列**：只用长度会让"等长的改动"（例如烘焙值 0 → 1）
         // 复用同一个 uniqueName，引擎于是命中旧着色器、根本不重编译（实测踩过）。
@@ -273,9 +281,28 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
 
         const gain = typeof params.probeGain === 'number' ? params.probeGain : 1;
         material.setParameter('uProbeGain', gain);
-        // 一期调色参数（中性值：saturation = 1、contrast = 0 ⇒ 整条链恒等）
-        material.setParameter('saturation', typeof params.saturation === 'number' ? params.saturation : 1);
-        material.setParameter('contrast', typeof params.contrast === 'number' ? params.contrast : 0);
+        // 调色参数：与 per-instance **同一份推导**（`src/splat/color-params.ts`），uniform 名也相同。
+        // 缺省即中性（clrScale = 1、clrOffset = 0、饱和度 = 1、其余 0、曲线关）⇒ 画面与
+        // "只装了我们的着色器、没做任何调色"逐像素一致。
+        const color = params.color ?? {
+            clrOffset: [0, 0, 0] as [number, number, number],
+            clrScale: [1, 1, 1, 1] as [number, number, number, number],
+            saturation: 1,
+            highlights: 0,
+            shadows: 0,
+            contrast: 0,
+            hslHueA: [0, 0, 0, 0],
+            hslHueB: [0, 0, 0, 0],
+            hslSatA: [0, 0, 0, 0],
+            hslSatB: [0, 0, 0, 0],
+            hslLumA: [0, 0, 0, 0],
+            hslLumB: [0, 0, 0, 0],
+            uCurveEnabled: 0
+        };
+        applySplatColorParams(material, color);
+        if (params.curveTexture) {
+            material.setParameter('uCurve', params.curveTexture);
+        }
         touched++;
     }
 

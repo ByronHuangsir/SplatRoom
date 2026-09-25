@@ -1,5 +1,20 @@
 import type { Splat } from '../splat/splat';
-import { splatResourceOf } from '../splat/splat-resource';
+
+/**
+ * 取 gsplat 组件背后的资源（两条通路通用）。
+ *
+ * ⚠️ 这里是 `src/splat/splat-resource.ts` 里那个 `splatResourceOf` 的**内联副本**，
+ * 原因只有一个：`npm run verify:diag` 用 `node --experimental-strip-types` 直接跑本文件，
+ * 而 Node 的 ESM 解析要求**运行时**的 import 带 `.ts` 后缀 —— 带上之后 rollup 的 TS 插件会报
+ * TS5096（`allowImportingTsExtensions` 需要 noEmit，而 rollup 必须 emit），两条都不干净。
+ * 这三行逻辑足够小，重复一份比往构建/校验链里加特例更划算；改动时两处一起改。
+ */
+const splatResourceOfInDiagnostics = (component: any): any => {
+    if (!component) {
+        return null;
+    }
+    return component.instance?.resource ?? component.resource ?? component._placement?.resource ?? null;
+};
 
 // Facts that decide whether a loaded splat can actually be drawn.
 //
@@ -50,7 +65,7 @@ const renderDiagnostics = (splat: Splat) => {
     // 资源与绘制计数都在引擎的 world/manager 上（见 `src/splat/splat-resource.ts`）。
     // 这条通路必须走另一套判据，否则每次导入都会误报"loaded but cannot be displayed"。
     const unified = gsplat?.unified === true;
-    const resource = splatResourceOf(gsplat);
+    const resource = splatResourceOfInDiagnostics(gsplat);
     const device = splat?.scene?.graphicsDevice;
     const limits = (device as any)?.limits;
 

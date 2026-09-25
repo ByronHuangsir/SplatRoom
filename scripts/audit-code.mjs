@@ -152,6 +152,36 @@ const scanBrowserKill = (file, text) => {
 for (const [file, text] of outsideFiles) scanBrowserKill(file, text);
 for (const [file, text] of rootConfigs) scanBrowserKill(file, text);
 
+// ------------------------------------------- 反引号出现在 WGSL 模板字符串里
+//
+// 着色器源码写成 `const xxx = /* wgsl */ \`...\`` 的模板字符串，**注释里出现反引号就会提前
+// 结束模板**：文件本身仍是合法 TS（后面的内容会变成字符串/标识符），但 WGSL 被截断，
+// `npm run build` 会以 `'const' declarations must be initialized` 之类的语法错误失败 ——
+// 实测这一轮踩了三次，每次都以为是着色器错误。
+// 这里把它变成静态护栏：wgsl 模板内部的行不允许出现反引号。
+const wgslBacktickHits = [];
+const scanWgslBackticks = (file, text) => {
+    const lines = text.split('\n');
+    let inside = false;
+    lines.forEach((line, i) => {
+        if (!inside) {
+            if (/\/\*\s*wgsl\s*\*\/\s*`/.test(line)) inside = true;
+            return;
+        }
+        // 结束行：整行就是一个反引号（可能带分号/空白）
+        if (/^\s*`\s*;?\s*$/.test(line)) {
+            inside = false;
+            return;
+        }
+        if (line.includes('`')) {
+            wgslBacktickHits.push(`${file}:${i + 1}: ${line.trim().slice(0, 140)}`);
+        }
+    });
+};
+for (const [file, text] of sources) {
+    if (file.includes('/shaders/')) scanWgslBackticks(file, text);
+}
+
 const report = {
     totals: {
         sourceFiles: sources.size,
@@ -166,6 +196,7 @@ const report = {
     unusedDeps,
     tsconfigExcluded: excluded.filter(f => existsSync(join(root, f))),
     browserKillByName: browserKillHits,
+    wgslBacktick: wgslBacktickHits,
     escapes: {
         asAny: anyPerFile.reduce((n, e) => n + e.count, 0),
         asAnyTopFiles: anyPerFile.slice(0, 12),
@@ -192,6 +223,7 @@ if (process.argv.includes('--json')) {
     section('unused npm deps', unusedDeps, d => d);
     section('tsconfig-excluded files that exist', report.tsconfigExcluded, f => f);
     section('DANGER: kills a browser by process name', browserKillHits, l => l);
+    section('DANGER: backtick inside a WGSL template literal', wgslBacktickHits, l => l);
     section('as any per file', anyPerFile, e => `${String(e.count).padStart(4)}  ${e.file}`);
     section('@ts-ignore', report.escapes.tsIgnore, l => l);
     section('eslint-disable', report.escapes.eslintDisable, l => l);
