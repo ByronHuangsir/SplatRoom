@@ -665,6 +665,42 @@ minContribution / minDist / invRange / foveationStrength / foveationCenter`。
 （或者影响的部分不是我们以为的那一路）。**这一点必须在继续之前查清** ——
 否则又会变成"改了没反应，却不知道是通道错还是值错"。
 
+### 4p. ✅ 那笔账查清了：**`gsplatModifyVS` 的 `modifySplatColor` 不影响最终颜色**
+
+用"烘焙常量"绕开 uniform 这条路（`__SPLATROOM_UNIFIED_BAKE__`，默认关闭，
+探针 `_tmp/probe-bake-effects.cjs`）：
+
+| 组 | 烘焙 | install uniqueName |
+| --- | --- | --- |
+| 中性 | 无 | `SplatRoomUnifiedMaterial-1700-1nvnvq9` |
+| 灰 | `saturation: 0` | `…-1700-19gwpal` |
+| 红 | `red: 1` | `…-1700-zmi4pn` |
+
+**三组的 install uniqueName 互不相同**（说明三次都真的重编译了），
+而三张画面 **逐像素完全相同**：`meanRGB` 都是 `[32.71, 31.92, 31.62]`，
+`saturation=0` 与中性之差 `mad = 0`，**纯红阳性对照与中性之差也是 `mad = 0`**。
+
+⇒ **结论确定：`gsplatModifyVS` 里的 `modifySplatColor` 不会影响最终画面。**
+不是值的问题、不是缓存的问题（这两个都已排除），是**这条颜色通道在这个引擎版本/这条通路里不生效**。
+
+**排查过程中又踩到一个坑（值得记）**：第一版我用**源码长度**当缓存键
+（`wantName` 里放 `bakedModifyVS.length`），而烘焙值是 `toFixed(6)` 的**定长**字符串 ——
+`red: 0 → red: 1` 长度完全不变 ⇒ 缓存键不变 ⇒ 引擎按 uniqueName 命中旧着色器、**根本没收新源码**，
+于是那一轮测出"红色阳性对照没生效"其实是**测试自身的缺陷**。
+现在改成按**内容**散列（`hashSource`，FNV-1a）。**教训：能变的量必须进缓存键，且要能区分内容。**
+
+**这一步对一期的意义（重要，影响后面的路线）**：
+
+* 一期**不能**靠 `gsplatModifyVS` 做调色 —— 这条通道已排除；
+* 好消息是：**片元那一侧在我们手里**（自写片元已经装上、画面是活的、而且它同时写两路输出）。
+  引擎的常规 uniform 通道（`material.setParameter`）对片元是有效的
+  （`alphaClipForward` 等就是这样工作的），所以**全局调色参数应当走片元**；
+* 而"每 splat 的状态"（选区/删除/裁剪）需要 `GSplatVaryings` 把值送进片元 —— 那是二期的活。
+
+⇒ **下一步（明确）**：把饱和度/对比度（以及后续曲线/HSL）做进**我们那份自写片元**，
+用引擎常规的 `material.setParameter` 传参 —— 它是这条通路上唯一被验证过"能改变画面"的着色位置。
+
+
 
 
 

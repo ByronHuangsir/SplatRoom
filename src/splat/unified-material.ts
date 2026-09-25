@@ -34,7 +34,7 @@
  */
 import { ShaderChunks, SHADERLANGUAGE_WGSL } from 'playcanvas';
 
-import { unifiedModifyVS, unifiedFragmentShader } from '../shaders/unified-shaders';
+import { bakeUnifiedModifyVS, hashSource, unifiedFragmentShader } from '../shaders/unified-shaders';
 
 /** 瑁呭埌 unified 鏉愯川涓婄殑 uniform锛堜竴鏈熺殑璋冭壊鍙傛暟锛沬dentity 鍊?= 寮曟搸榛樿鐢婚潰锛?*/
 /** 装到 unified 材质上的 uniform（一期的调色参数；中性值 = 与引擎默认逐像素一致） */
@@ -160,9 +160,10 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         // 鍙湪**鍐呭鐪熺殑鍙樹簡**鏃舵墠鍐?chunk锛歚ShaderChunkMap.set()` 鍦ㄥ€间笉鍚屾椂浼?markDirty锛?
         // 鑰屽紩鎿庢覆鏌撳墠浼?`update()` 鈫?鍙戠幇 dirty 鈫?`clearVariants()` 鈬?姣忓抚閲嶇紪璇戙€?
         // 鎵€浠ヨ繖閲屽繀椤荤敤鍐呭姣旇緝鏉ヤ繚璇佸箓绛夛紙姣忓抚閮戒細璋冭繘鏉ワ級銆?
+        const bakedModifyVS = bakeUnifiedModifyVS();
         const chunks = material.shaderChunks?.wgsl;
-        if (chunks && chunks.get('gsplatModifyVS') !== unifiedModifyVS) {
-            chunks.set('gsplatModifyVS', unifiedModifyVS);
+        if (chunks && chunks.get('gsplatModifyVS') !== bakedModifyVS) {
+            chunks.set('gsplatModifyVS', bakedModifyVS);
             material.__splatRoomUnified = UNIFIED_MATERIAL_NAME;
             // 寮曟搸鑷繁浼氬湪娓叉煋鍓嶆竻鍙樹綋锛坄material.update()` 閲?`_shaderChunks.isDirty()` 鍒嗘敮锛夛紝
             // 杩欓噷鍐嶈皟涓€娆℃槸涓轰簡璁?杩欎竴甯у氨鐢熸晥"锛屼笉蹇呯瓑涓嬩竴甯с€?
@@ -226,7 +227,9 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
                 return null;
             }
         })();
-        const wantName = `${UNIFIED_MATERIAL_NAME}-${unifiedFragmentShader.length}-${unifiedModifyVS.length}`;
+        // ⚠️ 缓存键必须含**内容散列**：只用长度会让"等长的改动"（例如烘焙值 0 → 1）
+        // 复用同一个 uniqueName，引擎于是命中旧着色器、根本不重编译（实测踩过）。
+        const wantName = `${UNIFIED_MATERIAL_NAME}-${unifiedFragmentShader.length}-${hashSource(bakedModifyVS)}`;
         // 排查用状态（挂在全局，探针读）：看清到底卡在哪一步
         (globalThis as any).__SPLATROOM_UNIFIED_INSTALL_STATE__ = {
             hasVertexSource: !!rawVs,

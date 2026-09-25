@@ -208,9 +208,20 @@ uniform contrast: f32;
 
 const SR_SH_C0: f32 = 0.28209479177387814;
 
+// ===== 探针烘焙（默认关闭，见 docs/待办-引擎WebGPU-compute.md §4o/§4p）=====
+// 为什么需要它：投影 compute 的 uniform 布局是引擎写死的二十个字段，
+// 自定义 uniform（saturation / contrast / uProbeGain）**没有槽位** ⇒ 永远读到 0。
+// 所以"我们的调色到底有没有作用于 unified 画面"这件事，只能靠**把值烘成常量**来验证。
+// 烘焙值由构建侧注入（全局 __SPLATROOM_UNIFIED_BAKE__，默认 null = 不烘焙）。
+// 注意：本文件是模板字符串，注释里不能出现反引号。
+const SR_BAKE: bool = __SR_BAKE_ENABLED__;
+const SR_BAKE_SATURATION: f32 = __SR_BAKE_SATURATION__;
+const SR_BAKE_RED: f32 = __SR_BAKE_RED__;
+
 fn srApplySaturation(c: vec3f) -> vec3f {
     let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
-    return grey + (c - grey) * uniform.saturation;
+    let s: f32 = select(uniform.saturation, SR_BAKE_SATURATION, SR_BAKE);
+    return grey + (c - grey) * s;
 }
 
 fn srApplyContrast(c: vec3f) -> vec3f {
@@ -224,11 +235,53 @@ fn modifySplatColor(center: vec3f, color: ptr<function, vec4f>) {
     c = srApplyContrast(c);
     c = srApplySaturation(c);
     c = c * SR_SH_C0 + vec3f(0.5);
+    // 探针：把 rgb 朝纯红推（不可误认的阳性对照）
+    if (SR_BAKE_RED > 0.0) {
+        c = mix(c, vec3f(1.0, 0.0, 0.0) * SR_SH_C0 + vec3f(0.5), SR_BAKE_RED);
+    }
     *color = vec4f(c * uniform.uProbeGain, (*color).w);
 }
 `;
 
-export { unifiedModifyVS };
+/**
+ * 探针烘焙：把上面模板里的 `__SR_BAKE_*__` 占位换成具体常量。
+ *
+ * 为什么要用"占位 + 替换"而不是直接读全局：WGSL 常量必须是编译期字面量，
+ * 而探针是在页面里设全局的，源码必须在**构建时**就是合法的 WGSL。
+ * 默认（没有设置全局 __SPLATROOM_UNIFIED_BAKE__）走 false / 中性值 ⇒ 与未烘焙逐位一致。
+ *
+ * 全局 __SPLATROOM_UNIFIED_BAKE__ = { saturation?: number, red?: number }（只给探针用）：
+ *   - saturation: 0 ⇒ 直接验证"我们的调色有没有作用于画面"
+ *   - red: 1        ⇒ 不可误认的阳性对照（画面应变红）
+ */
+function bakeUnifiedModifyVS(): string {
+    const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
+    const enabled = !!bake;
+    const sat = bake && typeof bake.saturation === 'number' ? bake.saturation : 1;
+    const red = bake && typeof bake.red === 'number' ? bake.red : 0;
+    return unifiedModifyVS
+    .replace('__SR_BAKE_ENABLED__', enabled ? 'true' : 'false')
+    .replace('__SR_BAKE_SATURATION__', sat.toFixed(6))
+    .replace('__SR_BAKE_RED__', red.toFixed(6));
+}
+
+export { unifiedModifyVS, bakeUnifiedModifyVS, unifiedFragmentShader };
+
+/**
+ * 一个简单的字符串散列（FNV-1a，32 位），用来按**源码内容**生成稳定的缓存名。
+ *
+ * 为什么不能用长度当缓存键（实测踩过）：烘焙常量是 toFixed(6) 的定长数字，
+ * red: 0 → red: 1 这类改动**长度完全不变** ⇒ 缓存键不变 ⇒ 引擎按 uniqueName 命中旧着色器、
+ * **根本不重编译**（_tmp/probe-bake-effects.cjs 因此得出过一次假结论）。必须按内容生成键。
+ */
+export function hashSource(text: string): string {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+        h ^= text.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(36);
+}
 
 // ===== 自写片元：必须同时写 `output.color` 与 `output.color1` =====
 //
@@ -309,5 +362,3 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     return output;
 }
 `;
-
-export { unifiedFragmentShader };
