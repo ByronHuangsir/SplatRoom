@@ -338,6 +338,45 @@ RT1 = selection overlay" 那段注释）。而 **unified 通路引擎自己那�
 中间是靠**换判据**（`uncapturederror` 数错误）而不是靠继续猜。工具留在
 `_tmp/probe-pipeline-error.cjs`（钩子含自检 + 提交点包围 + uncapturederror）。
 
+### 4i. 第九轮：第一次修复尝试**没有生效**，以及为什么（下一步的具体方向）
+
+按 §4h 的推断动了手：在 `src/splat/unified-material.ts` 里，当检测到材质的
+`shaderDesc.fragmentOutputTypes` 不足两个时，用 `['vec4','vec4']` 重设一次 `shaderDesc`
+（思路：`FragmentOutput` 是按 `fragmentOutputTypes` 生成的，补成两个就应当声明 `color1`）。
+
+**结果：没生效。** 未捕获错误 382 → **380**，两类错误**都还在**：
+
+```
+[GPUValidationError] Color target has no corresponding fragment stage output ... targets[1]   ← 仍在
+[GPUValidationError] [Invalid RenderPipeline] is invalid due to a previous error.              ← 仍在
+```
+
+**目前最可能的解释**：这个材质是**引擎建的**，不是 `ShaderMaterial`（我们的代码只对自己的
+per-instance 材质调 `shaderDesc`）。对引擎那个材质设置 `shaderDesc` **未必被引擎当回事** ——
+这与之前那轮"换 `shaderDesc` 零变化"是**同一个结论的另一种表现**（当时是在死画面上量的，
+但"引擎不采用 shaderDesc"这条本身可能就是真的）。
+
+**下一步的三条具体路（按代价从低到高）**：
+
+1. **在材质创建时就修**，而不是每帧补：引擎在 `GSplatLayerData.createManager` 里
+   `director.eventHandler.fire('material:created', manager.material, camera, layer)`
+   （`playcanvas.mjs:88528`），而 `eventHandler` 就是 **`GSplatComponentSystem`** 自己
+   （`:91319` 传入的是 `this`）。所以可以监听到那一刻，在**第一次编译之前**把它设好，
+   而不是等它已经被编译成无效管线之后再补。
+2. **把 RT 从两个附件减到一个**：`camera.ts` 的 `splatTarget` 用了
+   `colorBuffers: [colorBuffer, workBuffer]`。如果那条选区覆盖（RT1）在 unified 通路下
+   本来也不生效（我们的选区着色跑在 per-instance 材质里），那就让 unified 走单附件目标 ——
+   这可能比让引擎材质声明 `color1` 简单得多，而且不依赖引擎内部行为。
+3. 去引擎源码里确认那个材质到底怎么声明片元输出、`fragmentOutputTypes` 从哪里来
+   （`GSplatHybridRenderer` 建 `_material` 时没传 `fragmentOutputTypes`，
+   所以默认 `['vec4']`；要么它其实靠 `GSPLAT_*` define 走另一条分支，要么这条路
+   在 2.21.3 里对 MRT 就是不好的）。
+
+**判据**：改完之后必须看到
+**"Color target has no corresponding fragment stage output" 条数归零**，
+再去量"转相机 30° 画面活没活"。**不要**再用"画面好像变了"来判断 —— 那正是前面几轮栽的坑。
+
+
 
 
 | 试过的路 | 做法 | 结果 | 留下的结论 |

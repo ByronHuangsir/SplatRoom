@@ -157,6 +157,28 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
             // 这里再调一次是为了让"这一帧就生效"，不必等下一帧。
             material.update();
         }
+        // ===== 关键修复（2026-09-25，见 docs/待办-引擎WebGPU-compute.md §4h）=====
+        // splat pass 用的是**两个颜色附件的 MRT**（`camera.ts` 的 splatTarget：
+        // RT0 = 场景色、RT1 = 选区覆盖）。而片元结构 `FragmentOutput` 是按
+        // `shaderDesc.fragmentOutputTypes` 生成的（引擎 `ShaderDefinitionUtils.createDefinition`
+        // → `#define COLOR_ATTACHMENT_i` / `alias pcOutType_i`），它**默认只有一个 vec4**
+        // ⇒ 片元只写 `output.color`，RT1 却有 writeMask ⇒ WebGPU 校验失败：
+        //   "Color target has no corresponding fragment stage output ... targets[1]"
+        // 而 `createRenderPipeline` **不抛异常**（只返回无效管线），所以这个错误一直隐身。
+        // 修法：把输出类型补成两个（per-instance 那份材质是我们自己建的，本来就声明了两路）。
+        const desc: any = material.shaderDesc;
+        if (desc && (!Array.isArray(desc.fragmentOutputTypes) || desc.fragmentOutputTypes.length < 2)) {
+            material.shaderDesc = {
+                uniqueName: desc.uniqueName ?? UNIFIED_MATERIAL_NAME,
+                attributes: desc.attributes,
+                vertexCode: desc.vertexWGSL ?? desc.vertexGLSL,
+                fragmentCode: desc.fragmentWGSL ?? desc.fragmentGLSL,
+                shaderLanguage: SHADERLANGUAGE_WGSL,
+                fragmentOutputTypes: ['vec4', 'vec4']
+            };
+            material.update();
+        }
+
         const gain = typeof params.probeGain === 'number' ? params.probeGain : 1;
         material.setParameter('uProbeGain', gain);
         touched++;
