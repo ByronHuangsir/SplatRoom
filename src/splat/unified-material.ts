@@ -157,15 +157,20 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
             // 这里再调一次是为了让"这一帧就生效"，不必等下一帧。
             material.update();
         }
-        // ===== 关键修复（2026-09-25，见 docs/待办-引擎WebGPU-compute.md §4h）=====
+        // ===== 关键修复（2026-09-25，见 docs/待办-引擎WebGPU-compute.md §4h/§4j）=====
         // splat pass 用的是**两个颜色附件的 MRT**（`camera.ts` 的 splatTarget：
         // RT0 = 场景色、RT1 = 选区覆盖）。而片元结构 `FragmentOutput` 是按
-        // `shaderDesc.fragmentOutputTypes` 生成的（引擎 `ShaderDefinitionUtils.createDefinition`
+        // `options.fragmentOutputTypes` 生成的（引擎 `ShaderDefinitionUtils.createDefinition`
         // → `#define COLOR_ATTACHMENT_i` / `alias pcOutType_i`），它**默认只有一个 vec4**
         // ⇒ 片元只写 `output.color`，RT1 却有 writeMask ⇒ WebGPU 校验失败：
         //   "Color target has no corresponding fragment stage output ... targets[1]"
         // 而 `createRenderPipeline` **不抛异常**（只返回无效管线），所以这个错误一直隐身。
-        // 修法：把输出类型补成两个（per-instance 那份材质是我们自己建的，本来就声明了两路）。
+        //
+        // ⚠️ 但**改哪里**是关键：引擎解析"绘制用哪个材质"的是
+        // `_writeGsplatParams()`：`p.material = scene.gsplat.material`
+        // （`scene.gsplat` 是 `GSplatParams`，它的 `material` 是**场景级** ShaderMaterial）。
+        // 所以真正参与编译的是**场景级那块**，不是这里的 `renderer._material`。
+        // 这里顺便也补一次（无害），但决定性的是下面 applySceneLevelMaterial()。
         const desc: any = material.shaderDesc;
         if (desc && (!Array.isArray(desc.fragmentOutputTypes) || desc.fragmentOutputTypes.length < 2)) {
             material.shaderDesc = {
@@ -183,11 +188,57 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         material.setParameter('uProbeGain', gain);
         touched++;
     }
+
+    // 场景级材质（引擎 `p.material` 的来源）—— 这才是决定片元输出的那块
+    applySceneLevelMaterial(scene);
     // 探针/套件用的句柄：这条通路的材质不在组件上（引擎故意断开），
     // 除了渲染循环里那一刻，外面**没有别的办法**拿到它。与仓库里其它
     // `__SPLATROOM_*` 逃生开关同一类，只读、无副作用。
     (globalThis as any).__SPLATROOM_UNIFIED_MATERIAL__ = materials[0];
     return touched > 0;
+}
+
+/**
+ * 给**场景级** gsplat 材质补上第二路片元输出。
+ *
+ * 为什么是这一块（`docs/待办-引擎WebGPU-compute.md` §4j）：引擎在
+ * `GSplatManager._writeGsplatParams()` 里写 `p.material = scene.gsplat.material`，
+ * 而 `scene.gsplat` 是 `GSplatParams`、它的 `material` 是**场景级** `ShaderMaterial`
+ * （`get material() { return this._material; }`）。渲染与编译用的是这一块，
+ * **不是** `GSplatHybridRenderer._material`（前面几轮补错的对象）。
+ *
+ * 这里只做一件事：把 `fragmentOutputTypes` 补成两路 —— splat pass 的目标是 2 附件 MRT，
+ * 片元结构必须声明 `color` **和** `color1`，否则 WebGPU 报
+ * "Color target has no corresponding fragment stage output ... targets[1]"，
+ * 而 `createRenderPipeline` **不抛异常**（只返回无效管线）⇒ 画面冻死、错误隐身。
+ *
+ * ⚠️ `GSplatParams.material` **只有 getter 没有 setter**，所以只能直接改内部字段
+ * `_material` —— 这属于"打补丁"，升级引擎时必须重新核对。
+ *
+ * @returns 是否改动过
+ */
+function applySceneLevelMaterial(scene: any): boolean {
+    const params: any = scene?.app?.scene?.gsplat;
+    const material: any = params?._material;
+    if (!material || !material.shaderDesc) {
+        return false;
+    }
+    const desc: any = material.shaderDesc;
+    const have = Array.isArray(desc.fragmentOutputTypes) ? desc.fragmentOutputTypes.length : 0;
+    if (have >= 2) {
+        return false;
+    }
+    material.shaderDesc = {
+        uniqueName: desc.uniqueName ?? 'SplatRoomUnifiedSceneMaterial',
+        attributes: desc.attributes,
+        vertexCode: desc.vertexWGSL ?? desc.vertexGLSL,
+        fragmentCode: desc.fragmentWGSL ?? desc.fragmentGLSL,
+        shaderLanguage: SHADERLANGUAGE_WGSL,
+        fragmentOutputTypes: ['vec4', 'vec4']
+    };
+    material.update();
+    (globalThis as any).__SPLATROOM_UNIFIED_SCENE_MATERIAL__ = material;
+    return true;
 }
 
 /** 是否已经装在 unified 材质上（探针/套件断言用） */

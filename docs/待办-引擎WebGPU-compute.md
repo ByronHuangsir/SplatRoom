@@ -447,6 +447,63 @@ _writeGsplatParams(p) {
 **验收判据（不变）**：`Color target has no corresponding fragment stage output` 归零，
 再用"转相机 30°"量画面活没活。
 
+### 4k. 第十一轮：试了路 A —— 拿到两个**决定性**的引擎事实，并且发现补丁为什么不可能生效
+
+**事实一：引擎的 `ShaderMaterial` **按 `uniqueName` 缓存着色器**（这是关键）**
+
+`ShaderUtils.createShader`（`playcanvas.mjs:20616-20638`）：
+
+```js
+let shader = programLibrary.getCachedShader(options2.uniqueName);
+if (!shader) { … 真正建着色器 … programLibrary.setCachedShader(options2.uniqueName, shader); }
+```
+
+而 `ShaderMaterial` 的默认名字是 `ShaderMaterial-${desc.uniqueName}`。
+⇒ **只要 `uniqueName` 不变，改 `shaderDesc` 也不会重新编译** —— 缓存直接命中旧着色器。
+这解释了之前"改 `shaderDesc` 一点反应都没有"的**第二个原因**（第一个是补错对象）。
+
+**事实二：`shaderDesc` 的 setter 只认固定几个字段**
+
+`ShaderMaterial.shaderDesc` 的 setter（`:34425-34448`）**只取**：
+`uniqueName` / `attributes` / `fragmentOutputTypes` / `vertexGLSL` / `fragmentGLSL` /
+`vertexWGSL` / `fragmentWGSL`（外加 `vertexCode`/`fragmentCode`/`shaderLanguage` 的兼容写法）。
+⇒ 引擎那种"用 chunk 名当源码"的写法（`vertexChunk` / `fragmentChunk`，见 `:20622-20623`）
+**不能通过 `shaderDesc` 表达**；想用 chunk 名必须走 `ShaderUtils.createShader` 那条路。
+
+**这一轮实测的三件事**
+
+| 观测 | 值 | 含义 |
+| --- | --- | --- |
+| 场景级材质（`scene.gsplat._material`）是什么 | 一个 `ShaderMaterial`（原型上有 `shaderDesc` / `getShaderVariant`），但 **`shaderDesc` 为 null、本地 chunk 为空、`meshInstances` 为 0** | 它只是个**参数/模板**对象，不自己画 |
+| `applySceneLevelMaterial()` 是否改到它 | **没有** —— 我写了 `if (!material.shaderDesc) return false` 的守卫，而它恰好没有 `shaderDesc` | **我自己把路 A 变成了空操作** |
+| 错误数 | 189~190（与改动前一致） | 目标错误**仍在** |
+
+**结论：`scene.gsplat.material` 不是绘制用的材质**，它只是 compute 侧 `_updateMaterial(material)`
+读取 chunk/defines 的**模板来源**。真正画的仍是 `GSplatHybridRenderer._material`（引擎建的那块）。
+
+**所以这条链的完整结论是**：
+
+1. 绘制用的是 **`GSplatHybridRenderer._material`**（引擎建，`uniqueName` 固定
+   `"UnifiedSplatHybridMaterial"`，`fragmentOutputTypes` 默认 `['vec4']`）。
+2. 引擎自己的片元（`gsplatPS`）**只写 `output.color`**，因此**它不可能满足 2 附件 MRT**。
+3. 想让它满足，必须**给它一份会写两个输出的片元**，并且：
+   * 片元**不能 `#include`** 引擎已自动带入的 chunk（会重复定义 `normExp` / `modifySplatColor`），
+     要么用已展开的源码、要么只定义自己的函数；
+   * **必须换一个新的 `uniqueName`**，否则 `getCachedShader` 会命中旧着色器（事实一）。
+4. 而"我们 per-instance 的着色"要真正跑在这条路上，还得让 `_material` 拿到我们的着色 ——
+   这条路与 2/3 是同一份工作。
+
+**下一步（明确且收敛）**：给 `GSplatHybridRenderer._material` 换一套
+**自写片元（写 `output.color` + `output.color1`）+ 新 `uniqueName` + `fragmentOutputTypes: ['vec4','vec4']`**。
+验收：目标错误归零 → 转相机 30° 画面活 → 再谈着色链路。
+这是**一份确定的工作**（不是再猜），估计需要一个专门的窗口来落，因为它同时是
+"让 unified 通路可用"和"把我们的材质搬过去"的第一步。
+
+**备选（可能更省）**：路 B —— 让 unified 模式下 splat pass 用**单附件**目标，
+这样就完全不需要第二个输出。代价是要知道 RT1 在 unified 下是否真的没人读
+（我们 per-instance 材质往 RT1 写选区覆盖，轮廓/底衬 pass 读它）。
+
+
 
 
 
