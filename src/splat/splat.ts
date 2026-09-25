@@ -118,6 +118,44 @@ const SORT_PREDICT_CENTER_WEIGHT = 0.25;
 const SORT_CADENCE_ALPHA = 0.25;
 
 /**
+ * 把曲线表**直接上传**进 R32F 纹理（不经过 `lock()` 的回读路径）。
+ *
+ * 为什么需要它：`Texture.lock()` 会分配 staging、拷贝、再 `mapAsync` 等 fence；
+ * 在 unified 通路（引擎 GPU 排序）的导入路径上这一步会**永久挂住** ——
+ * 既不返回也不抛异常，导致整个导入静默卡死（见 `docs/待办-引擎WebGPU-compute.md` §4d）。
+ * 曲线表的初始内容本来就是恒等值，根本不需要回读，所以这里走 WebGPU 的
+ * `queue.writeTexture` 直传。
+ *
+ * @returns 是否成功直传（false 表示调用方需要走原来的兜底路径）
+ */
+function writeCurveTable(device: any, texture: any, table: Float32Array): boolean {
+    try {
+        const impl = texture?.impl;
+        const wgpu = (device as any)?.wgpu;
+        const queue = wgpu?.queue;
+        const gpuTexture = impl?.gpuTexture ?? impl?.texture ?? null;
+        if (!queue?.writeTexture || !gpuTexture) {
+            return false;
+        }
+        const width = CURVE_SAMPLES;
+        const height = CURVE_CHANNELS;
+        // WebGPU 要求这几个字段是**数值型**（`unsigned long`）。实测传 `CURVE_SAMPLES` 时
+        // 报 "Failed to read the 'rowsPerImage' property ... Value is not of type 'unsigned long'"
+        // —— 那是被显式转成数值就能解决的形状问题，所以这里统一 Number() 一次。
+        queue.writeTexture(
+            { texture: gpuTexture },
+            table,
+            { offset: 0, bytesPerRow: Number(width) * 4, rowsPerImage: Number(height) },
+            { width: Number(width), height: Number(height) }
+        );
+        return true;
+    } catch (e) {
+        console.warn('[Splat] uCurve direct upload failed:', e);
+        return false;
+    }
+}
+
+/**
  * 自适应排序地板的**纯函数**版本（`Splat._sortMinIntervalMs` 包一层实例状态调它）。
  *
  * 抽出来的原因：这是"顺序新鲜度"的唯一定义处，而闸门、horizon 的 D 估计、在飞补发
@@ -486,8 +524,15 @@ class Splat extends Element {
         if (!this.entity.gsplat) {
             console.error('[Splat.bindAsset] gsplat component missing after addComponent');
         }
-        if (!this.entity.gsplat?.instance) {
-            console.warn('[Splat.bindAsset] instance not ready immediately after addComponent, waiting...', this.entity.gsplat);
+
+        // unified 模式下引擎**不给** `instance`（改用 `_placement`），所以"就绪"要按两种模式判。
+        // ⚠️ 2026-09-25：实测 unified 模式下 `_placement` 常常是 **null**（引擎的
+        // `_onGSplatAssetLoad` 拿不到 resource 就早退，而且不会重试），导入链随后会在别处
+        // 静默失败 —— 表现为"没有 splat 元素、导入 promise 永不 settle"。
+        // 详见 docs/待办-引擎WebGPU-compute.md §4d（那里记着已经排除过的几种解释）。
+        if (!this.entity.gsplat?.instance && !(this.entity.gsplat as any)?._placement) {
+            console.warn('[Splat.bindAsset] neither instance nor placement after addComponent;',
+                'unified =', useUnified, this.entity.gsplat);
         }
 
         const instance = this.entity.gsplat.instance;
@@ -554,23 +599,27 @@ class Splat extends Element {
             addressV: ADDRESS_CLAMP_TO_EDGE
         });
         {
-            // ⚠️ 2026-09-25：`lock()` 在 WebGPU 下会把队列排空，而 unified 通路的导入路径上
-            // 这一步**会永久挂住**（实测：`?unified=1` 导入时它就再也不返回，连随后的
-            // TypeError 都来不及抛，表现为"导入静默卡死、没有 splat 元素"）。
-            // 所以这里给它兜底：拿不到就退回恒等曲线，并把原因打出来 —— 曲线默认恒等，
-            // 少这次上传不影响画面（`uCurveEnabled = 0` 时着色器整段跳过）。
+            // ⚠️ 2026-09-25：`lock()` 会走**回读**（分配 staging + 拷贝 + mapAsync 等 fence），
+            // 而 unified 通路的导入路径上这一步**会永久挂住**（实测：`?unified=1` 导入时它
+            // 再也不返回，也不抛异常 —— 后面的 TypeError 都来不及抛，
+            // 表现就是"导入静默卡死、没有 splat 元素"）。
+            //
+            // 曲线的初始内容**本来就是恒等表**，完全没有回读的必要，所以这里改成
+            // **直接上传**（`device.queue.writeTexture` 那条同步路径，不碰 staging、不等 fence）。
+            // 这条改动对两条通路都成立，而且消掉了一次每实例导入的 GPU 回读往返。
             const ident = identityCurveSamples();
-            let data: Float32Array | null = null;
-            try {
-                data = this.curveTexture.lock() as Float32Array;
-            } catch (e) {
-                console.warn('[Splat.bindAsset] uCurve lock failed; identity curves used instead:', e);
-            }
-            if (data) {
-                for (let ch = 0; ch < 4; ch++) {
-                    data.set(ident, ch * CURVE_SAMPLES);
+            if (!writeCurveTable(device, this.curveTexture, ident)) {
+                // 直传不可用（非常规后端）时退回原来那套；它只在这个兜底分支里才可能挂，
+                // 而曲线默认恒等 ⇒ 即使这里失败，画面也不受影响（`uCurveEnabled = 0` 整段跳过）。
+                try {
+                    const data = this.curveTexture.lock() as Float32Array;
+                    for (let ch = 0; ch < 4; ch++) {
+                        data.set(ident, ch * CURVE_SAMPLES);
+                    }
+                    this.curveTexture.unlock();
+                } catch (e) {
+                    console.warn('[Splat.bindAsset] uCurve upload failed; identity curves used instead:', e);
                 }
-                this.curveTexture.unlock();
             }
         }
 
@@ -579,12 +628,12 @@ class Splat extends Element {
         // 这里原先直接读 `instance.resource.aabb`，在 unified 下就是一个 TypeError；
         // 而它被导入链的 catch 吞掉 ⇒ 表现为"导入静默失败、没有 splat 元素"。
         // 所以资源统一从组件上取（两种模式都有）。
-        const compResource = (this.entity.gsplat as any)?.resource ?? instance?.resource ?? splatResource;
-        this.localBoundStorage = compResource.aabb;
+        const boundResource = (this.entity.gsplat as any)?.resource ?? instance?.resource ?? splatResource;
+        this.localBoundStorage = boundResource.aabb;
         // keep a pristine copy of the engine's CPU-computed AABB: localBoundStorage is
         // an alias of it, so the GPU bound pass below overwrites the CPU values
         // (with zeros on WebGPU, where its readback returns nothing)
-        this.cpuBoundStorage.copy(compResource.aabb);
+        this.cpuBoundStorage.copy(boundResource.aabb);
         // @ts-ignore
         this.worldBoundStorage = instance?.meshInstance?._aabb ?? this.localBoundStorage;
 
@@ -597,7 +646,9 @@ class Splat extends Element {
         // when sort changes, re-render the scene. the instance's sorter is
         // created lazily (and never on WebGPU, which sorts into a storage
         // buffer), so this binding is optional rather than assumed
-        instance.sorter?.on('updated', () => {
+        // unified 模式下 `instance` 是 null（引擎用 `_placement`），这里必须整体可选链 ——
+        // 否则就是一个 TypeError，而导入链的 catch 会把它吞掉（正是"导入静默失败"的来源之一）。
+        instance?.sorter?.on('updated', () => {
             this.changedCounter++;
             this.scene.forceRender = true;
         });

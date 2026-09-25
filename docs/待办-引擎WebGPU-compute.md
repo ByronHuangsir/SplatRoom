@@ -240,6 +240,42 @@ G:addComponent → G2:addComponent-returned → I:textureDimensions → K1/K2/K3
 所以"用 URL 开关做 A/B"在修完这一整段之前都不可靠 —— 一期探针继续走
 "先正常导入、再就地翻转 `comp.unified`"那条已验证可用的路。
 
+### 4e. 继续追的结果（2026-09-25 第四轮）：又排掉两层，仍然没通
+
+**这一轮修好的（都已入库并验证）**：
+
+| 修的东西 | 说明 |
+| --- | --- |
+| `curveTexture.lock()` → 直传 | `lock()` 走 staging + `mapAsync` 回读；改成 `device.queue.writeTexture` 直传（曲线初始表本来就是恒等值，不需要回读）。**实测这一步原本确实在挂**：改完后从"卡在 curve 之前"推进到"卡在 curve 之后" |
+| `writeTexture` 的字段类型 | 直传第一版报 `Failed to read the 'rowsPerImage' property ... not of type 'unsigned long'` ⇒ 全部 `Number()` 转换 |
+| `instance.resource.aabb` → 组件上的资源 | unified 下 `instance` 为 null；改成 `(comp).resource ?? instance?.resource ?? splatResource`（两模式都有） |
+| `instance.meshInstance.*` 三处 + `instance.sorter?.on` | 全部加守卫；**这两个是 TypeError，而导入链的 catch 会把它们吞掉** —— 所以症状才是"静默失败"而不是报错 |
+| 我自己的一个笔误 | 上一版写成 `compResource` 而声明是 `compResource`，那本身就会抛 `is not defined` |
+
+**排掉的两层**（每一层都靠临时插桩定位，插桩已全部撤除）：
+
+1. 第 1 层：`curveTexture.lock()` —— 见上，已修。
+2. 第 2 层：`instance.sorter?.on(...)` —— `instance` 为 null ⇒ TypeError。已修。
+
+**现在的位置**：`bindAsset` 已经能**完整跑完**（`DBG-after-sorter-bind` 打到了），
+但 `?unified=1` 导入的 **`import()` 仍然永不 settle**，且**没有 splat 元素**（elements 8、组件 1、
+`_placement` 非空）。也就是说：**卡点已经不在 `bindAsset` 里了**，而在它**返回之后**、
+元素真正被登记/画出来的那一段。
+
+**下一步该看的地方**（还没查）：
+* `Splat` 元素是在哪里、以什么条件被加进 `scene.elements` 的（`elements` 恒为 8 = `Splat` 对象建出来了但没被登记，或者登记前又被丢掉）；
+* `GSplatComponent` 在 unified 下 `instance` 为 null ⇒ 元素里**所有依赖 `instance` 的初始化**
+  （材质重建、状态上传 `updateState()`、`updateGpuCameraUniforms`、sorter 相关）在 unified 下
+  要么空转要么抛错 —— 需要像本轮这样逐个过一遍，而不是逐个撞。
+
+**给这个 bug 的定性（写给未来的自己）**：
+它不是"开关坏了"，而是**unified 通路从来没有被当作一等公民支持过** ——
+`bindAsset` 及之后的一整条 per-instance 假定（instance / 贴图 / 属性 / 状态 / 材质 / sorter）
+在 unified 下全部要另走一套。这是一整块工作，不是一次修补。
+所以：**一期探针继续用"先正常导入、再就地翻转 `comp.unified`"那条已验证可用的路**，
+把精力留在材质迁移本身；"让 `?unified=1` 直接可用"应该单独立项（它同时也是"将来把默认切到
+unified"的必做前置）。
+
 **开关判定来源已归一化（本轮入库）**：`main.ts` 启动时把 `?unified=1` 映射成
 `__SPLATROOM_UNIFIED__`，`splat.ts` 与 `scene.ts` 都只读这一个全局
 （原先两处各自读、时机不同，"开关到底生效没有"取决于谁先读到 —— 这也是本轮踩到的坑之一）。
