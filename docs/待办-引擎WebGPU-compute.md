@@ -189,6 +189,57 @@ pipeline**，于是每次派发都是静默空跑。修法与自检代码在 `2d
 > 而 `comp.unified = true` 的**就地翻转**这条路画面是死的。两者不是同一件事 ——
 > 一期探针一直在用后者，这也是"零变化"的来源之一。
 
+### 4f. 第六轮：把 WebGPU 报错的源头接上了（有新事实，也有新墙）
+
+**新事实一：可用的 WebGPU 拦截钩子（踩了两个坑才装对）**
+`_tmp/probe-pipeline-error.cjs` 现在能在页面脚本之前拦到设备，抓
+`createShaderModule` / `createRenderPipeline` / `createComputePipeline` / 校验作用域。
+两个坑都值得记：
+
+1. 第一版把 `requestDevice` 挂在 `GPU.prototype` 上 —— **`navigator.gpu.requestDevice` 不在原型上**。
+   实测（`_tmp/diag-gpu-hook.cjs`）：`gpuProtoHasRequest: false`、`adapterProtoHasRequest: true`。
+   真正要拦的是 **`GPUAdapter.prototype.requestDevice`**。
+2. 钩子必须**自检有没有装上**（`__WG__.installed`）。前两版偷懒没自检，于是"0 个错误"
+   被我误读成"没有错误" —— 其实是"根本没在测"。**这和"零变化"那件事是同一类错误**：
+   读数之前先证明量具在工作。
+
+**新事实二：unified 通路的着色器与管线创建其实都没报错**
+
+| 观测（就地翻转成 unified 之后） | 值 |
+| --- | --- |
+| shader module 创建次数 | 12 → **25**（翻转后又建了 13 个，说明这条路确实在建自己的着色器） |
+| `createRenderPipeline` | 6 → 8 |
+| `createComputePipeline` | 0 → 9 |
+| **WGSL 编译错误** | **0** |
+| **管线创建抛出的异常** | **0** |
+
+⇒ `[Invalid RenderPipeline]` 的 "invalid due to a previous error" **不是** shader 编译失败、
+也不是 `createRenderPipeline` 失败；它是**继承自更早的一次未捕获校验错误**
+（UN捕获的 error scope 错误会被丢弃，只留下"前面出过错"这个标记）。
+
+**新墙一：我自己的 error scope 包围失败了**
+想在翻转那段外面套 `pushErrorScope('validation')` 抓原文，结果两次 `popErrorScope()`
+都返回 `OperationError: No error scopes to pop` —— 引擎在每一帧里自己成对 push/pop，
+把我的作用域**吃掉了**。所以"用自己的 scope 包围"这条路在当前架构下不成立。
+下一步要换手段：要么拦 `popErrorScope` 时把引擎自己的结果也记下来（注意别破坏它的配对），
+要么用 **device lost 之外的另一条路**：`createRenderPipelineAsync` 的 catch、
+或者直接对 `device.queue.submit` 的 command buffer 做校验包围（提交点更靠近真正的错误）。
+
+**新墙二：两条进入方式现在都不能用**（这决定了下一步做什么）
+
+| 进入方式 | 状态 |
+| --- | --- |
+| `?unified=1`（URL）/ 导入前设全局 | **导入直接卡死**（§4d/4e），拿不到模型 |
+| 正常导入后就地翻转 `comp.unified = true` | 能建出画面，但**画面是死的**（转 30° 只变 0.48%） |
+
+⇒ **一期（材质迁移）现在被"没有一条可用的 unified 通路"卡住**，而不是被材质机制卡住。
+两条路的优先级建议：**先把"就地翻转"那条修活**（它已经有画面，离可用更近），
+`?unified=1` 的导入卡死是另一件事、可以更晚。
+
+**验证工具**（都不入库，`_tmp/`）：
+`probe-pipeline-error.cjs`（WebGPU 拦截，含自检）、`diag-gpu-hook.cjs`（钩子可行性诊断）、
+`probe-frame-visibility.cjs`（转相机阳性对照）、`png-grid.cjs`（读不了图时把 PNG 打成亮度网格）。
+
 | 试过的路 | 做法 | 结果 | 留下的结论 |
 | --- | --- | --- | --- |
 | ① 换 `material.shaderDesc` | 用我们自写的 vertex+fragment 整套换掉源码 | 画面逐像素零变化（**见上面的更正：在死画面上量的**） | 待重测 |
