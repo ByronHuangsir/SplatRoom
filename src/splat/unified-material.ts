@@ -37,9 +37,14 @@ import { ShaderChunks, SHADERLANGUAGE_WGSL } from 'playcanvas';
 import { unifiedModifyVS, unifiedFragmentShader } from '../shaders/unified-shaders';
 
 /** 瑁呭埌 unified 鏉愯川涓婄殑 uniform锛堜竴鏈熺殑璋冭壊鍙傛暟锛沬dentity 鍊?= 寮曟搸榛樿鐢婚潰锛?*/
+/** 装到 unified 材质上的 uniform（一期的调色参数；中性值 = 与引擎默认逐像素一致） */
 export type UnifiedMaterialParams = {
-    /** 璋冭瘯鐢ㄦ€诲鐩婏紝1 = 寮曟搸榛樿锛涗笉绛変簬 1 鏃剁敾闈㈠繀椤绘暣浣撳彉鍖栵紙楠岃瘉鐢級 */
+    /** 调试用总增益，1 = 引擎默认；不等于 1 时画面必须整体变化（验证用） */
     probeGain?: number;
+    /** 饱和度：1 = 中性（与 per-instance 材质同名同语义） */
+    saturation?: number;
+    /** 对比度：0 = 中性 */
+    contrast?: number;
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
@@ -253,6 +258,9 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
 
         const gain = typeof params.probeGain === 'number' ? params.probeGain : 1;
         material.setParameter('uProbeGain', gain);
+        // 一期调色参数（中性值：saturation = 1、contrast = 0 ⇒ 整条链恒等）
+        material.setParameter('saturation', typeof params.saturation === 'number' ? params.saturation : 1);
+        material.setParameter('contrast', typeof params.contrast === 'number' ? params.contrast : 0);
         touched++;
     }
 

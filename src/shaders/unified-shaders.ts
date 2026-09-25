@@ -186,13 +186,45 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 //
 // 目前这里只放一个**恒等 + 可选增益**的实现（`SR_PROBE_GAIN`）：恒等时画面必须与
 // 引擎默认逐像素一致，增益 ≠ 1 时必须整体变化 —— 用它证明这个 chunk 真的被采用了。
+// 一期第一步：把**饱和度与对比度**挂到这条通路上（曲线/HSL 见下方说明，属于下一步）。
+//
+// 对齐基准（硬要求）：**四项参数取中性值时，画面必须与引擎默认逐像素一致**。
+// 中性值：saturation = 1、contrast = 0。所以这条链在没有调色时是**恒等**的。
+//
+// 关于"值域"：引擎的 `getColor()` 返回的是 `vec3(0.5) + rgb * SH_C0`（见
+// playcanvas 的 `containerCompactRead`），其中 SH_C0 = 0.2820947917738781，
+// 所以**0.5 是"SH 直流分量为 0"的颜色**。我们的调色是在**归一化到 [0,1] 之后**做的
+// （与 per-instance 片元一致：那边拿到的已经是 [0,1]），所以这里先减 0.5、
+// 做完再乘 SH_C0 加回去。
+//
+// 为什么放在这里而不是片元：unified 通路的颜色**在投影 compute 里就烘进 projCache 了**，
+// 片元只负责把烘好的颜色解包出来（见 `docs/待办-引擎WebGPU-compute.md` §4k）。
+// 代价是**每个 splat 算一次**（不是每个像素），所以能做逐 splat 的调色；
+// 按像素才能做的（裁剪盒软边、选区覆盖）要另走 user varyings 通路。
 const unifiedModifyVS = /* wgsl */ `
-const SR_PROBE_GAIN_DEFAULT: f32 = 1.0;
 uniform uProbeGain: f32;
+uniform saturation: f32;
+uniform contrast: f32;
+
+const SR_SH_C0: f32 = 0.28209479177387814;
+
+fn srApplySaturation(c: vec3f) -> vec3f {
+    let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
+    return grey + (c - grey) * uniform.saturation;
+}
+
+fn srApplyContrast(c: vec3f) -> vec3f {
+    return (c - vec3f(0.5)) * (1.0 + uniform.contrast) + vec3f(0.5);
+}
 
 fn modifySplatColor(center: vec3f, color: ptr<function, vec4f>) {
-    // color 的 rgb 是**线性、未乘 alpha**的颜色；a 是 alpha（引擎随后自己乘）
-    *color = vec4f((*color).xyz * (uniform.uProbeGain + 0.0 * SR_PROBE_GAIN_DEFAULT), (*color).w);
+    // 投影 compute 里 color.rgb = 半精度打包的线性色（未乘 alpha），a 是 alpha。
+    // 先还原成 [0,1] 归一化色做调色，再折回引擎的 SH_C0 编码。
+    var c: vec3f = ((*color).xyz - vec3f(0.5)) / SR_SH_C0;
+    c = srApplyContrast(c);
+    c = srApplySaturation(c);
+    c = c * SR_SH_C0 + vec3f(0.5);
+    *color = vec4f(c * uniform.uProbeGain, (*color).w);
 }
 `;
 

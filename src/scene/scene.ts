@@ -777,7 +777,15 @@ class Scene {
         if (!this._unifiedMaterialEnabled) {
             return;
         }
-        const ok = ensureUnifiedMaterial(this);
+        // 一期：把 splat 元素上的调色参数喂给 unified 材质。
+        // 材质是**按 layer** 的，而元素是多个 —— 单模型场景取最后一个（绝大多数情况只有一个）；
+        // 多模型时这条通路目前只反映最后一个（一期已知边界，二期再谈聚合）。
+        const splats = this.getElementsByType(ElementType.splat) as any[];
+        const s = splats.length ? splats[splats.length - 1] : null;
+        const ok = ensureUnifiedMaterial(this, s ? {
+            saturation: typeof s.saturation === 'number' ? s.saturation : 1,
+            contrast: typeof s.contrast === 'number' ? s.contrast : 0
+        } : {});
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;
             console.log('[SplatRoom] unified 通路材质已装（引擎 GPU 排序 + 我们的着色器）');

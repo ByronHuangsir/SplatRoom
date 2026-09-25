@@ -618,6 +618,54 @@ const raw = ShaderChunks.get(device, SHADERLANGUAGE_WGSL)?.get?.('gsplatHybridVS
 **为什么"转相机"这个判据值得一直留着**：整个问题的核心症状就是"画面不跟着相机动"，
 而这个判据与着色实现完全无关、一眼可读 —— 前面几轮正是因为没用它，才在"零变化"上绕了那么久。
 
+### 4o. 一期挂色的第一次尝试：**自定义 uniform 送不进投影 compute**
+
+把饱和度与对比度接上了（`unifiedModifyVS` 里 `srApplySaturation` / `srApplyContrast`，
+中性值 saturation=1、contrast=0 ⇒ 恒等），`scene.ts` 的钩子也从 splat 元素读这两个参数喂进去。
+验收探针 `_tmp/probe-unified-grading.cjs` 的结果：
+
+| 判据 | 结果 |
+| --- | --- |
+| 安装记录 | `{uniqueName:"SplatRoomUnifiedMaterial-1700-774", vsLen:4198, fsLen:1700, outTypes:2, sourceKind:"raw-chunk"}` ✓ |
+| ① 转回原机位差异 | mad **0**（机位确实回来了，测量可信）|
+| ② 阳性对照（转 30°） | mad **2.746** / 6.79%（**画面是活的**）|
+| ③ `saturation = 0` 与中性值之差 | mad **0**、逐像素完全相同 ⇒ **调色没生效** |
+
+**根因（读引擎源码确认）**：投影 compute 的 uniform 布局是引擎**写死**的二十个字段 ——
+`GSplatProjector._createUniformBufferFormats()`（`playcanvas.mjs:86378-86402`）：
+`splatTextureSize / numBins / isOrtho / viewProj / viewMatrix / cameraPosition / minPixelSize /
+cameraDirection / focal / viewportWidth / viewportHeight / nearClip / farClip / alphaClip /
+minContribution / minDist / invRange / foveationStrength / foveationCenter`。
+
+虽然 `GSplatProjector.dispatch()` **会**把材质上的参数逐个转发给 compute
+（`:86599-86606`，`compute.setParameter(name, srcParams[name].data)`），
+但 `UniformBufferFormat` 里**没有** `saturation` / `contrast` / `uProbeGain` 的槽位
+⇒ 这些 uniform 永远读到默认值（0）。**所以 `saturation` 恒为 0**，
+而"设成 0 与不设一样"正好对上这一点。
+
+**⇒ 一期挂色的关键结论：`gsplatModifyVS` 这条 compute 钩子里，值不能靠自定义 uniform 送进来。**
+可行的分配通道只有三种：
+
+1. **烘焙成常量**：钩子在渲染前每帧检查参数，**变了就把值作为常量写进 WGSL 源码**并换
+   `uniqueName` 重新编译。代价是拖动滑块时每次变化都要重编译一次着色器（滑块的更新频率下可能太重）。
+2. **借用引擎已有的 uniform 槽位**：例如 `foveationStrength` / `foveationCenter`
+   （我们不用注视点渲染）。代价是语义混淆、且升级引擎时可能被改；需要写清楚并加断言。
+3. **走引擎自己的 user varyings 通路**（`app.scene.gsplat.varyings.add(...)`）：
+   引擎会为自定义每-splat 属性生成 compute 写 + 顶点读的 chunk，
+   **但它写进的是 projCache、不是 uniform** —— 那是**每 splat** 的值，不是全局参数，
+   所以适合"选区状态/删除状态"（二期），不适合"饱和度"这种全局滑块。
+
+**下一步建议**：一期先用**第 1 条（烘焙常量）**打通"我们的调色确实能作用于 unified 画面"这个
+证明；等证明成立、再决定滑块的真实通道（很可能最终是第 2 条 + 明确断言，或把全局参数
+挪到**片元**那一侧做——片元的 uniform 走引擎常规通道，不受这二十个字段限制）。
+
+**顺带一个仍然没解释清的点（记账，不要忘）**：中性值下画面 `meanRGB = [32.71, 31.92, 31.62]`
+（三通道接近但不相等），而 `saturation` 恒为 0 时**本应完全灰**。这表明
+`gsplatModifyVS` 里的 `modifySplatColor` **可能并没有真正影响最终颜色**
+（或者影响的部分不是我们以为的那一路）。**这一点必须在继续之前查清** ——
+否则又会变成"改了没反应，却不知道是通道错还是值错"。
+
+
 
 
 
