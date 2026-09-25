@@ -583,6 +583,42 @@ const raw = ShaderChunks.get(device, SHADERLANGUAGE_WGSL)?.get?.('gsplatHybridVS
 // 然后 shaderDesc.vertexCode = raw（它含 #include，材质编译时会展开）
 ```
 
+### 4n. ✅✅ 第十三轮：**通了。** unified 通路的画面活了
+
+按 §4m 的结论换掉了顶点源的取法（`material.shader.definition.vshader` → 引擎全局 chunk 注册表里的
+**原始** `gsplatHybridVS`，含 `#include`，交给材质自己展开）。两个独立判据同时通过：
+
+| 判据 | 修之前 | 修之后 |
+| --- | --- | --- |
+| submit 校验错误 | **190** | **1** |
+| 未捕获 `GPUValidationError` | 382（含 4×`Color target … targets[1]`） | **4**（2× targets[1] + 2× inherited，都只剩最早那几帧） |
+| **转相机 30° 的画面变化**（阳性对照） | mad 0.116 / **0.48%**（画面是死的） | mad **2.983** / **6.79%** ⇒ **画面活了** |
+
+安装记录也证明东西真的装上了：
+
+```
+安装状态: {hasVertexSource:true, vertexLen:4198, sourceKind:"raw-chunk", wantName:"SplatRoomUnifiedMaterial-1700-292"}
+已装记录: {uniqueName:"SplatRoomUnifiedMaterial-1700-292", vsLen:4198, fsLen:1700, outTypes:2, sourceKind:"raw-chunk"}
+```
+
+**这一轮到底做对了什么（三件事缺一不可）**：
+
+1. **顶点源不能依赖已编译的 shader** —— 那块材质在编译前 `shader` 为空，
+   `material.shader.definition.vshader` 永远取不到 ⇒ 安装被自己的守卫挡住。
+   改用全局 chunk 注册表里的原始 `gsplatHybridVS`（`ShaderChunks.get(device,'wgsl')`）就通了。
+2. **`uniqueName` 必须随源码变化** —— 引擎按 `uniqueName` 缓存着色器
+   （`ShaderUtils.createShader` → `getCachedShader`），名字不变永远命中旧的。
+3. **片元必须真的写 `output.color1`** —— 只声明 `fragmentOutputTypes: ['vec4','vec4']` 不够
+   （§4m 的最小实验已经证明了这一点）。
+
+**结论：一期（让 unified 通路可用）的核心障碍已清除。** 剩下的 4 条错误都在"材质还没装上"的最早几帧，
+属于**上车前的瞬态**，不是持续故障（190 → 1 就是证据）。下一步可以把那几帧也覆盖掉
+（例如在导入完成前就先装好），或者直接进入一期的下一步：**把我们的着色挂到这条路上**。
+
+**为什么"转相机"这个判据值得一直留着**：整个问题的核心症状就是"画面不跟着相机动"，
+而这个判据与着色实现完全无关、一眼可读 —— 前面几轮正是因为没用它，才在"零变化"上绕了那么久。
+
+
 
 
 

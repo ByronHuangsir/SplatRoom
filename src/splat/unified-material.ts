@@ -209,20 +209,33 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         }
 
         const vs = material.shader?.definition?.vshader ?? null;
+        // 顶点源**不能**依赖已编译 shader（`material.shader` 在编译前是空的 —— 实测
+        // `hasVertexSource: false` 永远成立，安装因此一直被自己的守卫挡住）。
+        // 改用引擎全局 chunk 注册表里的**原始** `gsplatHybridVS`（它含 `#include`，
+        // 材质编译时会自己展开；`shaderDesc.vertexCode` 接受这种源）。
+        const rawVs = vs ?? (() => {
+            try {
+                const reg = ShaderChunks.get(scene?.graphicsDevice, SHADERLANGUAGE_WGSL);
+                return reg?.get?.('gsplatHybridVS') ?? null;
+            } catch {
+                return null;
+            }
+        })();
         const wantName = `${UNIFIED_MATERIAL_NAME}-${unifiedFragmentShader.length}-${unifiedModifyVS.length}`;
         // 排查用状态（挂在全局，探针读）：看清到底卡在哪一步
         (globalThis as any).__SPLATROOM_UNIFIED_INSTALL_STATE__ = {
-            hasVertexSource: !!vs,
-            vertexLen: vs ? vs.length : 0,
+            hasVertexSource: !!rawVs,
+            vertexLen: rawVs ? rawVs.length : 0,
+            sourceKind: vs ? 'compiled' : (rawVs ? 'raw-chunk' : 'none'),
             currentName: material.uniqueName ?? null,
             wantName,
             alreadyDone: material.uniqueName === wantName
         };
-        if (vs && material.uniqueName !== wantName) {
+        if (rawVs && material.uniqueName !== wantName) {
             material.shaderDesc = {
                 uniqueName: wantName,
                 attributes: { vertex_position: 'POSITION' },
-                vertexCode: vs,
+                vertexCode: rawVs,
                 fragmentCode: unifiedFragmentShader,
                 shaderLanguage: SHADERLANGUAGE_WGSL,
                 fragmentOutputTypes: ['vec4', 'vec4']
@@ -231,9 +244,10 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
             material.__splatRoomUnified = UNIFIED_MATERIAL_NAME;
             (globalThis as any).__SPLATROOM_UNIFIED_MATERIAL_INSTALLED__ = {
                 uniqueName: wantName,
-                vsLen: vs.length,
+                vsLen: rawVs.length,
                 fsLen: unifiedFragmentShader.length,
-                outTypes: 2
+                outTypes: 2,
+                sourceKind: vs ? 'compiled' : 'raw-chunk'
             };
         }
 
