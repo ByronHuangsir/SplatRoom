@@ -629,6 +629,12 @@ const raw = ShaderChunks.get(device, SHADERLANGUAGE_WGSL)?.get?.('gsplatHybridVS
 
 ### 4o. 一期挂色的第一次尝试：**自定义 uniform 送不进投影 compute**
 
+> ⚠️ **2026-09-26 更正**：下面"调色对画面零影响"的读数**是在零图元的死画面上测的**（§4s 已证），
+> 所以它只证明了"compute 那侧的 uniform 送不进去"，**不能**推广成"这条路上做不了调色"。
+> 重测（`_tmp/probe-unified-grading.cjs`，画面已活）：片元侧 `material.setParameter` 完全可用 ——
+> `saturation = 0` ⇒ 画面 RGB 收敛到 [121.77, 121.47, 121.17]、13.55% 像素变化。
+> 二期因此改在**顶点 + 片元**里做调色（与 per-instance 同序），见 §4u。
+
 把饱和度与对比度接上了（`unifiedModifyVS` 里 `srApplySaturation` / `srApplyContrast`，
 中性值 saturation=1、contrast=0 ⇒ 恒等），`scene.ts` 的钩子也从 splat 元素读这两个参数喂进去。
 验收探针 `_tmp/probe-unified-grading.cjs` 的结果：
@@ -1064,4 +1070,62 @@ sortElementCount = 549230`、画面 `litPct` 43.2%、转 30° 变化 5.1%（该�
 **顺带记一条工程教训**：这个 bug 之所以难找，是因为**失败模式完全静默** ——
 数据没传进贴图 → 投影器判无效 → 计数为 0 → 间接绘制画 0 个图元 → WebGPU 认为一切正常。
 排查这类问题的正确姿势是**从"链尾"往"链头"逐级读中间量**，而不是盯着最终画面猜。
+
+### 4u. ✅ 二期第一步：**我们的调色已经跑在 unified 通路上，且与主线对齐**（2026-09-26）
+
+用户"继续"之后接着做二期。三件事：
+
+**① 修掉"偏亮偏灰"的根因 —— 片元里那次除以 alpha。**
+unified 片元原先写 `let aRaw = max(alpha, 1e-5); var c = gaussianColor.xyz / aRaw;`，
+理由是"gaussianColor.xyz 已含一次 alpha"。**错了**：引擎 hybrid 顶点写的是
+`half4(half3(prepareOutputFromGamma(clr.xyz, viewDepth)), alpha)` —— xyz 是颜色本身、w 才是 alpha
+（引擎自带片元也是 `modifySplatColor` 之后才 `fragColor.xyz * fragColor.a`）。除以 alpha 会按
+1/alpha 提亮并压掉饱和度。实测（同一机位、中性参数）：
+
+| | 修前 | 修后 | per-instance（主线） |
+| --- | --- | --- | --- |
+| 均值 RGB | [124.38, 113.17, 114.52] | **[95.28, 54.00, 58.89]** | [96.51, 54.34, 59.12] |
+
+**② 把完整调色链搬过去，分工与 per-instance 逐字同序。**
+为什么同一段要拆到两个阶段：`prepareOutputFromGamma` 是 gamma 解码 + 可选 tonemap，
+做过就逆不回去，所以**线性域那几步必须在顶点、且在它之前**：
+* 顶点（每 splat一次）：`clrScale/clrOffset`（染色+亮度+黑白场+透明度）→ 曲线 LUT → 饱和度 → gamma 准备
+* 片元（每像素一次）：高光 → 阴影 → 对比 → 逐通道 HSL（8 色区）→ 预乘
+
+实现：顶点**始终用我们自己那一份** hybrid 顶点拷贝（原设计只在探针烘焙时替换）；曲线查表逐字照抄
+per-instance 的 `curveLookup`（textureLoad + 32 段线性插值）。
+
+**③ 参数推导抽成唯一实现** `src/splat/color-params.ts`（`splatColorParams` / `applySplatColorParams`）：
+`Splat.onPreRender`（per-instance）与 `scene.ts` 的 unified 钩子共用同一份 —— 这个仓库吃过
+"同一条规则多处各写一遍、只改了被点名的那个"的亏，所以这次一开始就只写一份。
+
+**验收**（`_tmp/probe-colour-parity.cjs`，同会话 A/B）：
+
+* 中性帧差（unified − per-instance）= **[-1.23, -0.34, -0.23]**（≈1/255 量级）；
+* 逐项参数两条通路**同向且幅度一致**：
+
+| 参数 | per-instance Δ | unified Δ |
+| --- | --- | --- |
+| saturation=0.5 | [-14.40, 6.56, 4.01] | [-13.99, 6.39, 3.81] |
+| saturation=0 | [-28.79, 13.12, 8.04] | [-28.03, 12.79, 7.60] |
+| contrast=0.6 | [11.89, -9.38, -6.37] | [11.73, -9.17, -6.07] |
+| brightness=0.15 | [10.92, 11.76, 11.74] | [10.78, 11.50, 11.50] |
+| highlights=1 | [3.23, 1.08, 1.07] | [3.20, 1.06, 1.07] |
+| shadows=1 | [0.95, 0.67, 1.69] | [0.92, 0.66, 1.70] |
+| temperature=0.6 | [19.02, 0, -17.15] | [19.11, 0, -16.96] |
+| blackPoint=0.2 | [-3.22, -13.68, -12.44] | [-3.20, -13.41, -12.11] |
+| 曲线（提亮中间调） | [6.77, 17.46, 16.16] | [6.66, 17.15, 15.85] |
+
+**两条坑（都写成了护栏/探针）**：
+
+1. **WGSL 模板字符串里不能出现反引号**（注释里也不行）：模板会提前结束，`npm run build` 报
+   `'const' declarations must be initialized` 之类，看起来像着色器语法错。本轮踩了三次，
+   现在 `scripts/audit-code.mjs` 有 `DANGER: backtick inside a WGSL template literal` 护栏。
+2. **WGSL 里 half 与 f32 混用会直接编译失败**：`vec4f(clr.xyz, alpha)`（half4 + half）报
+   `no matching constructor for 'vec4<f32>(vec3<f16>, f16)'`；而失败的表象只是
+   `[Invalid RenderPipeline] is invalid due to a previous error` + 整帧被丢弃。
+   真正的报错要读 `shaderModule.getCompilationInfo()` —— 探针 `_tmp/probe-wgsl-error.cjs` 就是干这个的。
+
+**二期仍未迁移**：选区覆盖 / 删除态着色 / 裁剪盒 / 特效 / 环选（需要 per-splat 的 user varyings），
+变换调色板（几何），以及性能与边界收尾。
 
