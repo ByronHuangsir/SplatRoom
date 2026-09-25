@@ -152,38 +152,49 @@ pipeline**，于是每次派发都是静默空跑。修法与自检代码在 `2d
 | 片元**不能** #include 引擎 chunk | 引擎给 ShaderMaterial 会自动带上 `gsplatPS` / `gsplatModifyPS`；再 include 一次 ⇒ `normExp` / `modifySplatColor` 重复定义 ⇒ 编译失败、每帧 invalid pipeline。自写片元只依赖 varying 名 + 自己的函数 |
 | 引擎的 Lint 面向 TS 源码 | WGSL 模板串里的**制表符**会触发 `no-tabs`（引擎源码是 tab 缩进，抄过来必须换成空格）|
 
-**卡在哪（下一步的唯一阻塞）** —— 2026-09-25 第二轮已经把根因钉死了：
+**卡在哪（下一步的唯一阻塞）** —— 2026-09-25 走了三条路，全部失败，但每一步都留下了可复用的结论：
 
-> **`material.shaderDesc = {...}` 换成我们自己的源码，引擎在绘制时根本不采用。**
->
-> 怎么确认的（三条独立证据，实测）：
-> 1. 材质上确实存着我们的源码：`shaderDesc.fragmentLen = 1034`、里面能搜到我们自己的标记
->    （`ourMarkerInFrag: true`）、顶点 4198 字节。
-> 2. 把片元的**默认值**写死成 0.25（不用 uniform）——画面逐像素不变（`meanAbsDiff = 0`）。
-> 3. 把片元改成输出**纯红**——画面仍然逐像素不变（红色通道没有占优）。
->
-> ⇒ 不是 uniform 绑定问题，是**这份源码压根没参与编译**。`shaderDesc` 在材质上，
-> 但引擎画的是它自己缓存的变体（`material.variants` 一直是 1）。
-> 早先那版"写坏的片元触发 `[Invalid RenderPipeline]`"**不能**证明我们的源码被采用了 ——
-> 更可能是被破坏的 `shaderDesc` 让引擎的变体重建走了另一条路（那是一次误导性证据，记下来）。
->
-> **下一步的正路（还没试，但机制上对）**：不要去换 `shaderDesc`，而是走引擎自己那条
-> **chunk 覆盖**的路 —— 材质的 `shaderChunks.wgsl.set('gsplatModifyPS', ...)`：
-> * 材质级 chunk 覆盖是引擎编译变体时**真的会读**的东西（`ShaderUtils.createShaderDefinition`
->   会把全局注册表与 `material.shaderChunks[lang]` 合并）；
-> * 设了 chunk 会让 `shaderChunks.isDirty()` 为真，于是引擎**自己在渲染前**的
->   `material.updateUniforms()` 就会 `clearVariants()`（playcanvas.mjs:26348-26352 / 26333）——
->   不需要我们手动清缓存（这一轮试过手动 `updateUniforms()`，没用，因为源码本来就没被读）。
-> * 我最早试过一次 `gsplatModifyPS` 覆盖"没效果"，**那次失败的原因现在清楚了**：
->   当时也顺手改了 `shaderDesc`（同一个错误原因），而且当时的 `gsplatModifyPS` 内容和引擎默认
->   语义不同却没有对齐 varying 名。要重做，且**只动 chunk、不动 shaderDesc**。
-> * 更早的"引擎自己就 `#include "gsplatModifyPS"`"这一条仍然成立（`gsplat_default3` 的
->   fragmentMain 里在写出颜色前调用 `modifySplatColor(gaussianUV, &fragColor)`），
->   所以 `gsplatModifyPS` 这条路在机制上是通的。
->
-> 另一条并行可评估的路：**只在 compute 侧做**（`workBufferModifier` → `gsplatModifyVS`）。
-> 它的 uniform 与绑定是引擎自己在建的，不经过"材质源码替换"这一层；
-> 代价是它每个 splat 跑一次，做不了按像素的调色（曲线/HSL 可以，裁剪盒的软边不行）。
+| 试过的路 | 做法 | 结果 | 留下的结论 |
+| --- | --- | --- | --- |
+| ① 换 `material.shaderDesc` | 用我们自写的 vertex+fragment 整套换掉源码 | **画面逐像素零变化** | 引擎绘制时**不采用** `shaderDesc` 里的源码（三条证据：默认值写死 0.25 / 输出纯红 / 都零变化） |
+| ② 覆盖 `gsplatModifyPS` | 材质级 chunk 覆盖（引擎的默认片元会调 `modifySplatColor`） | 画面零变化 | **这条通路的颜色不是片元阶段决定的** —— 片元根本不参与着色 |
+| ③ 覆盖 `gsplatModifyVS` | 走投影 compute 的钩子（引擎 `_updateMaterial` 真的会读它） | 画面零变化 | 机制上是对的（见下），但要么 compute 没重编、要么**探针读到的不是新帧** |
+
+**关键机制（这一轮最有价值的产出，已核过引擎源码）**：unified 通路的颜色**在投影 compute 里烘进
+`projCache`**，而那个 compute 的用户 chunk 取自**绘制材质**的同名 chunk ——
+`GSplatHybridRenderer` 投影派发时调 `_updateMaterial(material)`，而它（`playcanvas.mjs:86540-86553`）：
+
+```js
+const wgslChunks = material?.getShaderChunks?.(SHADERLANGUAGE_WGSL);
+this._userModifySource = wgslChunks?.get('gsplatModifyVS') ?? null;   // ← 读的是 VS，不是 PS
+```
+
+⇒ **想改 unified 通路的颜色必须覆盖 `gsplatModifyVS`**；覆盖 `gsplatModifyPS` 毫无作用
+（片元不参与着色）。这条以前不知道，是撞了几次才从源码里读出来的。
+
+**我怀疑真正卡住的是探针而不是产品代码**（下一次必须先排除它）：
+
+三条**机制完全不同**的路（改材质源码 / 改片元 chunk / 改 compute chunk）得到的画面
+**完全一致到小数点后两位**（`meanLuma` 恒为 28.98、`litPct` 恒为 56.81）。
+而同一个探针在别处是有效的（导入模型让画面从 29.51 变到 69.83）。
+⇒ 高度怀疑 `shoot()` 截到的是**同一张缓存帧**：unified 通路的出帧可能与 per-instance 不同，
+探针那套"设 `renderNextFrame` 再等两帧 rAF"在 unified 下不足以保证画布真的更新。
+
+**下一次开工的第一件事（不是改产品代码）**：
+拿一个**与画面无关**的判据确认"探针真能读到 unified 通路的新帧" —— 例如
+在 unified 下把相机转 30° 再截图（构图必须变），或直接读 `projCache` / 用一个已知会变的状态。
+**只有先证明"探针能看见变化"，前面三条路的"零变化"才有意义**；
+否则我们可能一直在给一个读不出新帧的探针白改代码。
+
+**另一条并行思路（如果 ③ 确认没生效）**：绕开"改引擎材质"，直接用自己的
+`ShaderMaterial` 替换 `renderer._material` 整个对象（引擎每帧的 `copyMaterialSettings`
+会从组件材质拷设置过来，而组件的 `get/set material` 在 unified 下被引擎硬断开了，
+所以要挂到 renderer 上并自己管生命周期）。这条路代价更高但最彻底。
+
+**为什么这一段值得单独开项目 / 建议先在干净环境里做**：
+本轮在一个完整的应用里做这种引擎级实验，每一轮都是 **build(20s) + 导入 + 截图** 约 3 分钟，
+而失败原因可能出在最外层（探针）。更高效的做法是拿 **playcanvas 官方 gsplat 示例**
+（或一个最小页面）做成独立的复现工程，几秒钟一轮地试，跑通后再搬回本项目。
 
 **另外发现一个独立 bug（与材质无关，但挡路）**：`?unified=1` 这条 URL 开关会让**导入本身失败** ——
 `addComponent('gsplat', { unified: true })` 那条路在建组件时就断了（elements 只有 8 个、没有 splat 元素、
