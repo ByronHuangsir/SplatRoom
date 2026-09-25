@@ -924,6 +924,24 @@ raw = [0,0,0,0,0,0,0,0]
   3. 用**官方 gsplat 示例页**跑同一份模型做对照（那里 unified 是活的），
      逐项 diff 我们缺了哪次调用 —— 这也是 §「为什么它不是本项目的活」里建议的干净环境做法。
 
+**起点 1 已经先量了一半**（`_tmp/probe-unified-counts.cjs`，把每个候选 StorageBuffer 的前 64 字节
+copy 到 staging 再 map）：
+
+| buffer | 读到的前几个 u32 |
+| --- | --- |
+| `intervalCompaction.compactedSplatIds`（8000B = 2000 个 u32） | `[0,1,2,3,4,5,6,7]` ⇒ **还是初值**（scatter 从没写进去） |
+| `intervalCompaction.intervalsBuffer`（16B） | 全 0 |
+| `intervalCompaction.countBuffer`（8B） | 全 0 |
+| `intervalCompaction.numSplatsBuffer`（4B） | 0 |
+| `intervalCompaction.sortElementCountBuffer`（4B） | 0 |
+| `workBuffer.orderBuffer`（9216B） | 全 0 |
+
+⇒ **整条计数链自始至终是 0**，而 compute pass 确实在派发（14 次 `dispatchWorkgroups` + 6 次
+`dispatchIndirect` / 2 帧）。所以下一轮要盯的是**这一段的输入**：cull 的视锥/边界输入是否为空
+（`world.hasBounds = true` 但 `worldState.sortParametersSet = false`），以及
+`uploadIntervals` 之后 `intervalsBuffer` 为什么仍是 0 —— 这条链的**第一个** 0 在哪里，
+就是根因所在。
+
 ### 4s. 本轮为探针加的钩子（都在 `?unified=1` 之内，默认全关）
 
 为了让上面这些问题以后能一次问清，本轮往这条通路里加了三个**只给探针用**的烘焙开关
