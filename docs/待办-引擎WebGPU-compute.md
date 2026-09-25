@@ -1102,6 +1102,11 @@ per-instance 的 `curveLookup`（textureLoad + 32 段线性插值）。
 **验收**（`_tmp/probe-colour-parity.cjs`，同会话 A/B）：
 
 * 中性帧差（unified − per-instance）= **[-1.23, -0.34, -0.23]**（≈1/255 量级）；
+* **逐像素**中性对比（均值会互相抵消，所以这条才是"画面一致"的硬指标）：
+  `mean|ΔRGB| = 0.72/255`、超阈值(>24)像素 **0.2%**、p95 = 3（最大值出现在高斯边缘的少数像素上，
+  来自 `gaussianColor` 是 half4 而 per-instance 用 f32 varying 的精度差）；
+* **主线逐位不变**：把"本轮改动之前"（22:21）那张 CPU 帧与改动之后（次日 01:51）的同一机位 CPU 帧
+  逐像素比对：`mean|ΔRGB| = 0`、`max = 0`（连文件大小都相同）⇒ 调色移植**没有碰到主线**；
 * 逐项参数两条通路**同向且幅度一致**：
 
 | 参数 | per-instance Δ | unified Δ |
