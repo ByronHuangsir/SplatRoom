@@ -124,6 +124,34 @@ const anyPerFile = [...sources.entries()]
 const tsconfig = readFileSync(join(root, 'tsconfig.json'), 'utf8');
 const excluded = [...tsconfig.matchAll(/"(src\/[\w./-]+\.ts)"/g)].map(m => m[1]);
 
+// ------------------------------------------------- 护栏：按名字杀浏览器
+// 2026-09-25：排查脚本里习惯性写 `Get-Process msedge | Stop-Process -Force`，
+// 那是**按进程名无差别杀** —— 会把用户正在用的 Edge（所有窗口和标签页）一起杀掉。
+// 实测因此把用户浏览器反复关掉三十多次，用户直接来问"为啥老是关我的 edge"。
+// 只该清"自己启动的孤儿"：判据是命令行里的 puppeteer 临时 profile 标记
+// （见 `docs/verify/lib/browser.cjs` 的 `cleanupOrphanBrowsers`）。
+// 这里把它变成静态护栏：仓库里再出现按名字杀浏览器就报出来。
+const browserKillHits = [];
+const scanBrowserKill = (file, text) => {
+    // 本文件自己就写着这两条正则，别把自己报出来
+    if (file === rel(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))) return;
+    text.split('\n').forEach((line, i) => {
+        // 跳过注释行：文档里**引用**这句错误写法（说明为什么不能这么干）是正常的，
+        // 护栏只该抓"真的会被执行"的那一行，否则它会一直报自己人的注释、被当噪音忽略。
+        const t = line.trim();
+        if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return;
+        // 行内同时出现"杀进程的动作"与"浏览器名"就报 —— **顺序无关**。
+        // （第一版写成 `Stop-Process[^\n]*msedge`，要求动作在前；而真实写法是
+        // `Get-Process msedge | Stop-Process -Force`，浏览器名在前 ⇒ 护栏完全失效。
+        // 用一个真违规样本做阳性对照才发现的：护栏自己也要有阳性对照。）
+        const hasKill = /\bStop-Process\b|\btaskkill\b/i.test(t);
+        const hasBrowser = /\b(msedge|chrome)(\.exe)?\b/i.test(t);
+        if (hasKill && hasBrowser) browserKillHits.push(`${file}:${i + 1}: ${t.slice(0, 140)}`);
+    });
+};
+for (const [file, text] of outsideFiles) scanBrowserKill(file, text);
+for (const [file, text] of rootConfigs) scanBrowserKill(file, text);
+
 const report = {
     totals: {
         sourceFiles: sources.size,
@@ -137,6 +165,7 @@ const report = {
     unusedSvgs,
     unusedDeps,
     tsconfigExcluded: excluded.filter(f => existsSync(join(root, f))),
+    browserKillByName: browserKillHits,
     escapes: {
         asAny: anyPerFile.reduce((n, e) => n + e.count, 0),
         asAnyTopFiles: anyPerFile.slice(0, 12),
@@ -162,6 +191,7 @@ if (process.argv.includes('--json')) {
     section('unused svg assets', unusedSvgs, f => f);
     section('unused npm deps', unusedDeps, d => d);
     section('tsconfig-excluded files that exist', report.tsconfigExcluded, f => f);
+    section('DANGER: kills a browser by process name', browserKillHits, l => l);
     section('as any per file', anyPerFile, e => `${String(e.count).padStart(4)}  ${e.file}`);
     section('@ts-ignore', report.escapes.tsIgnore, l => l);
     section('eslint-disable', report.escapes.eslintDisable, l => l);

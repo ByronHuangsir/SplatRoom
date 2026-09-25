@@ -11,7 +11,7 @@
 //   model 必须是 dist 下的文件名，默认 test-model.ply；
 //   T1 档先 `copy D:\DeepSeek\SplatRoomV2\_tmp\scan.ply dist\scan.ply`，跑完**记得删掉**（否则会进 asar）。
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 // 无头 Edge 会节流（甚至停掉）rAF，而 app 的导入路径要 await 一帧（replaceData 的 waitForRender），
 // 于是 13M 的导入会永远停在原地、页面 CPU 也几乎为 0。这几个开关是无头/CI 跑法必须加的。
 const NO_THROTTLE = [

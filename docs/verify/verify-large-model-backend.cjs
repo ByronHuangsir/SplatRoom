@@ -12,7 +12,7 @@
 const puppeteer = require('puppeteer-core');
 const { analysePng } = require('./lib/png.cjs');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const MODEL = process.argv[2] || 'big-model.ply';
 const BACKEND = process.argv[3] || 'webgpu';
 const URL = process.argv[4] || 'http://localhost:3621/';

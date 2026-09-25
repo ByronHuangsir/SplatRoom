@@ -3,7 +3,7 @@
 // 需要 dist\merged-scene.ply（或 scan.ply）在站点目录里；导入偶发挂住时页内自动重试。
 // 用法：node docs/probes/viewer-ab-13m.cjs <url> [model]
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'merged-scene.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

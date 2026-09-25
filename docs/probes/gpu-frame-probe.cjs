@@ -24,7 +24,7 @@
 const puppeteer = require('puppeteer-core');
 const { decodePng } = require('../verify/lib/png.cjs');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';
 const SECONDS = parseFloat(process.argv[4] || '4');

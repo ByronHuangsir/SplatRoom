@@ -16,7 +16,7 @@
 // usage: node docs/verify/verify-range-expand.cjs "<url>" [model]
 const puppeteer = require('puppeteer-core');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const BAR = '#selection-range-bar';

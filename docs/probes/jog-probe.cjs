@@ -1,7 +1,7 @@
 // 3.13.0 mechanic: two blocks parked at fixed homes, a push-drag with an accelerating taper,
 // and an automatic return on release. No numbers anywhere.
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';
 (async () => {

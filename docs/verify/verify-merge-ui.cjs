@@ -1,5 +1,5 @@
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const URL = 'https://b174fc23368348b69c9cc8e6fb68a259.bj10.agentos-app.net/?mode=merge';
 
 (async () => {

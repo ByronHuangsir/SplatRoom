@@ -16,7 +16,7 @@
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', '..', 'node_modules', 'puppeteer-core'));
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3100/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-layered.ply';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

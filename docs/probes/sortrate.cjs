@@ -4,7 +4,7 @@
 //   · 停手后是否真的补了最后一帧（画面顺序最终是"按最终位姿排序"）
 // 用法：node sortrate.cjs <url> [model] [seconds]
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'merged-scene.ply';
 const SECONDS = parseInt(process.argv[4] || '4', 10);

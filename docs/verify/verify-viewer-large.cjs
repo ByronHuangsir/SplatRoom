@@ -19,7 +19,7 @@
 // usage: node docs/verify/verify-viewer-large.cjs [url] [model]
 const puppeteer = require('puppeteer-core');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const TARGET = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const CANDIDATES = process.argv[3] ? [process.argv[3]] : ['merged-scene.ply', 'scan.ply', 'nosh-test.ply'];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

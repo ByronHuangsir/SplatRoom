@@ -23,7 +23,7 @@ const puppeteer = require('puppeteer-core');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = 'floater-biggrid-test.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

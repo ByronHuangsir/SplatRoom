@@ -5,7 +5,7 @@
 // usage: node docs/verify/verify-gpu-backend-setting.cjs [url]
 const puppeteer = require('puppeteer-core');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 

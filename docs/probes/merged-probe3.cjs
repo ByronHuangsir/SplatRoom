@@ -5,7 +5,7 @@
 const fs = require('fs');
 const http = require('http');
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const PLY = process.argv[2] || require('path').join(__dirname, '..', '..', 'dist', 'merged-scene.ply');
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const PORT = 3998;

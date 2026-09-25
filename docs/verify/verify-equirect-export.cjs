@@ -21,7 +21,7 @@ const path = require('path');
 const puppeteer = require('puppeteer-core');
 const { decodePng } = require('./lib/png.cjs');
 
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
 const args = process.argv.slice(2);
 const URL = args[0] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = args[1] && !args[1].startsWith('--') ? args[1] : 'test-model.ply';

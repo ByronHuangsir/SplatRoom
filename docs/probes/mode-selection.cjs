@@ -2,7 +2,7 @@
 // If the counts are identical, "环模式下不穿透" is a VISUAL issue (what is drawn), not a selection bug.
 // usage: node mode-selection.cjs [model] [url]
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
 const MODEL = process.argv[2] || 'test-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
