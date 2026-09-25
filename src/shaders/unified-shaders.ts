@@ -68,9 +68,23 @@ varying gaussianColor: half4;
     var colorRampSampler: sampler;
 #endif
 const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
+// 探针烘焙 3（§4s）：**绕过 projCache / viewport_size 直接把实例铺满屏幕**。
+// 用来回答"这块材质到底能不能把像素写到可见目标上"——如果铺满屏幕也不上屏，
+// 那问题就不在几何数据（projCache / viewport_size）而在更外层（管线或目标）。
+const SR_VS_COVER: f32 = __SR_VS_COVER__;
 @vertex
 fn vertexMain(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
+    if (SR_VS_COVER > 0.5) {
+        let q = vec2f(vertex_position.xy);
+        output.position = vec4f(q * 2.0, 0.0, 1.0);
+        output.gaussianUV = half2(0.0, 0.0);
+        output.gaussianColor = half4(half(1.0), half(1.0), half(1.0), half(1.0));
+        #ifndef DITHER_NONE
+            output.id = 0.0;
+        #endif
+        return output;
+    }
     let order = pcInstanceIndex * {GSPLAT_INSTANCE_SIZE}u + u32(vertex_position.z);
     let numSplats = numSplatsStorage[0];
     if (order >= numSplats) {
@@ -265,7 +279,34 @@ function bakeUnifiedModifyVS(): string {
     .replace('__SR_BAKE_RED__', red.toFixed(6));
 }
 
-export { unifiedModifyVS, bakeUnifiedModifyVS, unifiedFragmentShader };
+/**
+ * 片元侧的烘焙（与上面同一个全局）：两个**探针专用**的阳性对照。
+ *   - `fragRed: 1`     ⇒ 颜色整体朝纯红推（若片元参与最终画面，画面必须变红）
+ *   - `fragOpaque: 1`  ⇒ 完全绕过 discard 与 alpha，无条件写不透明红 —— 用来区分
+ *     "绘制没到目标"（画面毫无变化）与"绘制到了、只是被 alpha/discard 吃掉了"（画面变红）
+ * 默认全 0 = 与未烘焙逐位一致。
+ */
+export function bakeUnifiedFragmentShader(): string {
+    const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
+    const fragRed = bake && typeof bake.fragRed === 'number' ? bake.fragRed : 0;
+    const fragOpaque = bake && typeof bake.fragOpaque === 'number' ? bake.fragOpaque : 0;
+    return unifiedFragmentShader
+    .replace('__SR_FRAG_RED__', fragRed.toFixed(6))
+    .replace('__SR_FRAG_OPAQUE__', fragOpaque.toFixed(6));
+}
+
+/**
+ * 顶点侧的烘焙（同一个全局）：`__SPLATROOM_UNIFIED_BAKE__ = { vsCover: 1 }` ⇒
+ * 每个实例的四边形铺满屏幕（绕过 projCache 与 viewport_size）。**
+ * 只在装了"我们这一份顶点源"时才生效 —— 安装侧看到 `vsCover > 0` 会改用这份拷贝。
+ */
+export function bakeUnifiedVertexShader(): string {
+    const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
+    const cover = bake && typeof bake.vsCover === 'number' ? bake.vsCover : 0;
+    return unifiedVertexShader.replace('__SR_VS_COVER__', cover.toFixed(6));
+}
+
+export { unifiedVertexShader, unifiedModifyVS, bakeUnifiedModifyVS, unifiedFragmentShader };
 
 /**
  * 一个简单的字符串散列（FNV-1a，32 位），用来按**源码内容**生成稳定的缓存名。
@@ -310,6 +351,13 @@ varying gaussianColor: half4;
     uniform alphaClip: f32;
 #else
     uniform alphaClipForward: f32;
+    // ===== 一期调色参数（引擎常规 material.setParameter 通道）=====
+    // 为什么在这里而不是 compute 的 gsplatModifyVS：那条通道已实测**不影响画面**
+    // （见 docs/待办-引擎WebGPU-compute.md §4p）；而片元侧的 uniform 走引擎常规通道，
+    // 与 alphaClipForward 同一条路，是这条通路上唯一被验证过能改变画面的着色位置。
+    // 中性值：saturation = 1、contrast = 0 ⇒ 整条链恒等（默认观感逐像素不变）。
+    uniform saturation: f32;
+    uniform contrast: f32;
 #endif
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
     varying @interpolate(flat) vPickId: u32;
@@ -321,12 +369,37 @@ fn srNormExp(x: half) -> half {
     return (exp(x * half(-4.0)) - e4) / (half(1.0) - e4);
 }
 
+// ---- 调色（与 per-instance 片元逐字同一套公式）----
+fn srApplySaturation(c: vec3f) -> vec3f {
+    let grey: vec3f = vec3f(dot(c, vec3f(0.299, 0.587, 0.114)));
+    return grey + (c - grey) * uniform.saturation;
+}
+
+fn srApplyContrast(c: vec3f) -> vec3f {
+    return (c - vec3f(0.5)) * (1.0 + uniform.contrast) + vec3f(0.5);
+}
+
 // 判定用增益：先设 1.0，确认错误归零；再改成 0.25 确认"我们的片元真的在跑"。
 const SR_FRAG_GAIN: f32 = 1.0;
+
+// 探针烘焙（与顶点侧同一个全局，默认关闭）：把颜色朝纯红推，作为"我们的片元
+// 到底有没有决定最终颜色"的不可误认阳性对照（见 docs/待办-引擎WebGPU-compute.md §4q）。
+const SR_FRAG_RED: f32 = __SR_FRAG_RED__;
+
+// 探针烘焙 2：无条件写不透明红（见 §4s）。用来区分"这次绘制根本没到目标"
+// 与"到了、被 discard / alpha 吃掉了"。
+const SR_FRAG_OPAQUE: f32 = __SR_FRAG_OPAQUE__;
 
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     var output: FragmentOutput;
+    if (SR_FRAG_OPAQUE > 0.5) {
+        output.color = vec4f(1.0, 0.0, 0.0, 1.0);
+        #ifndef PICK_PASS
+            output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+        #endif
+        return output;
+    }
     let A: half = dot(gaussianUV, gaussianUV);
     if (A > half(1.0)) {
         discard;
@@ -352,9 +425,17 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         if (alpha < half(uniform.alphaClipForward)) {
             discard;
         }
-        // RT0：场景色（rgb 已含一次 alpha，这里再乘 alpha 得到预乘输出）
+        // 调色：gaussianColor.xyz 已含一次 alpha，先除以 alpha 还原成"颜色本身"，
+        // 调完再乘回去（中性参数下这一步是恒等，可逐像素自证）。
+        let aRaw: f32 = max(f32(alpha), 1e-5);
+        var c: vec3f = vec3f(gaussianColor.xyz) / aRaw;
+        c = srApplyContrast(c);
+        c = srApplySaturation(c);
+        // 探针烘焙：朝纯红推（阳性对照）
+        c = mix(c, vec3f(1.0, 0.0, 0.0), SR_FRAG_RED);
+        // RT0：场景色（预乘输出）
         let a: f32 = f32(alpha) * SR_FRAG_GAIN;
-        output.color = vec4f(vec3f(gaussianColor.xyz) * a, a);
+        output.color = vec4f(c * a, a);
         // RT1：选区覆盖。一期先写零（选区着色属于二期），但**这一行是这次修复的核心**：
         // 没有它，RT1 就没有对应的片元输出，管线校验直接失败。
         output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);

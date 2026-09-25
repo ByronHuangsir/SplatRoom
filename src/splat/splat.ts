@@ -1546,7 +1546,7 @@ class Splat extends Element {
             //
             // FIX (2026-08-12): removed the 3-frame throttle. The throttle was
             // introduced for performance (order-texture upload cost) but caused
-            // visible "鏉╂垵鐨潻婊冦亣" when the engine culler skips camera population.
+            // visible "近小远大" when the engine culler skips camera population.
             //
             // P0-2 FIX (2026-09-20，用户 2000 万点实测 ⑥)：真正的瓶颈不在"我们自己的派发"，
             // 而在引擎每帧无条件调 sorter.setCamera()（见 ensureSorterGate 的注释）；

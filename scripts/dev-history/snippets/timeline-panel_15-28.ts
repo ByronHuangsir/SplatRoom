@@ -13,7 +13,7 @@ interface TrackLaneDef {
 }
 
 const TRACK_LANES: TrackLaneDef[] = [
-    { id: 'camera', label: '鐩告満', color: '#3498db' }
+    { id: 'camera', label: '相机', color: '#3498db' }
 ];
 
 /**
@@ -312,7 +312,7 @@ class TimelinePanel extends Container {
                     const recBtn = document.createElement('button');
                     recBtn.className = 'audio-tool-btn';
                     recBtn.textContent = '\u25CF';
-                    recBtn.title = isRecording ? '鍋滄褰曢煶' : '褰曞埗闊抽';
+                    recBtn.title = isRecording ? '停止录音' : '录制音频';
                     if (isRecording) recBtn.style.background = '#e74c3c';
                     recBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleRecording(); });
                     wrap.appendChild(recBtn);
@@ -322,7 +322,7 @@ class TimelinePanel extends Container {
                     const fadeBtn = document.createElement('button');
                     fadeBtn.className = 'audio-tool-btn';
                     fadeBtn.textContent = '\u223C';
-                    fadeBtn.title = '娣″叆娣″嚭';
+                    fadeBtn.title = '淡入淡出';
                     if (audioState['music']?.fadeInOut) fadeBtn.style.background = '#27ae60';
                     fadeBtn.addEventListener('click', (e) => {
                         e.stopPropagation();
@@ -381,7 +381,7 @@ class TimelinePanel extends Container {
         let isRecording = false;
         const toggleRecording = async () => {
             if (isRecording) { mediaRecorder?.stop(); return; }
-            if (!navigator.mediaDevices?.getUserMedia) { alert('褰撳墠娴忚鍣ㄤ笉鏀寔褰曢煶'); return; }
+            if (!navigator.mediaDevices?.getUserMedia) { alert('当前浏览器不支持录音'); return; }
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 mediaRecorder = new MediaRecorder(stream);
@@ -389,7 +389,7 @@ class TimelinePanel extends Container {
                 mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recChunks.push(e.data); };
                 mediaRecorder.onstop = async () => {
                     const blob = new Blob(recChunks, { type: 'audio/webm' });
-                    await loadAudioFile('vocal', blob, `褰曢煶 ${new Date().toLocaleTimeString()}`);
+                    await loadAudioFile('vocal', blob, `录音 ${new Date().toLocaleTimeString()}`);
                     stream.getTracks().forEach((t) => t.stop());
                     isRecording = false;
                     redrawAudioTools();
@@ -398,7 +398,7 @@ class TimelinePanel extends Container {
                 isRecording = true;
                 redrawAudioTools();
             } catch (e) {
-                alert('鏃犳硶璁块棶楹﹀厠椋庯細' + (e instanceof Error ? e.message : String(e)));
+                alert('无法访问麦克风：' + (e instanceof Error ? e.message : String(e)));
             }
         };
 
@@ -595,7 +595,7 @@ class TimelinePanel extends Container {
                     margin-right:6px;display:flex;align-items:center;justify-content:center;
                 `;
                 leftArrow.textContent = '\u25C0';
-                leftArrow.title = hasPrev ? `璺宠浆鍒扮 ${prevKeyFrame} 甯 : '宸︿晶鏃犲叧閿抚';
+                leftArrow.title = hasPrev ? `跳转到第 ${prevKeyFrame} 帧` : '左侧无关键帧';
                 if (hasPrev) leftArrow.addEventListener('click', (e) => { e.stopPropagation(); events.fire('timeline.setFrame', prevKeyFrame); });
                 header.appendChild(leftArrow);
 
@@ -627,7 +627,7 @@ class TimelinePanel extends Container {
                     margin-left:0;margin-right:8px;display:flex;align-items:center;justify-content:center;
                 `;
                 rightArrow.textContent = '\u25B6';
-                rightArrow.title = hasNext ? `璺宠浆鍒扮 ${nextKeyFrame} 甯 : '鍙充晶鏃犲叧閿抚';
+                rightArrow.title = hasNext ? `跳转到第 ${nextKeyFrame} 帧` : '右侧无关键帧';
                 if (hasNext) rightArrow.addEventListener('click', (e) => { e.stopPropagation(); events.fire('timeline.setFrame', nextKeyFrame); });
                 header.appendChild(rightArrow);
 

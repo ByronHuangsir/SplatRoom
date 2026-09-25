@@ -585,6 +585,15 @@ const raw = ShaderChunks.get(device, SHADERLANGUAGE_WGSL)?.get?.('gsplatHybridVS
 
 ### 4n. ✅✅ 第十三轮：**通了。** unified 通路的画面活了
 
+> ⚠️ **2026-09-25 晚更正（见 §4q/§4r/§4s）：这一节的结论是错的。**
+> "转相机画面会变"这个判据**根本不是 splat 造成的** —— 把 splat 实体整个关掉、把 unified
+> 渲染器的 `meshInstance.visible` 设成 false，那种变化**一模一样**（mad 逐位相同）。
+> 后来用 GPU 层的仪器查到：unified 那次绘制用的是**全 0 的间接参数**（`indexCount = 0`、
+> `instanceCount = 0`），也就是**一个图元都没有** ⇒ 这条通路的画面**从来没活过**，
+> §4n 的 6.79% 是场景里别的东西（世界层的房间/网格）跟着相机转。
+> 190 → 1 的错误下降仍然是真的（那条修复修的是"材质/管线合法"这一层），
+> 但"修好了 ⇒ 画面活了"这一步是**误判**。
+
 按 §4m 的结论换掉了顶点源的取法（`material.shader.definition.vshader` → 引擎全局 chunk 注册表里的
 **原始** `gsplatHybridVS`，含 `#include`，交给材质自己展开）。两个独立判据同时通过：
 
@@ -835,3 +844,98 @@ unified"的必做前置）。
 * 唯一残留的关联是 `src/core/motion-opaque.ts` 删除后**留下的** blit quad-resolve 实现
   （`camera.ts` 里 `resolveMode` 恒 0）—— 见 `docs/运动期不透明-删除记录-2026-09-23.md` §3：
   它是上游运动帧画法的必要配套，若这个待办将来通了，那道 resolve 可以原样复用。
+
+---
+
+### 4q. 我的判据错了：那条"画面活了"的阳性对照**不是 splat 造成的**（2026-09-25 晚）
+
+起因：用户反馈"即使在小模型上、缓慢旋转也能看到排序错位"。既然主线只剩 2 帧物理下限，
+本轮要做的是把 §4n 那条 unified 通路真正接通。第一步是**重新验证 §4n 的判据**，
+因为这一路已经有三次"用没校验过的仪器得出假结论"（§4l、§4m、§4p）。
+
+**仪器 1 —— GPU 层"每一次绘制用哪份着色器"**（`_tmp/probe-who-draws.cjs` / `probe-who-draws2.cjs`）：
+拦 `createShaderModule`（给模块打标记）、`createRenderPipeline`（管线记住片元模块）、
+`beginRenderPass`（记颜色附件数）、`setPipeline` / `draw*`（记这一帧到底画了什么）。
++ 阳性对照仪器：`GPUAdapter.requestDevice` 上挂 `uncapturederror`。
+
+读到的**地面真值**（unified 帧，每帧 5 个 pass）：
+
+| pass | 颜色附件 | 绘制 |
+| --- | --- | --- |
+| 1 | `cameraColor` + `workColor`（= 我们的 `splatTarget`） | 0（clear） |
+| 2 | `cameraColor`（mainPass） | CPU 通路 2 次 / unified 1 次 |
+| 3 | `cameraColor` + `workColor` | **CPU：我们的 per-instance 材质；unified：我们那份自写片元** |
+| 4 | `cameraColor`（gizmo） | 1 |
+| 5 | 未知纹理 | 1 |
+
+也就是说：**我们的片元确实被编译、确实被用在那次 splat 绘制上**（`createShaderModule` 记录里
+含 `SR_FRAG_GAIN` 标记的模块只有一份，`fragRed = 1.000000`；`createRenderPipeline` 里对应
+`targets: 2` 的管线也只有它一份）。
+
+**但这一帧的像素与"把这次绘制去掉"逐位相同**（mad 0 / 0.00%），而且：
+
+* 把渲染器的 `meshInstance.visible = false`：**绘制次数不变**（3 帧 3 次）⇒ 这个"隐藏"根本不是有效仪器；
+* 把 splat 实体 `enabled = false`：CPU 通路的画面也不变 ⇒ 同上，这个开关也没接上；
+* **`fragOpaque = 1`（片元无条件写不透明红，绕过 discard 与 alpha）也不上屏**，0 条 WebGPU 错误；
+* 连 `vsCover = 1`（顶点里**绕过 `projCache` / `viewport_size`**，让每个实例的四边形铺满屏幕）
+  也不上屏，仍然 0 条错误。
+
+**仪器 2 —— 读 GPU 眼里的间接绘制参数**（`_tmp/probe-unified-indirect2.cjs`）：
+在 `GPUCommandEncoder.prototype.finish` 里补一条 `copyBufferToBuffer`，把那一帧的
+`drawIndexedIndirect` 参数在**同一帧、同一条 command buffer 内**抄到 staging buffer 再 map：
+
+```
+indexCount = 0   instanceCount = 0   firstIndex = 0   baseVertex = 0   firstInstance = 0
+raw = [0,0,0,0,0,0,0,0]
+```
+
+**⇒ 根因：那条通路的绘制参数就是全 0 ⇒ 零图元**。零图元的 draw **不可能**报校验错，
+所以"着色器全都对、材质状态与 CPU 通路逐项相同（blendType 4 / depthTest true / cull 0 /
+写掩码全开 / 目标就是 `cameraColor`）、却没有一个像素"这件事完全自洽。
+
+**顺带确认的两件事**：
+
+* 排序/压缩的 compute **有派发**（unified 每 2 帧：20 个 compute pass、14 次 `dispatchWorkgroups`、
+  6 次 `dispatchIndirect`；CPU 通路为 0）⇒ 不是"compute 没跑"，而是**跑完写出来的参数是 0**
+  （cull / scatter / writeIndirectArgs 那一段的计数为 0 最可疑）；
+* world 现场是**有数据**的：`totalActiveSplats = 2000`、`totalIntervals = 1`、
+  `indirectDrawSlot = 0`、`lastCompactedNumIntervals = 1`、`sortParametersSet = false`（值得下一轮盯）。
+
+**这一轮的教训（与 §4l/§4m/§4p 同一条）**：阳性对照必须**独立于被测对象**。
+"转相机画面会变"看着与着色无关，实际上它会被**场景里任何东西**满足 —— 所以它只在
+"被测对象是画面里唯一会动的东西"时才成立。真正与着色无关、又只认被测对象的两条判据是：
+**GPU 层的绘制归属**（谁画了、画了几次）与**间接参数的值**。
+
+### 4r. 现在的结论：unified 通路**画面从来没活过**，一期要重开
+
+* §4n 的"画面活了"作废（见 4q）；§4j 里"unified 画面是死的"其实是**对的**，
+  只是当时把原因归给了 `[Invalid RenderPipeline]`。
+* §4h/§4k/§4l/§4m 那些**机制**结论仍然成立且有用（片元必须写 `output.color1`、
+  `uniqueName` 必须随源码变化、顶点源要从全局 chunk 注册表拿）。
+  它们修好的是"**管线合法**"这一层 —— **是必要条件，不是充分条件**。
+* **一期（把默认渲染切到引擎 GPU 排序）的真实剩余工作**：让 cull/scatter/writeArgs 产出非零参数。
+  这是一个**引擎集成问题**（我们的自建渲染循环 + 自定义 RenderPass 与引擎那道
+  "每相机/每图层"的流程怎样对上），不是着色器问题。
+* 建议的下一轮起点（都很小、可单测）：
+  1. 在 `writeIndirectArgs` 的 compute 之后抄一份它的输入/输出计数（`countBuffer` /
+     `numSplatsBuffer` / `sortElementCountBuffer`）—— 看是 cull 归零还是 scatter 归零；
+  2. 对照 `scene.gsplat` 的 `minPixelSize` / `minContribution` / `radialSorting` 与
+     `sortParametersSet = false`：排序参数没被"设过"是否意味着视图参数是默认值（可能把一切都剔掉）；
+  3. 用**官方 gsplat 示例页**跑同一份模型做对照（那里 unified 是活的），
+     逐项 diff 我们缺了哪次调用 —— 这也是 §「为什么它不是本项目的活」里建议的干净环境做法。
+
+### 4s. 本轮为探针加的钩子（都在 `?unified=1` 之内，默认全关）
+
+为了让上面这些问题以后能一次问清，本轮往这条通路里加了三个**只给探针用**的烘焙开关
+（`globalThis.__SPLATROOM_UNIFIED_BAKE__`，默认 `null` ⇒ 与未烘焙逐位一致）：
+
+| 开关 | 作用 | 能回答的问题 |
+| --- | --- | --- |
+| `{ fragRed: 1 }` | 片元把颜色朝纯红推 | 我们的片元参与最终画面吗 |
+| `{ fragOpaque: 1 }` | 片元无条件写不透明红（绕过 discard/alpha） | 绘制到目标了吗，还是被 alpha 吃掉了 |
+| `{ vsCover: 1 }` | 顶点绕过 `projCache`/`viewport_size`，实例铺满屏幕 | 是几何退化还是更外层的问题 |
+
+配套代码：`src/shaders/unified-shaders.ts` 的 `bakeUnifiedFragmentShader` / `bakeUnifiedVertexShader`，
+`src/splat/unified-material.ts` 在 `vsCover > 0` 时改用**我们那一份**顶点源。
+这些常量都进了 `uniqueName` 的内容散列（`hashSource`），所以换值一定会重编译 ——
+这正是 §4p 那次假结论的病根。
