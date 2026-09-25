@@ -15,6 +15,7 @@ import {
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { vertexShader, fragmentShader } from '../shaders/position-shader';
 import { Splat } from '../splat/splat';
+import { splatResourceOf } from '../splat/splat-resource';
 
 const resolve = (scope: ScopeSpace, values: any) => {
     for (const key in values) {
@@ -84,7 +85,16 @@ class CalcPositions {
         const { scope } = device;
 
         const numSplats = splat.splatData.numSplats;
-        const transformA = (splat.entity.gsplat.instance.resource as any).getTexture('transformA');
+        // ⚠️ 同 `calc-bound.run`：unified 通路下 `gsplat.instance` 是 null，资源在组件上；
+        // 取不到就返回空表（调用方 `updatePositions` 只在编辑路径上用这个结果）。
+        const gsplat = splat.entity.gsplat as any;
+        const resource = splatResourceOf(gsplat);
+        const transformA = resource && typeof resource.getTexture === 'function' ?
+            (resource as any).getTexture('transformA') :
+            null;
+        if (!transformA) {
+            return new Float32Array(0);
+        }
         const splatTransform = splat.transformTexture;
         const transformPalette = splat.transformPalette.texture;
 

@@ -17,6 +17,7 @@ import {
 import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { vertexShader, fragmentShader } from '../shaders/bound-shader';
 import { Splat } from '../splat/splat';
+import { splatResourceOf } from '../splat/splat-resource';
 
 const v1 = new Vec3();
 const v2 = new Vec3();
@@ -164,7 +165,21 @@ class CalcBound {
         const { scope } = device;
 
         const numSplats = splat.splatData.numSplats;
-        const transformA = (splat.entity.gsplat.instance.resource as any).getTexture('transformA');
+        // ⚠️ 2026-09-25：unified 通路（引擎 GPU 排序）下 `gsplat.instance` 是 **null**
+        // （资源挂在 `gsplat.resource` / `_placement.resource` 上，见 `Splat.bindAsset`）。
+        // 这里原先直接读 `instance.resource` ⇒ TypeError ⇒ 被导入链转成错误弹窗 ⇒
+        // 无人操作时导入**永不 settle**（§4d 那个"`?unified=1` 导入卡死"的第二处）。
+        // 两种模式统一从组件上取资源；真的取不到就**保持 CPU 侧已有的 AABB**
+        // （`bindAsset` 已经 `cpuBoundStorage.copy(resource.aabb)`），不要抛异常打断导入。
+        const gsplat = splat.entity.gsplat as any;
+        const resource = splatResourceOf(gsplat);
+        if (!resource || typeof resource.getTexture !== 'function') {
+            return;
+        }
+        const transformA = (resource as any).getTexture('transformA');
+        if (!transformA) {
+            return;
+        }
         const splatTransform = splat.transformTexture;
         const transformPalette = splat.transformPalette.texture;
         const splatState = splat.stateTexture;

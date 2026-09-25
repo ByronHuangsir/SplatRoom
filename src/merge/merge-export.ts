@@ -2,6 +2,7 @@ import { Column, DataTable, MemoryFileSystem, writeFile } from '@playcanvas/spla
 import { BoundingBox, GSplatData, Quat, Vec3 } from 'playcanvas';
 
 import { MergeModel } from './merge-model';
+import { splatResourceOf } from '../splat/splat-resource';
 
 /**
  * 合并工具（模块 3）— 合并导出。
@@ -26,7 +27,7 @@ const _quat2 = new Quat();
 export function buildMergedGSplatData(models: MergeModel[]): GSplatData {
     let maxSHBands = 0;
     for (const m of models) {
-        const bands = (m.entity.gsplat.instance.resource as any).shBands ?? 0;
+        const bands = (splatResourceOf(m.entity.gsplat) as any)?.shBands ?? 0;
         if (bands > maxSHBands) maxSHBands = bands;
     }
     const maxRestCols = SH_REST_COUNTS[maxSHBands] ?? 0;

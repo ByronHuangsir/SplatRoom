@@ -288,9 +288,26 @@ async function createWindow() {
         if (sp >= 0 && process.argv[sp + 1]) return process.argv[sp + 1];
         return null;
     })();
+    // 实验通路开关：`--unified=1`（或 `--unified`）→ `?unified=1`。
+    //
+    // 为什么要在宿主侧转发：渲染进程只读 `location.search`（`src/main.ts` 的 `getURLArgs`），
+    // 打包之后没有别的入口能带查询参数，而这个开关的全部判定都挂在它上面
+    // （`main.ts` 把 `?unified=1` 归一化成 `__SPLATROOM_UNIFIED__`，下游只认那个全局）。
+    // 与 `--gpu` 同一套写法，保持一行一条命令行开关。
+    const unifiedArg = (() => {
+        const eq = process.argv.findIndex((a) => a.startsWith('--unified='));
+        if (eq >= 0) return process.argv[eq].slice(10);
+        if (process.argv.includes('--unified')) return '1';
+        return null;
+    })();
     const withGpu = (url) => {
-        if (!gpuArg) return url;
-        return url + (url.includes('?') ? '&' : '?') + 'gpu=' + encodeURIComponent(gpuArg);
+        let out = url;
+        const add = (kv) => {
+            out += (out.includes('?') ? '&' : '?') + kv;
+        };
+        if (gpuArg) add('gpu=' + encodeURIComponent(gpuArg));
+        if (unifiedArg) add('unified=' + encodeURIComponent(unifiedArg));
+        return out;
     };
     if (isDev) {
         mainWindow.loadURL(withGpu('http://localhost:3000'));

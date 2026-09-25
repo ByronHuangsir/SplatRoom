@@ -138,15 +138,35 @@ function writeCurveTable(device: any, texture: any, table: Float32Array): boolea
             return false;
         }
         const width = CURVE_SAMPLES;
-        const height = CURVE_CHANNELS;
-        // WebGPU 要求这几个字段是**数值型**（`unsigned long`）。实测传 `CURVE_SAMPLES` 时
-        // 报 "Failed to read the 'rowsPerImage' property ... Value is not of type 'unsigned long'"
-        // —— 那是被显式转成数值就能解决的形状问题，所以这里统一 Number() 一次。
+        // ⚠️ `CURVE_CHANNELS` 是**通道名数组**（`['master','red','green','blue']`），不是数量！
+        // 之前这里写成 `const height = CURVE_CHANNELS` ⇒ `Number(array)` = **NaN** ⇒
+        // `writeTexture` 抛 "Failed to read the 'rowsPerImage' property ... not of type 'unsigned long'"
+        // ⇒ 本函数返回 false ⇒ 调用方走 `lock()` 兜底 ⇒ **在 unified 导入路径上永久挂住**
+        // （就是 §4d 那个"`?unified=1` 导入卡死"的真正机理：直传一直是坏的，所以每次都在走兜底）。
+        const height = CURVE_CHANNELS.length;
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+            return false;
+        }
+        // ⚠️ 传进来的通常只是**一行**（`identityCurveSamples()` 返回 33 个采样 = 一个通道），
+        // 而纹理是 33×4（四个通道各一行）。之前的兜底路径是把这一行 `set` 进 4 个位置，
+        // 直传路径必须做同样的事，否则 WebGPU 报
+        // "Required size for texture data layout (528) exceeds the linear data size (132)"。
+        const rows = height;
+        let data = table;
+        if (table.length === width && rows > 1) {
+            data = new Float32Array(width * rows);
+            for (let ch = 0; ch < rows; ch++) {
+                data.set(table, ch * width);
+            }
+        }
+        if (data.length < width * rows) {
+            return false;
+        }
         queue.writeTexture(
             { texture: gpuTexture },
-            table,
-            { offset: 0, bytesPerRow: Number(width) * 4, rowsPerImage: Number(height) },
-            { width: Number(width), height: Number(height) }
+            data,
+            { offset: 0, bytesPerRow: Number(width) * 4, rowsPerImage: Number(rows) },
+            { width: Number(width), height: Number(rows) }
         );
         return true;
     } catch (e) {
@@ -349,6 +369,15 @@ class Splat extends Element {
         // (the 'view.bands' listener registered in add() keeps pointing at it).
         this.rebuildMaterial = (bands: number) => {
             const instance = this.entity.gsplat.instance;
+            // ⚠️ 2026-09-25：unified 通路（引擎 GPU 排序）下 `instance` 是 **null** ——
+            // 那条路的材质是每层的 `GSplatHybridRenderer._material`，由 `scene.ts` 的
+            // `ensureUnifiedMaterial()` 钩子负责（见 docs/待办-引擎WebGPU-compute.md §4t）。
+            // 这里必须**直接返回**：原先无条件 `const { material } = instance` ⇒ TypeError ⇒
+            // 被导入链的 catch 接住 ⇒ 弹错误框等人点确定 ⇒ 在无人操作时**导入永不 settle**
+            // （这就是"`?unified=1` 导入卡死"的直接原因，§4d）。
+            if (!instance) {
+                return;
+            }
             const { material } = instance;
             const { glsl, wgsl } = material.shaderChunks;
             glsl.set('gsplatVS', vertexShader);
@@ -873,13 +902,16 @@ class Splat extends Element {
 
         // update the splat centers which are used for render-time sorting
         const state = this.splatData.getProp('state') as Uint8Array;
-        const { sorter } = this.entity.gsplat.instance;
-        const { centers } = sorter;
-        for (let i = 0; i < this.splatData.numSplats; ++i) {
-            if (state[i] === State.selected) {
-                centers[i * 3 + 0] = data[i * 4];
-                centers[i * 3 + 1] = data[i * 4 + 1];
-                centers[i * 3 + 2] = data[i * 4 + 2];
+        // unified 通路下没有 per-instance sorter（中心点由引擎的 world/GPU 排序自己管）
+        const sorter = (this.entity.gsplat.instance as any)?.sorter;
+        if (sorter) {
+            const { centers } = sorter;
+            for (let i = 0; i < this.splatData.numSplats; ++i) {
+                if (state[i] === State.selected) {
+                    centers[i * 3 + 0] = data[i * 4];
+                    centers[i * 3 + 1] = data[i * 4 + 1];
+                    centers[i * 3 + 2] = data[i * 4 + 2];
+                }
             }
         }
 
@@ -905,8 +937,8 @@ class Splat extends Element {
             }
         }
 
-        // update sorting instance (absent on WebGPU / before the sorter exists)
-        this.entity.gsplat.instance.sorter?.setMapping(mapping);
+        // update sorting instance (absent on WebGPU / before the sorter exists / unified 通路上根本没有)
+        (this.entity.gsplat.instance as any)?.sorter?.setMapping(mapping);
 
         // recalculate bounds after sorting changes
         await this.updateLocalBounds();
@@ -937,7 +969,19 @@ class Splat extends Element {
         }
 
         // use centers data, which are updated when edits occur
-        const { sorter } = this.entity.gsplat.instance;
+        // unified 通路没有 per-instance sorter ⇒ 退回 CPU 侧的中心点（`calcSplatWorldPosition`
+        // 的调用方都在编辑/拾取路径上，那条路本身也需要一个可用值）
+        const sorter = (this.entity.gsplat.instance as any)?.sorter;
+        if (!sorter) {
+            const x = this.splatData.getProp('x') as Float32Array;
+            const y = this.splatData.getProp('y') as Float32Array;
+            const z = this.splatData.getProp('z') as Float32Array;
+            if (!x || !y || !z) {
+                return false;
+            }
+            result.set(x[splatId], y[splatId], z[splatId]);
+            return true;
+        }
         const { centers } = sorter;
 
         result.set(
@@ -964,7 +1008,13 @@ class Splat extends Element {
         // 排序完成信号：引擎的 GSplatSorter 收到 worker 回包时会 fire 'updated'
         // （gsplat-sorter.js:28-32），闸门靠它知道"这一次排序已经结束、可以派下一次了"。
         // 这正是 `_sortInFlight` 那个不存在的补丁字段本来该干的事（引擎 2.21.3 里没有它）。
-        this.entity.gsplat.instance.sorter?.on('updated', this._onSortUpdated, this);
+        //
+        // ⚠️ 2026-09-25：unified 通路下 `instance` 是 **null**（引擎改用 `_placement`，
+        // `GSplatComponent.get instance()` 直接返回 null）⇒ 这里必须可选链。之前写的是
+        // `this.entity.gsplat.instance.sorter?.on(...)` ⇒ **抛 TypeError**。这个异常被导入链的
+        // catch 接住 → 弹错误框等用户点确定 → 在无人操作的环境里**导入 promise 永不 settle**，
+        // 表现就是"`?unified=1` 导入卡死"（§4d 追了好几轮的那个）。
+        (this.entity.gsplat.instance as any)?.sorter?.on('updated', this._onSortUpdated, this);
 
         // we must update state in case the state data was loaded from ply
         await this.updateState();
@@ -972,7 +1022,8 @@ class Splat extends Element {
 
     remove() {
         this.scene.events.off('view.bands', this.rebuildMaterial, this);
-        this.entity.gsplat.instance.sorter?.off('updated', this._onSortUpdated, this);
+        // unified 通路下没有 instance（见 add() 里的说明），整体可选链
+        (this.entity.gsplat.instance as any)?.sorter?.off('updated', this._onSortUpdated, this);
 
         this.scene.contentRoot.removeChild(this.entity);
         this.scene.boundDirty = true;

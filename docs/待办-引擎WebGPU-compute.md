@@ -761,6 +761,32 @@ unified mad **0.116** / **0.48%**（探针看不见）。
 
 ### 4d. 那个"导入失败"的 bug 已定位到行（2026-09-25 第三轮）
 
+> ✅ **2026-09-26 凌晨：这个坑**修好了**，`?unified=1`（以及打包版的 `--unified=1`）现在能正常导入。**
+> 真正的机理由两条叠在一起（都不是"引擎的错"，全在我们自己的代码里）：
+>
+> 1. **曲线 LUT 的直传一直是坏的**：`writeCurveTable()` 里写的是
+>    `const height = CURVE_CHANNELS`，而 `CURVE_CHANNELS` 是**通道名数组**
+>    （`['master','red','green','blue']`）⇒ `Number(array)` = **NaN** ⇒ `queue.writeTexture`
+>    抛 "Failed to read the 'rowsPerImage' property ... not of type 'unsigned long'"
+>    ⇒ 函数返回 false ⇒ 调用方走 `curveTexture.lock()` 兜底 ⇒ **`lock()` 在 unified 导入路径上
+>    永久挂住**（这才是"导入静默卡死"的直接原因）。
+>    顺带还发现第二层：即使 NaN 修掉，直传的数据只有**一行 33 个采样**（纹理是 33×4），
+>    会报 "Required size ... (528) exceeds the linear data size (132)" —— 现在会把单行扩成 4 行。
+> 2. **导入链上有一串 `instance` 假设**在 unified 下抛 TypeError（`add()` 里的
+>    `gsplat.instance.sorter`、`rebuildMaterial()` 里的 `instance.material`、
+>    `calcBound`/`calcPositions` 里的 `instance.resource`、数据面板里的同一处），
+>    而这些异常**被导入链的 catch 接住 → 弹一个错误框等用户点确定** ⇒ 在无人操作的环境里
+>    promise 永不 settle（还会误报 "loaded but cannot be displayed"）。
+>    现在统一从 `src/splat/splat-resource.ts` 的 `splatResourceOf()` 取资源，
+>    `renderDiagnostics` 也按 unified 的判据（没有 instance/sorter，看 `_placement` + 活动 splat 数）。
+>
+> 验收：开发版 `?gpu=webgpu&unified=1` 导入 `test-model.ply` → 状态 `done`、0 弹窗、0 未捕获异常、
+> `renderCounter = numSplats = 1809`；打包版 `SplatRoom-3.23.44.exe --gpu=webgpu --unified=1`
+> → 导入 103 ms、`renderCounter = numSplats = 1925`、0 条 error 级日志。
+> 探针：`docs/probes/probe-unified-import-hang.cjs`、`docs/probes/probe-packaged-unified-e2e.cjs`。
+
+以下是当时（未修好之前）的排查记录，保留作参考：
+
 **现象**（最小复现 `_tmp/verify-unified-url-import.cjs`，A/B 同模型）：
 
 | 加载方式 | `import()` 结果 | elements | splat 元素 | gsplat 组件 |

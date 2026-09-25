@@ -7,6 +7,7 @@ import { Tooltips } from './tooltips';
 import { Events } from '../core/events';
 import { Element } from '../scene/element';
 import { Splat } from '../splat/splat';
+import { splatResourceOf } from '../splat/splat-resource';
 
 // gpu propMode constants. these must match the propMode dispatch in
 // src/shaders/splat-value-shader.ts.
@@ -258,7 +259,7 @@ class DataPanel extends Container {
                 f_dc_1: i18n.t('panel.splat-data.dc-green'),
                 f_dc_2: i18n.t('panel.splat-data.dc-blue')
             };
-            const shBands = (splat.entity.gsplat.instance.resource as any).shBands ?? 0;
+            const shBands = (splatResourceOf(splat.entity.gsplat) as any)?.shBands ?? 0;
             const numCoeffs = SH_NUM_COEFFS[shBands] ?? 0;
             const channels = ['R', 'G', 'B'];
             const maxFRest = numCoeffs * 3;

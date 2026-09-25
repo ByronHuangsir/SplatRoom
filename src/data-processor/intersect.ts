@@ -20,6 +20,7 @@ import { waitForGpuDrain, withReadbackTimeout } from './gpu-readback';
 import { packedMaskHeight, packedMaskWidth } from './histogram-config';
 import { vertexShader, fragmentShader } from '../shaders/intersection-shader';
 import { Splat } from '../splat/splat';
+import { splatResourceOf } from '../splat/splat-resource';
 
 // every mode accepts `footprint`: 0 (default) tests the splat's center point,
 // >0 widens the test by the splat's rendered extent (the 2*sqrt(2)-sigma
@@ -169,7 +170,7 @@ class Intersect {
         const { scope } = device;
 
         const numSplats = splat.splatData.numSplats;
-        const resource = splat.entity.gsplat.instance.resource as any;
+        const resource = splatResourceOf(splat.entity.gsplat) as any;
         const transformA = resource.getTexture('transformA');
         // per-splat scale (xyz) + rotation z, used by the footprint tests
         const transformB = resource.getTexture('transformB');

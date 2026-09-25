@@ -30,6 +30,7 @@ import {
     binFS
 } from '../shaders/histogram-shaders';
 import { Splat } from '../splat/splat';
+import { splatResourceOf } from '../splat/splat-resource';
 
 const identity = new Mat4();
 const zeroVec3 = new Vec3();
@@ -63,7 +64,7 @@ const resolve = (scope: ScopeSpace, values: any) => {
 };
 
 const getShBands = (splat: Splat): number => {
-    return (splat.entity.gsplat.instance.resource as any).shBands ?? 0;
+    return (splatResourceOf(splat.entity.gsplat) as any)?.shBands ?? 0;
 };
 
 class CalcHistogram {
@@ -196,7 +197,7 @@ class CalcHistogram {
     private setSplatUniforms(splat: Splat, mode: number, options?: CalcHistogramOptions) {
         const { scope } = this.device;
         const numSplats = splat.splatData.numSplats;
-        const resource = splat.entity.gsplat.instance.resource as any;
+        const resource = splatResourceOf(splat.entity.gsplat) as any;
         const transformA = resource.getTexture('transformA');
         const transformB = resource.getTexture('transformB');
         const splatColor = resource.getTexture('splatColor');
