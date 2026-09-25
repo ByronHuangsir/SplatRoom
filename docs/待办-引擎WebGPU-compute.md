@@ -376,6 +376,78 @@ per-instance 材质调 `shaderDesc`）。对引擎那个材质设置 `shaderDesc
 **"Color target has no corresponding fragment stage output" 条数归零**，
 再去量"转相机 30° 画面活没活"。**不要**再用"画面好像变了"来判断 —— 那正是前面几轮栽的坑。
 
+### 4j. ✅ 第十轮：按用户要求读引擎源码，把这条链**完整读通**了（并且发现我一直在补错对象）
+
+**一、`fragmentOutputTypes` 从哪来**
+
+`ShaderDefinitionUtils.createDefinition`（`playcanvas.mjs:10660-10693`）是唯一的生成处：
+它按 `options.fragmentOutputTypes` **逐个附件**生成
+`#define COLOR_ATTACHMENT_i`（GLSL）与 `alias pcOutType_i`（WGSL）；片元结构
+`struct FragmentOutput { color0 → color, color1 → color1, … }` 也由它按这个列表生成
+（结构生成在 `:9342`，成员名 `color` / `color${i}`）。
+
+`fragmentOutputTypes` 的来源有三条，**都指向"材质自己"**：
+
+| 来源 | 位置 | 说明 |
+| --- | --- | --- |
+| `ShaderMaterial.shaderDesc.fragmentOutputTypes` | `:34401` → `createShaderDefinition` | 我们的 per-instance 材质走这条（我们建的时候就传了两个） |
+| 工作缓冲的流描述 | `:40265-40279`、`:41635-41662` | 引擎**从 `format` 的流**算出 `getGlslShaderType(stream.format).returnType` 再传下去 —— 这是引擎里 MRT 能正常工作的样板 |
+| 默认 | `:10662` | 不给就是 `["vec4"]` ⇒ **只声明一路输出** |
+
+**二、unified 那个材质的片元输出到底怎么声明（关键）**
+
+* 引擎**自己的片元着色器**（WGSL `gsplatChunksWGSL.gsplatPS` = `gsplat_default3`）
+  在 forward 路径里**只写 `output.color`**。全文里 `output.color1` 只出现一次，
+  而且在 `#ifdef PICK_PASS` 里（`:90816` 附近的 `output.color1 = getPickDepth();`）。
+  ⇒ **引擎这份片元在任何情况下都不可能满足"两个附件都要有输出"**。
+* 它建材质时（`GSplatHybridRenderer` 构造，`:87179-87186`）只传
+  `vertexWGSL` / `fragmentWGSL` / `attributes`，**没有传 `fragmentOutputTypes`**
+  ⇒ 落到默认 `["vec4"]` ⇒ 只声明 `output.color`。
+* 而我们的 splat pass 用的是 **2 附件 MRT**（`camera.ts:776-784` 的 `splatTarget`：
+  `[colorBuffer, workBuffer]`，`:816` 的 `splatPass` 把 splat 层画进去）
+  ⇒ **RT1 有 writeMask、片元却没有第二个输出** ⇒ 正是那条校验错误。
+* 我们的 per-instance 材质之所以能在同一个 MRT 上工作：**它是我们自己建的 `ShaderMaterial`**，
+  声明了两路输出（GLSL `pcFragColor0`/`pcFragColor1`、WGSL `output.color`/`output.color1`）。
+
+**三、⚠️ 我一直在补错对象（这是"修复没生效"的真正原因）**
+
+引擎解析"绘制用哪个材质"的地方是（`:88268-88281`）：
+
+```js
+_writeGsplatParams(p) {
+    const gsplat = this.scene.gsplat;
+    …
+    p.material = gsplat.material;     // ← 场景级的 ShaderMaterial
+    p.varyings = gsplat.varyings;
+}
+```
+
+而 `scene.gsplat` 是 **`GSplatParams`**（`:36629` 起），它的 `material` 是一个
+**场景级 `ShaderMaterial`**（`get material() { return this._material; }`，
+`_material = new ShaderMaterial()` 在构造里，并预设了 `alphaClip` / `minPixelSize` 等参数）。
+
+⇒ **`p.material` 就是 `scene.gsplat.material`，不是 `GSplatHybridRenderer._material`。**
+我前面几轮补的是那个 renderer 的 `_material`（`_updateMaterial(material)` 读的是 `p.material`，
+也就是场景级那个）。**这就是为什么"补 `fragmentOutputTypes`"完全没反应** —— 我改的对象
+根本没参与编译。
+
+**四、这条链现在给出的**两条可行路**（这才是有依据的结论）
+
+* **路 A（推荐，改动小）**：把 **`scene.gsplat.material`** 换成我们自己的
+  `ShaderMaterial`，并在 `shaderDesc` 里给 `fragmentOutputTypes: ['vec4','vec4']`，
+  片元同时写 `output.color` 与 `output.color1`（RT1 的内容按现约定：选区覆盖，
+  不选时写 `vec4(0)`）。这条路同时解决三件事：输出路数、以及**我们终于能真正控制
+  unified 通路的着色**（不必再跟引擎那份片元较劲）。
+  ⚠️ 注意 `GSplatParams.material` **只有 getter 没有 setter** ⇒ 需要直接改
+  `scene.gsplat._material`（引擎内部字段，属于打补丁，要写清楚）。
+* **路 B（更干净但更侵入）**：让 unified 模式下的 splat pass 用**单附件**目标
+  （不再用 `splatTarget` 的 RT1）。代价是改渲染 pass 的组织，而且要知道 RT1 在该模式下
+  是否真的没人读。
+
+**验收判据（不变）**：`Color target has no corresponding fragment stage output` 归零，
+再用"转相机 30°"量画面活没活。
+
+
 
 
 
