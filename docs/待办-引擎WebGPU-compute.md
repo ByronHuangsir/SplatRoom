@@ -924,23 +924,50 @@ raw = [0,0,0,0,0,0,0,0]
   3. 用**官方 gsplat 示例页**跑同一份模型做对照（那里 unified 是活的），
      逐项 diff 我们缺了哪次调用 —— 这也是 §「为什么它不是本项目的活」里建议的干净环境做法。
 
-**起点 1 已经先量了一半**（`_tmp/probe-unified-counts.cjs`，把每个候选 StorageBuffer 的前 64 字节
-copy 到 staging 再 map）：
+**起点 1/2 已经做完，而且把问题钉到了一个具体位置**（下面每一条都是**经过有效性检查**的读数）：
 
-| buffer | 读到的前几个 u32 |
-| --- | --- |
-| `intervalCompaction.compactedSplatIds`（8000B = 2000 个 u32） | `[0,1,2,3,4,5,6,7]` ⇒ **还是初值**（scatter 从没写进去） |
-| `intervalCompaction.intervalsBuffer`（16B） | 全 0 |
-| `intervalCompaction.countBuffer`（8B） | 全 0 |
-| `intervalCompaction.numSplatsBuffer`（4B） | 0 |
-| `intervalCompaction.sortElementCountBuffer`（4B） | 0 |
-| `workBuffer.orderBuffer`（9216B） | 全 0 |
+| 环节 | 手段 | 读数 | 判读 |
+| --- | --- | --- | --- |
+| world 状态 | 读 `world.currentState` | `totalActiveSplats=2000`、`totalIntervals=1`、`splats=[{activeSplats:2000, intervals:[], intervalOffsets:[0], boundsBaseIndex:0}]` | 数据齐 |
+| 区间表内容 | **JS 层截住 `intervalsBuffer.write()`** 的入参 | `[0, 2000, 0, 0]` = `{workBufferBase:0, splatCount:2000, boundsIndex:0}` | **正确** |
+| 上传时机 | 截 `uploadIntervals` 入参 | `skipped: true`（`worldState.version === _uploadedVersion` 恒成立）⇒ 只传过一次 | 无害（那一次内容就是上面那份） |
+| cull 输入 | JS 层截 `boundsBuffer.write` / `transformsBuffer.write` + 读 `frustumPlanes` | bound = `{center:(-0.0005, 0, -0.30), radius:1.1563, transformIndex:0}`；transforms = 单位阵（y 翻转）；6 个平面的有符号距离全为正（最小 0.549） | 按 cull 的 WGSL（`dist <= -radius` 才判不可见）**应当 visible = true** |
+| 派发 | 数 compute pass / `dispatchWorkgroups` / 提交 | 每 2 帧 20 个 compute pass、14 次 dispatch（cull 是 1 个 workgroup）、**这些 compute 与渲染在同一个 command buffer 里，且该 buffer 确实被 `queue.submit`** | 派发与提交都发生了 |
+| 校验错误 | `uncapturederror`（稳态重置后） | 0 条 | 没有报错可循 |
+| 链尾输出 | 读带 `COPY_SRC` 的 `numSplatsBuffer` / `sortElementCountBuffer`（每帧由 `writeIndirectArgs` 写） | 恒为 0 | 计数确实没产出 |
+| scatter | 读 `compactedSplatIds` | 仍是 `[0,1,2,...]` 初值 | scatter 从没写进去 |
+| **金丝雀** | 把区间表的 `splatCount` 改成 7（合法范围内）后渲染 1 帧 | 链尾仍是 0 | cull 没把金丝雀吞进去 |
+| **裸 compute A/B** | 用**完全不经过引擎**的裸管线（`data[0] = 42u`）写引擎自己的 `numSplatsBuffer`，再读回 | **读到 42** | 设备、buffer、提交、读回链路**全部正常** |
 
-⇒ **整条计数链自始至终是 0**，而 compute pass 确实在派发（14 次 `dispatchWorkgroups` + 6 次
-`dispatchIndirect` / 2 帧）。所以下一轮要盯的是**这一段的输入**：cull 的视锥/边界输入是否为空
-（`world.hasBounds = true` 但 `worldState.sortParametersSet = false`），以及
-`uploadIntervals` 之后 `intervalsBuffer` 为什么仍是 0 —— 这条链的**第一个** 0 在哪里，
-就是根因所在。
+⇒ **结论：设备与缓冲都没问题；"compute 不落地"发生在引擎那批 compute 上** ——
+JS 层输入全对、dispatch 与 submit 都发生、0 条校验错，但 GPU 侧一个字节都没变。
+这正是本文档 §1 在阶段 0 spike 里量到的那个现象（标题里的"引擎侧 WebGPU compute 不落地"），
+现在用金丝雀 + 裸 compute 对照把它**在应用内的具体位置**（splat 区间压缩链）
+重新钉了一遍。
+
+**⚠️ 本轮三次"读数无效"的教训（都会制造出"全 0"的假象，必须记下来）**：
+
+1. `copyBufferToBuffer` 的**拷贝长度不能超过目标 buffer 大小**（16B 的 buffer 抄 32B ⇒ 拷贝被拒 ⇒ staging 保持新建时的 0）；
+2. 源 buffer **必须有 `COPY_SRC`**：`intervalsBuffer`（STORAGE|COPY_DST）与 `countBuffer`（只有 STORAGE）都读不回来；
+3. `writeBuffer(buf, off, view, dataOffset, size)` 的 `size` **按元素个数**算（实测：`size=4` + `Uint32Array([11,22,33,44])` ⇒ 四个全落盘），引擎传 `numIntervals * 4` 是对的。
+
+读数前先自证仪器可用（大小、usage、长度），否则"全 0"极可能是仪器假象 —— 这一条和
+§4l/§4m/§4p/§4q 的教训是同一件事。**
+
+### 4r. 现在的结论：unified 通路**画面从来没活过**，一期要重开
+
+* §4n 的"画面活了"作废（见 4q）；§4j 里"unified 画面是死的"其实是**对的**，
+  只是当时把原因归给了 `[Invalid RenderPipeline]`。
+* §4h/§4k/§4l/§4m 那些**机制**结论仍然成立且有用（片元必须写 `output.color1`、
+  `uniqueName` 必须随源码变化、顶点源要从全局 chunk 注册表拿）。
+  它们修好的是"**管线合法**"这一层 —— **是必要条件，不是充分条件**。
+* **卡点已经收敛到"引擎侧 compute 不落地"**（见上表最后一行的 A/B 对照），
+  不是着色器、不是材质状态、不是渲染目标、也不是我们的相机/Pass 接错。
+* 下一步只有两条路，都**不适合继续在完整应用里试**（每轮 build 20s + 导入 + 截图 ≈ 3 分钟）：
+  1. **干净环境对照**：拿官方 gsplat 示例页（那里 unified 是活的）跑同一份模型，
+     逐项 diff 我们少了哪次调用/哪个初始化 —— 这是本文档开头就建议过的做法；
+  2. **引擎侧**：读 `Compute`/`WebgpuCompute` 的 `applyParameters` / `updateBindGroup` /
+     `dispatch` 在"命令编码器由外部渲染循环掌管"时的行为差异（我们的 app 自己驱动 render loop）。
 
 ### 4s. 本轮为探针加的钩子（都在 `?unified=1` 之内，默认全关）
 
