@@ -240,6 +240,106 @@ pipeline**，于是每次派发都是静默空跑。修法与自检代码在 `2d
 `probe-pipeline-error.cjs`（WebGPU 拦截，含自检）、`diag-gpu-hook.cjs`（钩子可行性诊断）、
 `probe-frame-visibility.cjs`（转相机阳性对照）、`png-grid.cjs`（读不了图时把 PNG 打成亮度网格）。
 
+### 4g. 第七轮：把错误从"继承来的"追到了"某次提交开始"
+
+**手段换了才拿到东西**：用 `pushErrorScope` 包住翻转那段**不可行**（引擎每帧自己成对 push/pop，
+把我的作用域吃掉，两次 pop 都返回 `No error scopes to pop`）。改成在**提交点**成对包围
+（`queue.submit` 前后各一次 scope，自成一对、不与引擎的交错）之后，终于抓到东西了：
+
+| 观测（就地翻转成 unified） | 值 |
+| --- | --- |
+| hook installed | YES（**自检通过**，数字才可信） |
+| shader modules | 12 → 25 |
+| createRenderPipeline | 6 → 8 |
+| createComputePipeline | 0 → 9 |
+| WGSL 编译错误 | **0** |
+| 管线创建异常 | **0** |
+| **submit 校验错误** | **190 条** |
+
+190 条的内容**全部一样**：
+
+```
+[Invalid CommandBuffer] is invalid due to a previous error.
+ - While calling [Queue "Default Queue"].Submit([[CommandBuffer], [Invalid CommandBuffer]])
+```
+
+**关键信息是标签**：第一次跑，最早的坏提交是 **#480**；第二次跑是 **#300**。
+⇒ 不是"某一次固定操作"引发的，而是**从某一帧开始，这个设备/队列进入了持续报错状态**
+（每帧提交都被判无效），起点与当次跑的帧数/时序有关。
+
+**仍然没抓到的那一句**：真正的**首个**校验错误（"previous error"里的那个 previous）。
+它不在提交点上，也不在 `createShaderModule` / `createRenderPipeline` 上。
+剩下的嫌疑（按可能性）：
+
+1. **`popErrorScope` 是异步的、而引擎每帧成对 push/pop** —— 我的钩子虽然自成一对，
+   但引擎自己的 pop 可能把**我的** scope 结果吃掉（反之亦然）。要用更硬的证据：
+   把 `popErrorScope` 的返回**在引擎调用处**记录（而不是我自己再 push 一对），
+   或者干脆给 `device` 挂 `onuncapturederror`（`GPUDevice` 有这个事件，
+   `addEventListener('uncapturederror', …)` 能拿到**所有未被作用域捕获**的错误）。
+   **这是下一步最该试的一条**，而且比现在的做法更直接。
+2. 某个 compute pass 的 `dispatchWorkgroups` 参数非法（indirect buffer / 绑定组）。
+3. 某个 render pass 的 attachment 与管线不匹配（例如统一通路用的是间接绘制 + storage buffer，
+   而某个中间 pass 仍按 per-instance 的 attachment 配置）。
+
+**为什么这一轮值得**：错误终于有了**计数与位置**（190 条、从某次提交起），
+并且确认了"编译与管线创建都没问题" —— 病因在**每次绘制/提交的校验**里，
+而不是在着色器或管线对象上。这比上一轮"只知道有个 previous error"进了一步。
+
+**下一步（明确）**：给 `device` 挂 `uncapturederror` 监听，把每条未被捕获的错误的
+`error.message` 原文记下来 —— 它应当直接给出"哪条命令、缺什么"。
+
+### 4h. ✅ 第八轮：**找到根因了** —— 片元输出少了一个颜色附件
+
+`uncapturederror` 一挂上就出来了。**382 条未捕获错误，去重后只有两类**：
+
+```
+[GPUValidationError] Color target has no corresponding fragment stage output
+  but writeMask (ColorWriteMask::(Red|Green|Blue|Alpha)) is not zero.
+ - While validating targets[1] framebuffer output.
+ - While validating fragment state.
+ - While calling [Device].CreateRenderPipeline([RenderPipelineDescriptor]).
+```
+
+以及它的下游后果：
+
+```
+[GPUValidationError] [Invalid RenderPipeline (unlabeled)] is invalid due to a previous error.
+ - While encoding [RenderPassEncoder "_p-PassEncoder RT:cameraColor"].SetPipeline(...)
+```
+
+**根因**：我们给 splat 材质写了**两个颜色附件**（RT0 = 场景色，RT1 = 选区覆盖，
+供轮廓/底衬 pass 用；见 `src/shaders/splat-shader.ts` 里 "RT0 = scene colour,
+RT1 = selection overlay" 那段注释）。而 **unified 通路引擎自己那份片元着色器只有 `output.color`
+一个输出**，渲染目标却按两个附件建 ⇒ **targets[1] 有 writeMask 却没有对应的片元输出**
+⇒ `CreateRenderPipeline` 校验失败。
+
+**为什么它一直隐身**（三件事叠在一起，值得记进坑清单）：
+
+1. `createRenderPipeline` **不抛异常**（与 2.21.3 的 `createComputePipeline` 一样的行为），
+   所以我的 `try/catch` 计数恒为 0 —— **"0 异常"不等于"管线有效"**；
+2. WGSL 编译 **0 错误**（问题不在着色器语法，在管线与渲染目标的匹配）；
+3. 那条 `[Invalid RenderPipeline]` 只是**下游症状**，浏览器不给原文，我盯着它查了好几轮。
+
+**这一条与之前那个 spike 的坑是同一个家族**：2.21.3 的 `createComputePipeline` 在绑定槽位
+对不上时也是"不抛异常、返回无效对象、之后静默空跑"。**判据要换成"挂 `uncapturederror` 数错误"，
+而不是"看有没有抛异常"。**
+
+**下一步（具体）**：在 unified 通路的材质里补上第二路输出。引擎的片元结构里
+`output.color` 已是 RT0；需要把 `output.color1` 也写出来（per-instance 那份就是这么做的：
+`src/shaders/splat-shader.ts` 里 `output.color1` / `pcFragColor1`）。具体做法：
+* 在 `src/shaders/unified-shaders.ts` 的 chunk 里**声明第二路输出**（`@location(1)` 或引擎的
+  `FragmentOutput.color1`，取决于引擎生成的 `FragmentOutput` 结构里有没有这个成员）；
+* 引擎侧的多输出是靠 `fragmentOutputTypes` / `GSPLAT_*` define 决定的，需要确认在 unified 材质上
+  怎么让它声明 `color1`（per-instance 的 `ShaderMaterial` 是我们自己建的，unified 那个是引擎建的）；
+* 若引擎的 `FragmentOutput` 结构里确实没有 `color1`，那就反过来：**让渲染目标只用 1 个附件**
+  （`camera.targetSizeOverride` / 关掉我们那路选区覆盖的 RT1），这取决于轮廓/底衬 pass 是否真需要它。
+
+**这一轮为什么值**：从"只知道有个 previous error"到"**知道是 targets[1] 没有片元输出**"，
+中间是靠**换判据**（`uncapturederror` 数错误）而不是靠继续猜。工具留在
+`_tmp/probe-pipeline-error.cjs`（钩子含自检 + 提交点包围 + uncapturederror）。
+
+
+
 | 试过的路 | 做法 | 结果 | 留下的结论 |
 | --- | --- | --- | --- |
 | ① 换 `material.shaderDesc` | 用我们自写的 vertex+fragment 整套换掉源码 | 画面逐像素零变化（**见上面的更正：在死画面上量的**） | 待重测 |
