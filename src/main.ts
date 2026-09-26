@@ -218,6 +218,28 @@ const main = async () => {
         (globalThis as any).__SPLATROOM_UNIFIED__ = true;
     }
 
+    // 实验通路必须**一眼能看出来是开着的**：这条路的观感已经和主线对齐（调色接过去了），
+    // 光看画面分不出自己测的是哪条 —— 而"以为开了其实没开"会让排查完全跑偏
+    // （实测吃过这个亏）。所以打开时在角落里挂一个不拦截事件的标签。
+    if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+        const badge = document.createElement('div');
+        badge.id = 'splatroom-unified-badge';
+        badge.textContent = 'unified 通路（引擎 GPU 排序）';
+        badge.style.cssText = [
+            'position:fixed', 'left:8px', 'bottom:8px', 'z-index:99999',
+            'padding:4px 8px', 'border-radius:4px',
+            'background:rgba(30,120,220,0.85)', 'color:#fff',
+            'font:12px/1.4 system-ui,sans-serif', 'pointer-events:none',
+            'user-select:none'
+        ].join(';');
+        const attach = () => document.body && document.body.appendChild(badge);
+        if (document.body) {
+            attach();
+        } else {
+            document.addEventListener('DOMContentLoaded', attach, { once: true });
+        }
+    }
+
     const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
         gpuOverride :
         (getGpuBackendPref() ?? 'webgl2');
