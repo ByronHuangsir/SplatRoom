@@ -34,6 +34,33 @@ const stats = (f) => {
     return [+(r / n).toFixed(2), +(g / n).toFixed(2), +(b / n).toFixed(2)];
 };
 
+// 逐像素差异：均值会互相抵消，所以"两条通路画面一致"必须用逐像素量。
+const pixelDiff = (a, b) => {
+    const A = decodePng(fs.readFileSync(a));
+    const B = decodePng(fs.readFileSync(b));
+    const n = A.width * A.height;
+    const hist = new Uint32Array(256);
+    let sum = 0;
+    let changed = 0;
+    let max = 0;
+    for (let i = 0; i < A.data.length; i += A.channels) {
+        let d = 0;
+        for (let c = 0; c < 3; c++) d += Math.abs(A.data[i + c] - B.data[i + c]);
+        d = d / 3;
+        sum += d;
+        if (d > 24) changed++;
+        if (d > max) max = d;
+        hist[Math.min(255, Math.round(d))]++;
+    }
+    let acc = 0;
+    let p95 = 0;
+    for (let i = 0; i < 256; i++) {
+        acc += hist[i];
+        if (acc >= n * 0.95) { p95 = i; break; }
+    }
+    return { mad: +(sum / n).toFixed(4), changedPct: +((changed / n) * 100).toFixed(2), p95, max: +max.toFixed(1) };
+};
+
 // 每项：元素上的字段 → 值。中性 = 全部默认（colorGradeEnabled 保持 false ⇒ 全中性）
 const CASES = [
     { name: 'neutral', set: () => ({}) },    { name: 'sat=0.5', set: () => ({ saturation: 0.5 }) },
@@ -243,6 +270,12 @@ const CASES = [
     const n2 = result.uni.neutral;
     const gap = n2.map((x, i) => +(x - n1[i]).toFixed(2));
     console.log(`\n  ① 中性帧差（unified − per-instance）：${JSON.stringify(gap)}  ← 应接近 0`);
+    // 逐像素对比（比均值强得多：均值可能互相抵消）
+    const pd = pixelDiff(
+        path.join(REPO, '_tmp', 'parity-cpu-neutral.png'),
+        path.join(REPO, '_tmp', 'parity-uni-neutral.png')
+    );
+    console.log(`     逐像素：mean|ΔRGB|=${pd.mad} / 超阈值(>24)像素占比=${pd.changedPct}% / p95=${pd.p95} / max=${pd.max}`);
     console.log(`  ② 各参数两条通路的 Δ 方向是否一致：`);
     for (const c of CASES.slice(1)) {
         const dc = result.cpuDelta[c.name];
