@@ -18,8 +18,10 @@ const REPO = path.join(__dirname, '..', '..');
 const puppeteer = require(path.join(REPO, 'node_modules', 'puppeteer-core'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const EXE = process.argv[2] || path.join(REPO, 'release', 'SplatRoom-3.23.44.exe');
+const EXE = process.argv[2] || path.join(REPO, 'release', 'SplatRoom-3.23.45.exe');
 const PLY = process.argv[3] || path.join(REPO, 'dist', 'test-model.ply');
+// 第 4 个参数传 0 就不带 `--unified=1`（用来比较打包版里两条通路的画面）
+const USE_UNIFIED = process.argv[4] !== '0';
 const HTTP_PORT = 3999;
 const DEBUG_PORT = 9224;
 
@@ -42,12 +44,16 @@ const startServer = () => new Promise((resolve) => {
 
 (async () => {
     const server = await startServer();
-    const app = spawn(EXE, [
+    const args = [
         '--remote-debugging-port=' + DEBUG_PORT,
         '--remote-allow-origins=*',
-        '--gpu=webgpu',
-        '--unified=1'
-    ], { stdio: 'ignore' });
+        '--gpu=webgpu'
+    ];
+    if (USE_UNIFIED) {
+        args.push('--unified=1');
+    }
+    const app = spawn(EXE, args, { stdio: 'ignore' });
+    void app;
 
     const logs = [];
     let browser = null;
