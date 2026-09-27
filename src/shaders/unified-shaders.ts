@@ -442,9 +442,11 @@ export function bakeUnifiedFragmentShader(): string {
     const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
     const fragRed = bake && typeof bake.fragRed === 'number' ? bake.fragRed : 0;
     const fragOpaque = bake && typeof bake.fragOpaque === 'number' ? bake.fragOpaque : 0;
+    const cropProbe = bake && typeof bake.cropBoxProbe === 'number' ? bake.cropBoxProbe : 0;
     return unifiedFragmentShader
     .replace('__SR_FRAG_RED__', fragRed.toFixed(6))
-    .replace('__SR_FRAG_OPAQUE__', fragOpaque.toFixed(6));
+    .replace('__SR_FRAG_OPAQUE__', fragOpaque.toFixed(6))
+    .replace('__SR_CROP_PROBE__', cropProbe.toFixed(6));
 }
 
 /**
@@ -694,6 +696,14 @@ const SR_FRAG_RED: f32 = __SR_FRAG_RED__;
 // 与"到了、被 discard / alpha 吃掉了"。
 const SR_FRAG_OPAQUE: f32 = __SR_FRAG_OPAQUE__;
 
+// ===== 仪器（2026-09-27，给"裁剪盒默认盒子多啃一层壳"那件事用）=====
+// 直接看**片元实际拿到的盒局部坐标**，而不是在 CPU 侧推：
+//   cropBoxProbe = 1 ⇒ 输出"该像素是否被判到盒外"（max|local| > 0.5 涂白）
+//   cropBoxProbe = 2 ⇒ 输出 max|local| 的灰度（0.5 对应 0.5 灰 ⇒ 亮于中灰就是盒外）
+//   cropBoxProbe = 3 ⇒ 同上，但用的是 flat 的**中心**坐标
+// 默认 0 = 整段不生效、与未烘焙逐位一致。
+const SR_CROP_PROBE: f32 = __SR_CROP_PROBE__;
+
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     var output: FragmentOutput;
@@ -747,6 +757,25 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
             return output;
         }
+        // ===== 仪器：把盒局部坐标直接画出来（默认关闭）=====
+        #ifndef PICK_PASS
+            if (SR_CROP_PROBE > 0.5) {
+                // ⚠️ WGSL **没有三元运算符**，必须用 select(f, t, cond)（写成 cond ? a : b 会
+                // invalid character found ⇒ 管线无效 ⇒ 整帧不画，实测画面只剩背景）
+                let probeLocal: vec3f = select(srBoxLocal, srBoxLocalCentre, SR_CROP_PROBE > 2.5);
+                let maxAbs: f32 = max(max(abs(probeLocal.x), abs(probeLocal.y)), abs(probeLocal.z));
+                if (SR_CROP_PROBE > 1.5) {
+                    // 灰度：0.5 = 正好在盒边界上
+                    output.color = vec4f(vec3f(maxAbs), 1.0);
+                } else {
+                    // 白 = 判到盒外
+                    let outside: f32 = select(0.0, 1.0, maxAbs > 0.5);
+                    output.color = vec4f(vec3f(outside), 1.0);
+                }
+                output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+                return output;
+            }
+        #endif
         // 调色（片元侧这一段，与 per-instance 片元**同序同公式**：高光 → 阴影 → 对比 → 逐通道 HSL）。
         // 顶点侧那一段（clrScale/clrOffset → 曲线 → 饱和度）已经在 gamma 解码之前做过，
         // 所以这里拿到的 gaussianColor.xyz 就是"解码后待做这几步"的颜色。
