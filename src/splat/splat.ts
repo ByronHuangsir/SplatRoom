@@ -1564,6 +1564,15 @@ class Splat extends Element {
     onPreRender() {
         // SurfaceRefine / replaceData 閻ㄥ嫬鑻熼崣鎴濇簚閺咁垯绗呴敍灞炬煀 entity 閻?gsplat instance
         // 閸欘垵鍏樻潻妯绘弓鐏忚京鍗庨敍宀冪儲鏉╁洦婀扮敮褍鑻熼崷銊﹀付閸掕泛褰存潏鎾冲毉娑撯偓濞嗏剝鈧嗙槚閺傤厺淇婇幁顖樷偓?
+        // **与 `gsplat.instance` 无关的覆盖层先跑**（2026-09-26）。
+        // unified 通路（`?unified=1`）下引擎不给 `instance`（改用 `_placement`），而下面那整段
+        // 是按 instance 排序 / 写 per-instance 材质的。原来这里第 3 行就 `return`，
+        // 把"选中时画包围盒"和"按 visible 开关实体"一起丢了 —— 用户看到的就是
+        // "unified 通路不显示边界"。实测（`_tmp/probe-unified-parity.cjs`）：`drawLine` 调用
+        // 主线 9888 次 / unified **0** 次，而**内部选中状态两边完全一致**（670 / 670），
+        // 所以那是"画不出来"，不是"没选中"。
+        this.onPreRenderOverlay();
+
         if (!this.entity?.gsplat?.instance) {
             console.warn(`[Splat.onPreRender] skipped: entity=${!!this.entity}, gsplat=${!!this.entity?.gsplat}, instance=${!!this.entity?.gsplat?.instance}, name=${this.name}, changedCounter=${this.changedCounter}`);
             return;
@@ -1763,26 +1772,34 @@ class Splat extends Element {
             material.setParameter('uCropBoxCapAlpha', 1);
             material.setParameter('uCropBoxCapColor', [1, 1, 1, 1]);
         }
+    }
 
-        if (this.visible && selected) {
-            // render bounding box
-            if (events.invoke('camera.bound')) {
-                const bound = this.localBound;
-                const scale = new Mat4().setTRS(bound.center, Quat.IDENTITY, bound.halfExtents);
-                scale.mul2(this.entity.getWorldTransform(), scale);
+    /**
+     * 每帧覆盖层里**与 `gsplat.instance` 无关**的那一半：选中时的包围盒、以及按 `visible`
+     * 开关实体。unified 通路没有 per-instance 对象，这些以前被 `onPreRender` 开头那道
+     * `if (!instance) return` 一起挡掉了（用户报的"不显示边界"；`visible` 的开关同样丢，
+     * 即 unified 通路上"隐藏/显示"不生效）。
+     */
+    private onPreRenderOverlay() {
+        const events = this.scene.events;
+        const selected = this.scene.camera.renderOverlays && events.invoke('selection') === this;
+        // visible 是 setter 写下的标志，真正作用到实体上一直是这里做的（主通路在
+        // onPreRender 末尾、现在挪到这里，两条通路都生效；写的是同一个值，画面不变）。
+        this.entity.enabled = this.visible;
+        if (this.visible && selected && events.invoke('camera.bound')) {
+            const bound = this.localBound;
+            const scale = new Mat4().setTRS(bound.center, Quat.IDENTITY, bound.halfExtents);
+            scale.mul2(this.entity.getWorldTransform(), scale);
 
-                for (let i = 0; i < boundingPoints.length / 2; i++) {
-                    const a = boundingPoints[i * 2];
-                    const b = boundingPoints[i * 2 + 1];
-                    scale.transformPoint(a, veca);
-                    scale.transformPoint(b, vecb);
+            for (let i = 0; i < boundingPoints.length / 2; i++) {
+                const a = boundingPoints[i * 2];
+                const b = boundingPoints[i * 2 + 1];
+                scale.transformPoint(a, veca);
+                scale.transformPoint(b, vecb);
 
-                    this.scene.app.drawLine(veca, vecb, Color.WHITE, true, this.scene.worldLayer);
-                }
+                this.scene.app.drawLine(veca, vecb, Color.WHITE, true, this.scene.worldLayer);
             }
         }
-
-        this.entity.enabled = this.visible;
     }
 
     focalPoint() {
