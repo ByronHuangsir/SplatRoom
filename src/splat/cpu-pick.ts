@@ -25,6 +25,13 @@ export type CpuPickParams = {
     x: Float32Array;
     y: Float32Array;
     z: Float32Array;
+    /** 每高斯的 opacity 列（原始 logit；`activated` 为真时它已经是 0..1）—— 深度 pass 要用 */
+    opacity?: Float32Array;
+    /** 数据是否已经"激活"（= opacity 已经是 alpha 而不是 logit） */
+    activated?: boolean;
+    /** 深度归一化用的裁剪面（与 `uSplatCameraParams` 一致：(linear - near) / (far - near)） */
+    near?: number;
+    far?: number;
     /** 每高斯的 state 字节（bit0 选中 / bit1 锁定 / bit2 删除）；没有就传 null */
     state: Uint8Array | null;
     /** "删除但显示"时，已删除的高斯仍然参与拾取（与 pick pass 的 showDeleted 一致） */
@@ -48,8 +55,14 @@ export type CpuPickParams = {
 export type CpuPickResult = {
     /** 行主序的 id（0xFFFFFFFF = 背景） */
     ids: Uint32Array;
-    /** 每像素最前表面的深度（clip.w）—— 诊断/将来给深度带用 */
+    /** 每像素最前表面的深度（clip.w）—— 诊断用 */
     depth: Float32Array;
+    /**
+     * 每像素的**归一化前表面深度**（0..1，用 `(linear - near) / (far - near)` 归一；
+     * 该像素没有任何高斯时是 NaN）。语义与 GPU 深度 pass 的 `decodeDepth` 对齐：
+     * R = Σ depth·α、A = 透射率，解码结果 = R / (1 - A)。
+     */
+    normalizedDepth: Float32Array;
     /** 参与测试的高斯数（诊断） */
     tested: number;
 };
@@ -64,6 +77,16 @@ export const cpuPickRect = (params: CpuPickParams): CpuPickResult => {
     const count = pw * ph;
     const ids = new Uint32Array(count).fill(0xFFFFFFFF);
     const depth = new Float32Array(count).fill(Infinity);
+
+    // 深度通道：与 GPU 那条同样的记账方式（R = Σ depth·α、A = Π(1-α)），
+    // 遍历顺序不是"由前到后"，但 α 很小时 α 加权平均对顺序不敏感（本文件头已说明是近似）。
+    const opacity = params.opacity;
+    const activated = params.activated === true;
+    const near = Number.isFinite(params.near) ? (params.near as number) : 0;
+    const far = Number.isFinite(params.far) ? (params.far as number) : 1;
+    const invDepthSpan = 1 / Math.max(far - near, 1e-6);
+    const depthSum = opacity ? new Float32Array(count) : null;
+    const trans = opacity ? new Float32Array(count).fill(1) : null;
 
     const x0 = px0;
     const y0 = py0;
@@ -110,6 +133,18 @@ export const cpuPickRect = (params: CpuPickParams): CpuPickResult => {
         const ix = Math.floor(sx);
         const iy = Math.floor(sy);
 
+        // 该高斯的 alpha（深度通道用）：未激活的数据是 logit，要做一次 sigmoid
+        let alpha = 0;
+        if (depthSum) {
+            const o = opacity![i];
+            alpha = activated ? o : 1 / (1 + Math.exp(-o));
+            if (!(alpha > 1e-6)) {
+                alpha = 0;
+            }
+        }
+        // 归一化前表面深度（与 per-instance 的 PICK_PASS 同式：(linear - near) / (far - near)）
+        const nd = (cw - near) * invDepthSpan;
+
         // 覆盖：中心 + 一圈（3×3）。为什么要这一圈 —— 只写中心像素的话，实测"点画面正中"
         // 经常落在两个中心之间 ⇒ 返回背景（`readId` 就直接失效了），而且 ring 模式选到的集合
         // 比 GPU 那条明显偏小（21539 个像素里只有 125 个有中心）。
@@ -129,11 +164,23 @@ export const cpuPickRect = (params: CpuPickParams): CpuPickResult => {
                     depth[k] = cw;
                     ids[k] = i;
                 }
+                if (depthSum && trans) {
+                    depthSum[k] += nd * alpha * trans[k];
+                    trans[k] *= 1 - alpha;
+                }
             }
         }
     }
 
-    return { ids, depth, tested };
+    const normalizedDepth = new Float32Array(count).fill(NaN);
+    if (depthSum && trans) {
+        for (let k = 0; k < count; k++) {
+            const visible = 1 - trans[k];
+            normalizedDepth[k] = visible > 1e-6 ? depthSum[k] / visible : NaN;
+        }
+    }
+
+    return { ids, depth, normalizedDepth, tested };
 };
 
 /**
@@ -146,11 +193,11 @@ export const cpuPickRect = (params: CpuPickParams): CpuPickResult => {
  * 代价仍是 O(高斯数) 一趟扫描，语义上对"点一下就选中那个高斯"够用。
  *
  * @param params - 投影所需的数据与目标尺寸，外加 px/py/radius
- * @returns 命中的高斯 id；没有候选时返回 -1（调用方自己转成背景值 0xFFFFFFFF）
+ * @returns 命中的高斯 id（没有候选时 -1）与它的归一化前表面深度（没有候选时 NaN）
  */
 export const cpuPickNearest = (
     params: Omit<CpuPickParams, 'px0' | 'py0' | 'pw' | 'ph'> & { px: number, py: number, radius?: number }
-): number => {
+): { id: number, depth: number } => {
     const {
         numSplats, x, y, z, state, showDeleted,
         projection: p, view: v, worldTransform: m, width, height
@@ -159,6 +206,9 @@ export const cpuPickNearest = (
     const py = params.py;
     const r = Math.max(0, params.radius ?? 6);
     const r2 = r * r;
+    const near = Number.isFinite(params.near) ? (params.near as number) : 0;
+    const far = Number.isFinite(params.far) ? (params.far as number) : 1;
+    const invDepthSpan = 1 / Math.max(far - near, 1e-6);
 
     let bestId = -1;
     let bestDist2 = Infinity;
@@ -198,13 +248,18 @@ export const cpuPickNearest = (
         if (dist2 > r2) {
             continue;
         }
-        // 先比"离点更近"，同距离再比"更靠前"
-        if (dist2 < bestDist2 - 1e-6 || (Math.abs(dist2 - bestDist2) <= 1e-6 && cw < bestDepth)) {
+        // **先比"更靠前"，同深度再比"离点更近"**。
+        // 顺序反过来的话（先近后前），深度 pass 会取到"中心最近的那个"，而它可能是背景上的高斯
+        // —— 实测三个采样点因此给出 0.637/0.638/0.638，而主线（α 加权的**前表面**）是 0.439/0.388/0.381。
+        // 拾取也一样：点在什么上面，就该选前面那个。
+        if (cw < bestDepth - 1e-6 || (Math.abs(cw - bestDepth) <= 1e-6 && dist2 < bestDist2)) {
             bestId = i;
             bestDist2 = dist2;
             bestDepth = cw;
         }
     }
 
-    return bestId;
+    return bestId >= 0 ?
+        { id: bestId, depth: (bestDepth - near) * invDepthSpan } :
+        { id: -1, depth: NaN };
 };

@@ -233,13 +233,111 @@ class Picker {
         if (pw <= 2 && ph <= 2) {
             // 单像素（`readId`）：走"半径内最近的候选里取最前"那条 —— 只按中心点写像素的话，
             // 点画面正中经常落在两个中心之间 ⇒ 返回背景（见 cpu-pick.ts 的说明）。
-            const id = cpuPickNearest({ ...common, px: px + 0.5, py: py + 0.5, radius: 6 });
-            ids = new Uint32Array([id >= 0 ? id : 0xFFFFFFFF]);
+            const pick = cpuPickNearest({ ...common, px: px + 0.5, py: py + 0.5, radius: 6 });
+            ids = new Uint32Array([pick.id >= 0 ? pick.id : 0xFFFFFFFF]);
         } else {
             ids = cpuPickRect({ ...common, px0: px, py0: py, pw, ph }).ids;
         }
         this.lastCpuPickMs = performance.now() - t0;
         return Array.from(ids);
+    }
+
+    /**
+     * unified 通路的深度 pass：CPU 版"每像素前表面归一化深度"。
+     *
+     * 语义与 GPU 那条对齐（`decodeDepth`：R = Σ depth·α、A = 透射率，结果 = R / (1 - A)；
+     * 归一化是 `(linear - near) / (far - near)`，见 `uSplatCameraParams`）。做法与读 id 一样：
+     * 只算**这些点并集包围盒**那一小块（GPU 那条也是并集读取），然后按点取样。
+     */
+    private readDepthsCpu(points: { x: number, y: number }[]): (number | null)[] {
+        const splat = this.cpuPickSplat;
+        const data = splat?.splatData as any;
+        const { width: tw, height: th } = this.scene.targetSize;
+        const result: (number | null)[] = new Array(points.length).fill(null);
+        if (!data || !(tw > 0 && th > 0) || points.length === 0) {
+            return result;
+        }
+
+        // 归一化 -> 像素（y 向下，与 GPU 那条一致），并求并集包围盒
+        const pxs = new Int32Array(points.length);
+        const pys = new Int32Array(points.length);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const valid: number[] = [];
+        for (let i = 0; i < points.length; i++) {
+            const { x, y } = points[i];
+            if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
+                continue;
+            }
+            const px = Math.min(Math.floor(x * tw), tw - 1);
+            const py = Math.min(Math.floor(y * th), th - 1);
+            pxs[i] = px;
+            pys[i] = py;
+            valid.push(i);
+            minX = Math.min(minX, px);
+            maxX = Math.max(maxX, px);
+            minY = Math.min(minY, py);
+            maxY = Math.max(maxY, py);
+        }
+        if (valid.length === 0) {
+            return result;
+        }
+
+        const px0 = minX;
+        const py0 = minY;
+        const pw = Math.max(1, maxX - minX + 1);
+        const ph = Math.max(1, maxY - minY + 1);
+        const camera = this.scene.camera;
+        const t0 = performance.now();
+        const out = cpuPickRect({
+            numSplats: data.numSplats as number,
+            x: data.getProp('x') as Float32Array,
+            y: data.getProp('y') as Float32Array,
+            z: data.getProp('z') as Float32Array,
+            state: data.getProp('state') as Uint8Array,
+            showDeleted: !!splat.showDeleted,
+            projection: camera.camera.projectionMatrix.data,
+            view: camera.camera.viewMatrix.data,
+            worldTransform: splat.entity.getWorldTransform().data,
+            // 深度通道：需要 alpha 与裁剪面
+            opacity: data.getProp('opacity') as Float32Array,
+            activated: !!data.activated,
+            near: (camera as any).near,
+            far: (camera as any).far,
+            width: tw,
+            height: th,
+            px0,
+            py0,
+            pw,
+            ph
+        });
+        this.lastCpuPickMs = performance.now() - t0;
+        // 中心点覆盖为空时退回"半径内最近的候选"（否则任意采样点经常全落空 —— 实测三个采样点
+        // 都是 null，球刷/深度带会以为这一片没有表面）。
+        const nearestParams = {
+            numSplats: data.numSplats as number,
+            x: data.getProp('x') as Float32Array,
+            y: data.getProp('y') as Float32Array,
+            z: data.getProp('z') as Float32Array,
+            state: data.getProp('state') as Uint8Array,
+            showDeleted: !!splat.showDeleted,
+            projection: camera.camera.projectionMatrix.data,
+            view: camera.camera.viewMatrix.data,
+            worldTransform: splat.entity.getWorldTransform().data,
+            near: (camera as any).near,
+            far: (camera as any).far,
+            width: tw,
+            height: th
+        };
+        for (const i of valid) {
+            const v = out.normalizedDepth[(pys[i] - py0) * pw + (pxs[i] - px0)];
+            if (Number.isFinite(v)) {
+                result[i] = v;
+                continue;
+            }
+            const nearest = cpuPickNearest({ ...nearestParams, px: pxs[i] + 0.5, py: pys[i] + 0.5, radius: 6 });
+            result[i] = Number.isFinite(nearest.depth) ? nearest.depth : null;
+        }
+        return result;
     }
 
     // Read rectangle of splat IDs using normalized coordinates (0-1 range) (after prepareId)
@@ -291,6 +389,12 @@ class Picker {
 
     // Prepare for depth picking by rendering the specified splat
     prepareDepth(splat: Splat) {
+        // unified 通路：与 id 拾取同样走 CPU（引擎那条路给不出逐高斯结果，见 cpu-pick.ts 文件头）。
+        // 这里只记下元素，真正的计算在 readDepths 里。
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            this.cpuPickSplat = splat;
+            return;
+        }
         if (!this.depthRenderTarget) {
             return;
         }
@@ -362,6 +466,11 @@ class Picker {
     static MAX_UNION_READ_PX = 4 << 20;      // 4M pixels: an 8 MB RGBA16F-ish copy at most
 
     async readDepths(points: { x: number, y: number }[]): Promise<(number | null)[]> {
+        // unified 通路：CPU 版深度 pass（与 id 拾取同一趟循环，见 cpu-pick.ts）
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            return this.readDepthsCpu(points);
+        }
+
         if (!this.depthRenderTarget) {
             return new Array(points.length).fill(null);
         }
