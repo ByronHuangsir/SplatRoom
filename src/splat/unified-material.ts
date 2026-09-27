@@ -94,6 +94,21 @@ export type UnifiedMaterialParams = {
         /** 盒局部坐标的"中心 ↔ 四角"混合比例（1 = 纯角点） */
         cornerMix?: number;
     };
+    /**
+     * 二期：粒子特效（散射 / 波纹入场 / 爆散收场）。字段与 per-instance 的 `uScatter*` / `uEffect*`
+     * 同义，另加两个矩阵（见 `src/shaders/unified-shaders.ts` 里的说明）。
+     */
+    effect?: {
+        mode?: number;
+        time?: number;
+        progress?: number;
+        radius?: number;
+        center?: number[];
+        color?: number[];
+        fade?: number;
+        clipToWorld?: ArrayLike<number>;
+        viewProj?: ArrayLike<number>;
+    };
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
@@ -110,6 +125,56 @@ let cachedVertexSource: string | null = null;
  * 实测就是这样：47790 个像素里 0 个合法 id）。
  */
 let currentPickMode = 0;
+
+/**
+ * 当前的粒子特效状态（`Splat.setScatterProgress` 设，每帧的钩子读）。
+ *
+ * 为什么也要模块级：材质参数每帧由 `Scene.ensureUnifiedMaterialHook()` 重设，而特效是**离散调用**
+ * 驱动的（导出/转台在推进进度），不像调色参数那样每帧都能从元素上读回来 —— 更要紧的是
+ * `uEffectFade` 根本不落在任何字段上，它是直接写进材质参数的。
+ */
+let currentEffect: {
+    mode: number;
+    time: number;
+    progress: number;
+    radius: number;
+    center: number[];
+    color: number[];
+    fade: number;
+} = {
+    mode: 0,
+    time: 0,
+    progress: 0,
+    radius: 1,
+    center: [0, 0, 0],
+    color: [1, 1, 1],
+    fade: 1
+};
+
+/** 读当前特效状态（给 scene 的钩子/探针用）。 */
+export function getUnifiedEffect() {
+    return currentEffect;
+}
+
+/** 更新特效状态并写进 unified 材质（`Splat.setScatterProgress` 调用）。 */
+export function setUnifiedEffect(scene: any, patch: Partial<typeof currentEffect>): boolean {
+    currentEffect = { ...currentEffect, ...patch };
+    let touched = 0;
+    for (const material of collectUnifiedMaterials(scene)) {
+        if (!material.__splatRoomUnified) {
+            continue;
+        }
+        material.setParameter('srScatterProgress', currentEffect.progress);
+        material.setParameter('srScatterRadius', currentEffect.radius);
+        material.setParameter('srScatterCenter', currentEffect.center);
+        material.setParameter('srEffectMode', currentEffect.mode);
+        material.setParameter('srEffectTime', currentEffect.time);
+        material.setParameter('srEffectColor', currentEffect.color);
+        material.setParameter('srEffectFade', currentEffect.fade);
+        touched++;
+    }
+    return touched > 0;
+}
 
 /** 读当前拾取模式（给探针/套件用）。 */
 export function getUnifiedPickMode(): number {
@@ -420,6 +485,21 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
             material.setParameter('srCropCapWidth', crop.capWidth ?? 0);
             material.setParameter('srCropCapAlpha', crop.capAlpha ?? 1);
             material.setParameter('srCropMix', crop.cornerMix ?? 1);
+        }
+        // 二期：粒子特效（缺省 = 中性：progress 0 / mode 0 / fade 1 ⇒ 位置与颜色都不变）
+        const effect = params.effect ?? {};
+        material.setParameter('srScatterProgress', effect.progress ?? 0);
+        material.setParameter('srScatterRadius', effect.radius ?? 1);
+        material.setParameter('srScatterCenter', effect.center ?? [0, 0, 0]);
+        material.setParameter('srEffectMode', effect.mode ?? 0);
+        material.setParameter('srEffectTime', effect.time ?? 0);
+        material.setParameter('srEffectColor', effect.color ?? [1, 1, 1]);
+        material.setParameter('srEffectFade', effect.fade ?? 1);
+        if (effect.clipToWorld) {
+            material.setParameter('srClipToWorld', effect.clipToWorld);
+        }
+        if (effect.viewProj) {
+            material.setParameter('srViewProj', effect.viewProj);
         }
         touched++;
     }

@@ -22,6 +22,7 @@ import { applySplatColorParams, splatColorParams } from './color-params';
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
 import { TransformPalette } from './transform-palette';
+import { setUnifiedEffect } from './unified-material';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -500,10 +501,24 @@ class Splat extends Element {
      */
     setScatterProgress(progress: number, radiusScale = 1, effectMode = 0, effectTime = 0, effectColor?: [number, number, number], fade = 1) {
         this._scatterProgress = progress;
+        // unified 通路（引擎 GPU 排序）也要跟着走：它的特效参数不在 instance 材质上，
+        // 由 unified 材质单独持有（见 src/splat/unified-material.ts 的 setUnifiedEffect）。
+        this.ensureScatterParams();
+        if (effectColor) {
+            this._effectColor.set(effectColor[0], effectColor[1], effectColor[2]);
+        }
+        setUnifiedEffect(this.scene, {
+            progress,
+            radius: this._scatterRadius * radiusScale,
+            center: [this._scatterCenter.x, this._scatterCenter.y, this._scatterCenter.z],
+            mode: effectMode,
+            time: effectTime,
+            color: [this._effectColor.x, this._effectColor.y, this._effectColor.z],
+            fade
+        });
         const instance = this.entity.gsplat?.instance;
         const material = instance?.material;
         if (!material) return;
-        this.ensureScatterParams();
         material.setParameter('uScatterProgress', progress);
         material.setParameter('uScatterRadius', this._scatterRadius * radiusScale);
         material.setParameter('uScatterCenter', [this._scatterCenter.x, this._scatterCenter.y, this._scatterCenter.z]);

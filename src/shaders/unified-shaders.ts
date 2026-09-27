@@ -99,6 +99,18 @@ varying @interpolate(flat) srSplatIndex: u32;
     varying srBoxLocal: vec3f;
     /** splat **中心**的盒局部坐标（flat）—— 软边只在"中心本来就贴近边界"的高斯上生效 */
     varying @interpolate(flat) srBoxLocalCentre: vec3f;
+    // ===== 二期：粒子特效（散射 / 波纹入场 / 爆散收场）=====
+    // 主线在顶点里改世界坐标再投影；这里改的是**投影位置**（世界位移 → clip 位移），
+    // 所以需要两个矩阵：srClipToWorld（把 clip 还原成世界中心）与 srViewProj（把位移投回 clip）。
+    uniform srClipToWorld: mat4x4f;
+    uniform srViewProj: mat4x4f;
+    uniform srScatterProgress: f32;
+    uniform srScatterRadius: f32;
+    uniform srScatterCenter: vec3f;
+    uniform srEffectMode: f32;
+    uniform srEffectTime: f32;
+    uniform srEffectColor: vec3f;
+    uniform srEffectFade: f32;
 #endif
 // ===== 拾取模式（0 = 正常出图，1 = id 拾取）=====
 // 为什么需要它：unified 通路的绘制材质是引擎那个（我们挂钩覆盖），**没有** per-instance 的
@@ -242,6 +254,95 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         }
     #endif
 
+    // ===== 二期：粒子特效（散射 / 波纹入场 / 爆散收场）=====
+    // 主线在顶点里改的是 **modelCenter**（世界坐标），然后再投影 —— 那个位置在 unified 的顶点里
+    // 拿不到，所以这里把"世界位移"换算成 **clip 位移** 加到投影位置上：
+    //   worldCentre = srClipToWorld × proj（透视除法）
+    //   clipDelta   = srViewProj × vec4(delta, 0)     ← 位移是方向量，w 记 0
+    // 种子用 splat 行号（cacheIdx）—— 主线用的是纹理坐标派生的种子，两者都是"每高斯一个伪随机数"，
+    // 具体取值不同（粒子本来就是随机的），分布一致。
+    // ⚠️ 特效在**裁剪盒之前**应用：下面算盒局部坐标时用的 proj 仍是原位置（特效与裁剪同时用属于边角情形）。
+    var srEffProj: vec4f = proj;
+    #ifndef PICK_PASS
+        if (uniform.srEffectFade < 0.999 || uniform.srScatterProgress > 1e-4 || uniform.srEffectMode > 0.5) {
+            let srSeed: f32 = fract(f32(cacheIdx) * 0.61803398875);
+            let srR1: f32 = fract(sin(srSeed * 12.9898) * 43758.5453);
+            let srR2: f32 = fract(sin(srSeed * 78.233) * 12543.123);
+            let srR3: f32 = fract(sin(srSeed * 33.912) * 7951.192);
+            let srScatterDir: vec3f = normalize(vec3f(srR1 - 0.5, srR2 - 0.5, srR3 - 0.5));
+            let srScatterPos: vec3f = uniform.srScatterCenter + srScatterDir * (uniform.srScatterRadius * (0.3 + srR3 * 0.7));
+
+            let srWc4: vec4f = uniform.srClipToWorld * proj;
+            let srWorldCentre: vec3f = select(vec3f(0.0), srWc4.xyz / srWc4.w, abs(srWc4.w) > 1e-6);
+            var srEffCentre: vec3f = srWorldCentre;
+
+            if (uniform.srEffectMode > 1.5) {
+                // 2 = 爆散收场：先炸开再受重力下落
+                let srDelay: f32 = srR3 * 0.15;
+                let srBurstT: f32 = clamp((uniform.srEffectTime - srDelay) / max(0.2, 1.0 - srDelay), 0.0, 1.0);
+                let srBurstPos: vec3f = mix(srWorldCentre, srScatterPos, srBurstT);
+                let srHdir: vec2f = normalize(vec2f(srR1 - 0.5, srR2 - 0.5));
+                let srFall: f32 = srBurstT * srBurstT;
+                srEffCentre = srBurstPos + vec3f(
+                    srHdir.x * uniform.srScatterRadius * 0.15 * srBurstT,
+                    -uniform.srScatterRadius * 1.6 * srFall,
+                    srHdir.y * uniform.srScatterRadius * 0.15 * srBurstT
+                );
+            } else if (uniform.srEffectMode > 0.5) {
+                // 1 = 波纹入场：波前把粒子收拢回模型
+                let srWaveRadius: f32 = uniform.srEffectTime * uniform.srScatterRadius * 1.6;
+                let srWaveWidth: f32 = uniform.srScatterRadius * 0.12;
+                let srD: f32 = length(srWorldCentre - uniform.srScatterCenter);
+                if (srD >= srWaveRadius && srD < srWaveRadius + srWaveWidth) {
+                    let srBandT: f32 = (srD - srWaveRadius) / max(srWaveWidth, 1e-5);
+                    srEffCentre = mix(srWorldCentre, srScatterPos, srBandT);
+                } else if (srD >= srWaveRadius + srWaveWidth) {
+                    srEffCentre = srScatterPos;
+                }
+            } else {
+                // 0 = 纯散射：0 是模型、1 是粒子
+                srEffCentre = mix(srWorldCentre, srScatterPos, uniform.srScatterProgress);
+            }
+
+            let srDelta: vec3f = srEffCentre - srWorldCentre;
+            if (dot(srDelta, srDelta) > 1e-12) {
+                srEffProj = proj + (uniform.srViewProj * vec4f(srDelta, 0.0));
+            }
+
+            // 特效的颜色/透明度（与主线顶点里那段逐字同式，见 splat-shader-wgsl.ts:362-387）
+            if (uniform.srEffectMode > 1.5) {
+                // 2 = 爆散收场：暖色火花，亮度与透明度随爆散衰减
+                let srDelay2: f32 = srR3 * 0.15;
+                let srBurstT2: f32 = clamp((uniform.srEffectTime - srDelay2) / max(0.2, 1.0 - srDelay2), 0.0, 1.0);
+                let srLife: f32 = 1.0 - srBurstT2;
+                var srC2: vec4f = vec4f(clr);
+                srC2 = vec4f(mix(srC2.xyz, uniform.srEffectColor, 0.5 * srBurstT2), srC2.w);
+                srC2 = vec4f(srC2.xyz * (1.0 + 0.8 * srLife * srBurstT2), srC2.w);
+                srC2 = vec4f(srC2.xyz, srC2.w * (0.2 + 0.8 * srLife * srLife));
+                clr = half4(srC2);
+            } else if (uniform.srEffectMode > 0.5) {
+                // 1 = 波纹入场：波前发光、还没扫到的粒子变淡
+                let srWaveRadius2: f32 = uniform.srEffectTime * uniform.srScatterRadius * 1.6;
+                let srWaveWidth2: f32 = uniform.srScatterRadius * 0.12;
+                let srD2: f32 = length(srWorldCentre - uniform.srScatterCenter);
+                var srC3: vec4f = vec4f(clr);
+                if (srD2 >= srWaveRadius2 && srD2 < srWaveRadius2 + srWaveWidth2) {
+                    let srBandT2: f32 = (srD2 - srWaveRadius2) / max(srWaveWidth2, 1e-5);
+                    let srGlow: f32 = 1.0 - srBandT2;
+                    srC3 = vec4f(mix(srC3.xyz, uniform.srEffectColor, 0.25 * srGlow), srC3.w);
+                    srC3 = vec4f(srC3.xyz * (1.0 + 0.6 * srGlow), srC3.w);
+                    srC3 = vec4f(srC3.xyz, mix(srC3.w, 1.0, srGlow));
+                } else if (srD2 >= srWaveRadius2 + srWaveWidth2) {
+                    srC3 = vec4f(srC3.xyz, srC3.w * 0.12);
+                }
+                clr = half4(srC3);
+            }
+            // 整体淡入/淡出走**片元**那条（与主线同一处：alpha = alpha * uniform.uEffectFade）。
+            // ⚠️ 不能在顶点里改 clr.w：顶点最后是用**另一个** alpha 变量组装 gaussianColor 的
+            // （let alpha = half(ba.y)，见下面那段的说明），改 clr.w 不会生效 —— 实测 fade=0 时
+            // 画面纹丝不动。
+        }
+    #endif
     let cornerUV = vec2f(vertex_position.xy);
     #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
         let alphaClipValue = half(uniform.alphaClip);
@@ -250,10 +351,11 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     #endif
     let clip = min(half(1.0), sqrt(max(half(0.0), log(alpha / alphaClipValue))) * half(0.5));
     let cornerClipped = cornerUV * f32(clip);
-    let c = vec2f(proj.w) * uniform.viewport_size.zw;
+    // 特效改的是投影位置（见上面 srEffProj 的说明），四边形的缩放按它的 w 来
+    let c = vec2f(srEffProj.w) * uniform.viewport_size.zw;
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
     let clipOffset = pixelOffset * c;
-    output.position = proj + vec4f(clipOffset, 0.0, 0.0);
+    output.position = srEffProj + vec4f(clipOffset, 0.0, 0.0);
     // 裁剪盒：把**这一个角**的 clip 位置换算到盒局部，片元在其上插值 ⇒ 逐像素的盒局部坐标
     // （≈ 主线那种"每个片元判内外"的语义）。
     // ⚠️ 必须用**角的**位置、不能用 splat 中心的：用中心的话四个角同值 ⇒ 退化成"按 splat 硬切"，
@@ -555,6 +657,8 @@ varying @interpolate(flat) srSplatIndex: u32;
     uniform srCropHeight: f32;
     uniform srCropCapWidth: f32;
     uniform srCropCapAlpha: f32;
+    /** 粒子特效的整体淡入/淡出（0..1；与 per-instance 的 uEffectFade 同义，在片元里乘 alpha） */
+    uniform srEffectFade: f32;
 #endif
 uniform srPickMode: f32;
 
@@ -789,6 +893,10 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         c = mix(c, vec3f(1.0, 0.0, 0.0), SR_FRAG_RED);
         // RT0：场景色（预乘输出）
         var a: f32 = f32(alpha) * SR_FRAG_GAIN;
+        // 粒子特效的整体淡入/淡出（与主线同一处、同一式）
+        #ifndef PICK_PASS
+            a = a * clamp(uniform.srEffectFade, 0.0, 1.0);
+        #endif
         // ===== 二期：裁剪盒（与 per-instance 片元同式；见文件里那段说明）=====
         #ifndef PICK_PASS
             if (uniform.srCropEnabled > 0.5) {

@@ -41,13 +41,16 @@ import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
 import { SplatOverlay } from '../splat/splat-overlay';
-import { ensureUnifiedMaterial, ensureUnifiedWorkBuffer } from '../splat/unified-material';
+import { ensureUnifiedMaterial, ensureUnifiedWorkBuffer, getUnifiedEffect } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
 // unified 钩子每帧算裁剪盒矩阵用的临时对象（避免每帧新建 Mat4）
 const clipToBoxLocal = new Mat4();
 const invView = new Mat4();
 const invProj = new Mat4();
+// 特效用：view-projection 与它的逆（世界位移 → clip 位移 / clip → 世界中心）
+const viewProj = new Mat4();
+const invViewProj = new Mat4();
 
 // sort meshInstances by the aabb corner furthest from the camera
 const corner = new Vec3();
@@ -854,6 +857,16 @@ class Scene {
                 };
             }
         }
+        // 二期：粒子特效。特效值由 `Splat.setScatterProgress` 通过 `setUnifiedEffect` 写进模块状态，
+        // 这里每帧补上两个**随相机变化**的矩阵（特效顶点要用它们把世界位移换算成 clip 位移）。
+        let effectParams: any = getUnifiedEffect();
+        const effCam = this.camera?.camera as any;
+        if (effCam) {
+            viewProj.copy(effCam.projectionMatrix);
+            viewProj.mul(effCam.viewMatrix);
+            invViewProj.copy(viewProj).invert();
+            effectParams = { ...effectParams, viewProj: viewProj.data, clipToWorld: invViewProj.data };
+        }
         const ok = ensureUnifiedMaterial(this, s ? {
             color: splatColorParams(s),
             curveTexture: s.curveTexture,
@@ -862,7 +875,8 @@ class Scene {
             selectedClr: tintSelected,
             lockedClr: [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a],
             showDeleted: s.showDeleted ? 1 : 0,
-            crop: cropParams
+            crop: cropParams,
+            effect: effectParams
         } : {});
 
         // 拾取：这条通路**不用**引擎的 id pass（它给不出逐高斯 id，理由与证据见
