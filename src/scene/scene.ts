@@ -34,6 +34,7 @@ import { GpuFrameTiming } from '../core/gpu-frame-timing';
 import { MotionQuality } from '../core/motion-quality';
 import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePolicy } from '../core/splat-tier';
 import { DataProcessor } from '../data-processor/index';
+import { getLodDistances, planLodFractions } from '../lod/lod';
 import { PCApp } from '../pc-app';
 import { splatColorParams } from '../splat/color-params';
 import { GroupRenderer } from '../splat/group-renderer';
@@ -717,7 +718,6 @@ class Scene {
         const splats = this.getElementsByType(ElementType.splat) as Splat[];
         for (let i = 0; i < splats.length; i++) {
             const s = splats[i];
-            if (!s.lodEnabled || s.lodAssets.length === 0) continue;
             if (!allow) {
                 // editing context: never leave a proxy level active
                 if (s.lodLevel !== -1) void s.applyLod(-1);
@@ -732,7 +732,26 @@ class Scene {
             const dy = wb.center.y - camPos.y;
             const dz = wb.center.z - camPos.z;
             const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            const target = s.suggestLodLevel(dist / radius);
+            const ratio = dist / radius;
+
+            // 代理层**按需构建**（2026-09-25）：没有代理层时先看"相机是不是真的远到需要它"，
+            // 只有需要才 fire 一次 `lod.needs`（每个 splat 一次，见 Splat._lodBuildRequested）。
+            // 原来是导入后立刻抢建：实测 2000 万点真实扫描件要多花约 2.9GB JS 堆
+            // （10.3 → 13.1GB，`_tmp/probe-big-workflow.cjs`），而那段开销正好压在
+            // "导入刚结束、用户开始框选/删除"的窗口上。
+            if (!s.lodEnabled || s.lodAssets.length === 0) {
+                const { near } = getLodDistances();
+                if (!s._lodBuildRequested && ratio >= near) {
+                    const levels = planLodFractions(s.splatData?.numSplats ?? 0).length;
+                    if (levels > 0) {
+                        s._lodBuildRequested = true;
+                        this.events.fire('lod.needs', s);
+                    }
+                }
+                continue;
+            }
+
+            const target = s.suggestLodLevel(ratio);
             if (target !== s.lodLevel) void s.applyLod(target);
         }
     }

@@ -233,6 +233,11 @@ class Splat extends Element {
     importReduction: { from: number; to: number; tier: string; device: string; reason: string } | null = null;
     _lodBaseAsset: Asset | null = null;
     _lodLastSwitchAt = 0;
+    /**
+     * 代理层是"按需构建"的（见 `src/lod/editor-lod.ts`）：场景发现相机远到需要代理层时
+     * 只发一次 `lod.needs`，用这个标志去重。`setLodAssets()`/`releaseLodAssets()` 会复位。
+     */
+    _lodBuildRequested = false;
     // 娑撯偓濞嗏剝鈧冩啞鐠€锔界垼鐠佸府绱版稉鑽ゆ祲閺堝搫绱╅悽銊у繁婢舵唻绱欓幒鎺戠碍閸忔粌绨抽弮鐘崇《閸欐牜娴夐張鍝勑幀渚婄礆閸欘亝褰佺粈杞扮濞嗏槄绱?
     // 闁灝鍘ゅВ蹇撴姎閸掑嘲鐫嗛妴鍌濐潌 onPreRender閵?
     _warnedNoMainCam = false;
@@ -821,6 +826,7 @@ class Splat extends Element {
         this._lodBaseAsset = baseAsset ?? this.asset;
         this.lodLevel = -1;
         this.lodEnabled = this.lodAssets.length > 0;
+        this._lodBuildRequested = false;
     }
 
     /** Unload and forget proxy assets (called on destroy and re-registration). */
@@ -834,6 +840,7 @@ class Splat extends Element {
         this.lodAssets = [];
         this.lodEnabled = false;
         this.lodLevel = -1;
+        this._lodBuildRequested = false;
     }
 
     /**
@@ -846,10 +853,29 @@ class Splat extends Element {
         if (next === this.lodLevel && this.lodLevel !== -1) return; // idempotent (full base is level -1 but may be re-applied safely)
         const target = next === -1 ? (this._lodBaseAsset ?? this.asset) : this.lodAssets[next].asset;
         if (!target || target === this.asset) return;
-        await this.replaceData(target, true);
-        this.lodLevel = next;
-        this._lodLastSwitchAt = performance.now();
-        this.scene?.events?.fire('splat.lodChanged', this, next);
+        // 2026-09-25：切换失败时必须**留下一致的状态 + 冷却**。
+        // `replaceData` 中间要 `await updateState()` / `await waitForRender()`，任何一步抛错
+        // （实测：引擎自己的异步包围盒计算落在一个已经被 destroy 的 gsplat 组件上，
+        //  抛 `Cannot read properties of null (reading 'readTextureAsync')`）以前会把整个
+        // `applyLod` 变成 rejected promise：`lodLevel` 永远停在旧值、`_lodLastSwitchAt` 不更新
+        // ⇒ 每帧的 `updateLodSwitching` 都会再发一次切换（`!allow` 那条分支还会绕过冷却）
+        // ⇒ **切换风暴**，画面可能整块消失且不会自愈。现在失败只当"这次没切成"。
+        let ok = false;
+        try {
+            await this.replaceData(target, true);
+            this.lodLevel = next;
+            ok = true;
+        } catch (e) {
+            // 不往外抛：调用方都是 `void applyLod(...)`，抛出去只会变成未处理的 rejection，
+            // 而"这次没切成"本身是安全状态（数据仍绑在切换前的 asset 上，冷却会挡住重试风暴）。
+            console.warn('[lod] switch failed (kept previous level):', e);
+        } finally {
+            // 无论成败都要落冷却，避免每帧重试同一个失败切换
+            this._lodLastSwitchAt = performance.now();
+        }
+        if (ok) {
+            this.scene?.events?.fire('splat.lodChanged', this, next);
+        }
     }
 
     /**

@@ -45,6 +45,78 @@ let mainWindow = null;
 let server = null;
 let isQuitting = false;
 
+// ---------------------------------------------------------------------------
+// 崩溃诊断（"白屏"的解释器）
+//
+// 背景：用户反馈"使用过程中白屏（选中删除过程中白屏）"，用的是真实模型
+// （1.5–4.6GB / 6.5M–20M 高斯）。在这个文件里查过一遍：**一条崩溃处理都没有** ——
+// 渲染进程 OOM / 被 kill、GPU 进程崩溃、主框架加载失败，全都是静默的：窗口就停在
+// 一张白板或一帧静止画面上，用户看不到原因，我们也拿不到任何线索。
+//
+// 现在全部落进 `<userData>/crash.log`，并在真正致命时弹一个能读懂的对话框 + 一键重载。
+// 渲染进程崩溃 = 窗口白板且**永远不会自己恢复**，这正是"白屏"最典型的成因。
+// ---------------------------------------------------------------------------
+let crashLogPath = null;
+let gpuCrashNoticeAt = 0;
+
+/** 追加一条崩溃记录，返回日志文件路径（日志本身永远不能成为新的崩溃源）。 */
+function logCrash(kind, detail) {
+    const line = `[${new Date().toISOString()}] ${kind}: ${detail}\n`;
+    console.error(line.trim());
+    try {
+        if (!crashLogPath) {
+            crashLogPath = path.join(app.getPath('userData'), 'crash.log');
+        }
+        fs.appendFileSync(crashLogPath, line);
+    } catch { /* ignore */ }
+    return crashLogPath;
+}
+
+function crashDialog(options) {
+    const { title, message, detail, reload = true } = options;
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    const buttons = reload ? ['重新加载', '退出'] : ['知道了'];
+    dialog.showMessageBox(parent, {
+        type: 'error',
+        title,
+        message,
+        detail,
+        buttons,
+        defaultId: 0,
+        cancelId: buttons.length - 1,
+        noLink: true
+    }).then(({ response }) => {
+        if (!reload) {
+            return;
+        }
+        if (response === 0) {
+            try {
+                mainWindow.webContents.reload();
+            } catch (e) {
+                logCrash('reload-failed', String(e));
+            }
+        } else {
+            isQuitting = true;
+            app.quit();
+        }
+    }).catch(() => { /* 对话框打不开也只能算了 */ });
+}
+
+/** GPU / 渲染进程崩溃时给用户看的那段话（含日志路径与最有效的自救动作）。 */
+function crashDetailText(reason, extra) {
+    const lines = [
+        `原因：${reason}`,
+        extra ? `细节：${extra}` : null,
+        `日志：${crashLogPath || '(未写入)'}`,
+        '',
+        '怎么处理：',
+        '  · 点"重新加载"可以回到干净状态，未保存的编辑会丢失；',
+        '  · 如果是在大模型（千万级高斯）上选中/删除时反复出现，先做一次"保存"，再缩小选区分批删除；',
+        '  · 崩溃日志请留一份，它能直接指出是显存、内存还是渲染进程被杀。'
+    ];
+    return lines.filter((l) => l !== null).join('\n');
+}
+
 /**
  * Simple static file server.
  * Serves files from the dist/ directory and the static/ directory only.
@@ -227,6 +299,49 @@ async function createWindow() {
             // malformed URL — deny
         }
         return { action: 'deny' };
+    });
+
+    // ---- 崩溃 / 假死 / 加载失败：全部记录，致命时给用户一条出路 ----
+
+    // 渲染进程消失（oom / crashed / killed）：窗口会停在一张白板上且**永远不会自己恢复**。
+    mainWindow.webContents.on('render-process-gone', (event, details) => {
+        if (!details || details.reason === 'clean-exit') {
+            return; // 正常收尾（关窗、退出）
+        }
+        const log = logCrash('render-process-gone', JSON.stringify(details));
+        crashDialog({
+            title: 'SplatRoom 渲染进程已退出',
+            message: `页面进程没了（${details.reason}${details.exitCode !== undefined ? '，退出码 ' + details.exitCode : ''}），窗口不会再自己恢复。`,
+            detail: crashDetailText(details.reason, `exitCode=${details.exitCode} log=${log}`)
+        });
+    });
+
+    // 主线程长时间卡死：大模型上的导入 / 框选 / 删除本来就是秒级到几十秒的任务，
+    // **所以这里只记账、不弹窗** —— 弹一个模态框在"正常的慢操作"上只会变成新的骚扰。
+    // 需要区分"卡住但活着"和"已经死了"时，crash.log 里的时间戳就是证据。
+    mainWindow.webContents.on('unresponsive', () => {
+        logCrash('unresponsive', 'renderer 主线程长时间无响应');
+    });
+
+    mainWindow.webContents.on('responsive', () => {
+        logCrash('responsive', '主线程恢复响应');
+    });
+
+    // 主框架加载失败 = 白窗口，且不会重试。
+    mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        logCrash('did-fail-load', `${errorCode} ${errorDescription} url=${validatedURL} mainFrame=${isMainFrame}`);
+        if (!isMainFrame) {
+            return;
+        }
+        crashDialog({
+            title: 'SplatRoom 加载失败',
+            message: `界面没能加载（${errorCode} ${errorDescription}）。`,
+            detail: crashDetailText(`${errorCode} ${errorDescription}`, `url=${validatedURL}`)
+        });
+    });
+
+    mainWindow.webContents.on('preload-error', (event, preloadPath_, error) => {
+        logCrash('preload-error', `${preloadPath_}: ${error && error.stack ? error.stack : error}`);
     });
 
     // Build menu
@@ -458,6 +573,43 @@ app.whenReady().then(() => {
     });
 
     createWindow();
+});
+
+// GPU / 工具进程崩溃：GPU 进程一死，所有 WebGL 上下文一起失效（渲染器侧的
+// `contextlost` 弹窗是同一个事件的下游），画面会停在最后一帧或一张白板上。
+app.on('child-process-gone', (event, details) => {
+    if (!details) {
+        return;
+    }
+    const log = logCrash('child-process-gone', JSON.stringify(details));
+    if (details.type !== 'GPU' || details.reason === 'clean-exit') {
+        return;
+    }
+    // 60 秒内只提示一次：GPU 进程崩溃后 Chromium 会重启它，可能连着来几条。
+    if (Date.now() - gpuCrashNoticeAt < 60000) {
+        return;
+    }
+    gpuCrashNoticeAt = Date.now();
+    crashDialog({
+        title: '显卡进程崩溃',
+        message: `GPU 进程退出了（${details.reason}）—— 3D 视图会失效或变白。`,
+        detail: crashDetailText(details.reason, `type=${details.type} log=${log}`)
+    });
+});
+
+// 主进程自身的异常：默认行为是直接死掉（窗口无声消失）。先记账再告诉用户。
+let mainProcessErrorShown = false;
+process.on('uncaughtException', (error) => {
+    const log = logCrash('main-uncaughtException', error && error.stack ? error.stack : String(error));
+    if (mainProcessErrorShown) {
+        return;
+    }
+    mainProcessErrorShown = true;
+    crashDialog({
+        title: 'SplatRoom 内部错误',
+        message: '主进程抛出了一个未捕获的异常，程序可能已经不稳定。',
+        detail: crashDetailText(String(error && error.message ? error.message : error), `log=${log}`)
+    });
 });
 
 app.on('window-all-closed', () => {

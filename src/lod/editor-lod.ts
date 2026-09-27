@@ -55,6 +55,17 @@ export const registerLodEvents = (
     });
 
     // Non-editing browsing gate: only then may a proxy level stay active.
+    //
+    // 2026-09-25：加"**文档必须没有被编辑过**"这一条。原因是代码级证据的：
+    // `Splat.bindAsset()` 会让 `this.splatData` **跟着当前绑定的 asset 走**（splat.ts:525），
+    // 并且给每一份被绑定的数据各建一份 state 列（splat.ts:574-581）。于是代理层生效期间：
+    //   · 框选/删除写在**代理层自己的 state** 上（只有 10%~35% 的行，且行号是代理层的行号）；
+    //   · 任何一次选择都会把闸门翻回"有选区 ⇒ 不许可代理" ⇒ 立刻 `applyLod(-1)` 换回全分辨率，
+    //     而全分辨率那份 state 是**它自己之前的**内容 ⇒ 用户看到的是"选区没了 / 删了没反应"；
+    //   · 更糟的是历史里的 op 记的是**代理层行号**，换回全分辨率后再撤销/重做，
+    //     就会按代理层的行号去改全分辨率的数据 ⇒ **删错点**（这是改用户的数据，不是慢一点的问题）。
+    // 所以代理层只用于"**导入后还没动过**"的浏览态；一旦有编辑历史（含选区）就一律回到全分辨率。
+    // 代价：编辑过的超大模型在看远时不再降级（慢一点），换来的是不会悄悄改错数据。
     events.function('lod.allowProxy', () => {
         if (!autoEnabled) return false;
         const scene = getScene();
@@ -62,6 +73,7 @@ export const registerLodEvents = (
         if (scene.lockedRenderMode) return false;
         if (scene.camera?.userDragging) return false;
         if (editHistory.isUndoingRedoing()) return false;
+        if (editHistory.canUndo()) return false;
         const selection = events.invoke('selection.splats') as unknown[] | undefined;
         if (selection && selection.length > 0) return false;
         return true;
@@ -104,11 +116,25 @@ export const registerLodEvents = (
         for (const s of splats) await generateForSplat(s);
     });
 
-    // Auto-generate for the first large splat of a fresh load.
+    // 按需构建代理层：`Scene.updateLodSwitching` 判定"相机已经远到需要代理层、但这个 splat
+    // 还没有代理层"时会 fire 一次 `lod.needs`（每个 splat 只发一次，见 `Splat._lodBuildRequested`）。
+    //
+    // 2026-09-25：原来是在导入后用 `requestIdleCallback`（+8s 兜底）**抢建**。实测用户真实扫描件
+    // （2000 万点 / 4.96GB，`_tmp/probe-big-workflow.cjs`）：导入完成 JS 堆 10.3GB →
+    // 代理层建好 **13.1GB**（两层抽样+打包要多花约 2.9GB），而这段开销正好落在
+    // "导入刚结束、用户开始框选/删除"的那一刻。改成按需：近距离编辑一分钱不花，
+    // 远距离浏览时补上（首次晚一个构建时间，建好之后一直可用）。
+    events.on('lod.needs', (splat: Splat) => {
+        if (!autoEnabled) return;
+        void generateForSplat(splat);
+    });
+
+    // Auto-enable for the first large splat of a fresh load.
     //
     // 2026-09-22 分级：B 档（500 万~5000 万）与 C 档（> 5000 万）**自动开启** —— 这是用户要的
     // "不同等级采取不同策略"里性能那一半：代理层只在相机远离到阈值之外才会接管
-    // （`lod.allowProxy` 还要求"没选中、没在拖、没在撤销"），近距离仍是全分辨率。
+    // （`lod.allowProxy` 还要求"没选中、没在拖、没在撤销、**文档没有被编辑过**"），
+    // 近距离仍是全分辨率。
     // 关掉的办法：设置面板里的 Runtime LOD 开关，或 `window.__SPLATROOM_TIER_LOD__ = false`。
     events.on('scene.elementAdded', (element: Element) => {
         if (element.type !== ElementType.splat) return;
@@ -126,27 +152,6 @@ export const registerLodEvents = (
             autoEnabled = true;
             events.fire('lod.autoChanged', autoEnabled);
         }
-
-        if (!autoEnabled) return;
-        if (numSplats < LOD_GENERATE_MIN) return;
-        // 第十九轮：**等主线程真的空下来再建代理层**。
-        // 原来固定 400 ms，正好落在"引擎把 6000 万行打包进显存"那段 11.7 s 之后的尾巴上：
-        // 实测用户在 1.35 亿那档看到的是 11.7 s 冻结 → 停 2.6 s → **又冻 5.0 s**（`import-stall.cjs`）。
-        // 改成 `requestIdleCallback`（带 8 s 兜底）—— 让浏览器告诉我们线程空了再开始，
-        // 于是用户先拿到"能看能动"的模型，代理层随后悄悄补上（层与层之间还会再让出一手，
-        // 见 `buildLodAssets`），最长阻塞从 5.0 s 降到约一半。
-        const scheduleLodBuild = (splat: Splat) => {
-            const start = () => {
-                void generateForSplat(splat);
-            };
-            const ric = (globalThis as any).requestIdleCallback as
-                undefined | ((cb: () => void, opts?: { timeout: number }) => number);
-            if (typeof ric === 'function') {
-                ric(start, { timeout: 8000 });
-            } else {
-                setTimeout(start, 4000);
-            }
-        };
-        scheduleLodBuild(splat);
+        // 这里不再构建代理层：见上面的 'lod.needs'。
     });
 };
