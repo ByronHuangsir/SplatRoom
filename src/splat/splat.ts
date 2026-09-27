@@ -21,6 +21,7 @@ import {
 import { applySplatColorParams, splatColorParams } from './color-params';
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
 import { State, SplatState } from './splat-state';
+import { releaseStreamCpuStorage } from './stream-storage';
 import { TransformPalette } from './transform-palette';
 import { setUnifiedEffect } from './unified-material';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
@@ -679,6 +680,13 @@ class Splat extends Element {
         // 而它被导入链的 catch 吞掉 ⇒ 表现为"导入静默失败、没有 splat 元素"。
         // 所以资源统一从组件上取（两种模式都有）。
         const boundResource = (this.entity.gsplat as any)?.resource ?? instance?.resource ?? splatResource;
+        // 大模型：释放引擎那些流纹理的 **CPU 侧副本**（无损，见 stream-storage.ts 的说明）。
+        // 放在这里是因为 `GSplatResource` 构造时就已经 `lock()`/`unlock()` 上传完毕，
+        // 之后没有任何读取路径；2000 万点实测能省 **1850MB** 常驻。
+        const freed = releaseStreamCpuStorage(boundResource, splatData.numSplats);
+        if (freed > 0) {
+            console.log(`[Splat] 释放流纹理的 CPU 副本 ${(freed / 1048576).toFixed(0)}MB（无损）`);
+        }
         this.localBoundStorage = boundResource.aabb;
         // keep a pristine copy of the engine's CPU-computed AABB: localBoundStorage is
         // an alias of it, so the GPU bound pass below overwrites the CPU values
