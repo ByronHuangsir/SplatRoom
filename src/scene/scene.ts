@@ -805,9 +805,26 @@ class Scene {
         const s = splats.length ? splats[splats.length - 1] : null;
         // 调色参数：**与 per-instance 同一份推导**（`src/splat/color-params.ts` 是唯一实现），
         // 曲线 LUT 纹理也从元素上取（`uCurveEnabled = 0` 时着色器整段跳过，纹理内容无所谓）。
+        //
+        // 二期补上 per-splat 状态（选中/锁定/删除）：状态贴图就是元素那一张（两条通路共用），
+        // 取值口径**逐条对齐** `Splat.onPreRender` 里给 per-instance 材质的那几行：
+        //   没有选中这个元素、或者开了"轮廓选区"模式 ⇒ selectedClr 传中性 (0,0,0,0)；
+        //   否则用全局选中色，alpha 再乘元素自己的 selectionAlpha。
+        const selectedClr = this.events.invoke('selectedClr') as { r: number, g: number, b: number, a: number };
+        const lockedClr = this.events.invoke('lockedClr') as { r: number, g: number, b: number, a: number };
+        const isSelectedElement = !!s && this.events.invoke('selection') === s;
+        const outlineSelection = this.events.invoke('view.outlineSelection') === true;
+        const tintSelected = (!isSelectedElement || outlineSelection) ?
+            [0, 0, 0, 0] :
+            [selectedClr.r, selectedClr.g, selectedClr.b, selectedClr.a * (s?.selectionAlpha ?? 1)];
         const ok = ensureUnifiedMaterial(this, s ? {
             color: splatColorParams(s),
-            curveTexture: s.curveTexture
+            curveTexture: s.curveTexture,
+            stateTexture: s.stateTexture,
+            stateWidth: s.stateTexture?.width ?? 1,
+            selectedClr: tintSelected,
+            lockedClr: [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a],
+            showDeleted: s.showDeleted ? 1 : 0
         } : {});
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;

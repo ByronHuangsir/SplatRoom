@@ -41,7 +41,12 @@ import { ShaderChunks, SHADERLANGUAGE_WGSL } from 'playcanvas';
 import { applySplatColorParams, type SplatColorParams } from './color-params';
 import { bakeUnifiedFragmentShader, bakeUnifiedModifyVS, bakeUnifiedVertexShader, hashSource } from '../shaders/unified-shaders';
 
-/** 装到 unified 材质上的 uniform（与 per-instance 材质同名同语义，见 src/splat/color-params.ts） */
+/**
+ * 装到 unified 材质上的 uniform。
+ * 调色那几项与 per-instance 材质同名同语义（见 src/splat/color-params.ts）；
+ * 二期新增的 per-splat 状态那几项用 `sr` 前缀（避免与引擎 chunk 里已有的名字重名，
+ * 同一个 WGSL 模块里重复声明会编译失败）。
+ */
 export type UnifiedMaterialParams = {
     /** 调试用总增益，1 = 引擎默认；不等于 1 时画面必须整体变化（验证用） */
     probeGain?: number;
@@ -49,6 +54,20 @@ export type UnifiedMaterialParams = {
     color?: SplatColorParams;
     /** 曲线 LUT 纹理（33×4 R32F；没有曲线时不绑也可以，`uCurveEnabled = 0`） */
     curveTexture?: unknown;
+    /**
+     * 二期：per-splat 状态贴图（R8、行主序；就是 `Splat.stateTexture`，两条通路共用同一张）。
+     * 顶点着色器用 `cacheIdx`（= 该 splat 在数据里的行号）去 `textureLoad` 它，
+     * 于是"选中高亮 / 锁定 / 删除隐藏"在这条通路上也能生效。
+     */
+    stateTexture?: unknown;
+    /** 状态贴图宽度（行主序定位用；与 `stateTexture.width` 一致） */
+    stateWidth?: number;
+    /** 选中色（rgba，alpha 当混合权重；不选任何东西时传 [0,0,0,0] = 中性） */
+    selectedClr?: number[];
+    /** 锁定色（rgba，整色相乘；中性 = [1,1,1,1]） */
+    lockedClr?: number[];
+    /** 1 = 显示"已删除"的高斯（淡红 + 降透明度），0 = 整点隐藏 */
+    showDeleted?: number;
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
@@ -303,6 +322,15 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         if (params.curveTexture) {
             material.setParameter('uCurve', params.curveTexture);
         }
+        // 二期：per-splat 状态（选中 / 锁定 / 删除）。缺省全部中性 ——
+        // 不绑状态贴图时 `srState` 恒为 0，着色器整段不生效，画面与"只有调色"逐像素一致。
+        if (params.stateTexture) {
+            material.setParameter('srStateTex', params.stateTexture);
+        }
+        material.setParameter('srStateW', typeof params.stateWidth === 'number' && params.stateWidth > 0 ? params.stateWidth : 1);
+        material.setParameter('srSelectedClr', params.selectedClr ?? [0, 0, 0, 0]);
+        material.setParameter('srLockedClr', params.lockedClr ?? [1, 1, 1, 1]);
+        material.setParameter('srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
         touched++;
     }
 

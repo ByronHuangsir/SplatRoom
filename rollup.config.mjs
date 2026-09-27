@@ -76,7 +76,14 @@ const application = {
             }
         }),
         typescript({
-            tsconfig: './tsconfig.json'
+            tsconfig: './tsconfig.json',
+            // **语法/类型错误必须让构建失败**（2026-09-26 实测教训）：
+            // `@rollup/plugin-typescript` 默认把诊断当**警告**（`(!)`），构建照样"成功"结束，
+            // 而 dist 里留的是**上一次的旧 bundle**。当时的表现极具欺骗性：
+            // 我改完着色器、`npm run build` 看起来是绿的，探针却一直报同一个 WGSL 编译错误 ——
+            // 因为跑的根本还是旧代码，白查了两轮。
+            // noEmitOnError 让这种情况直接以非零退出码失败。
+            noEmitOnError: true
         }),
         resolve(),
         image({ dom: false }),

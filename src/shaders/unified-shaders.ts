@@ -68,6 +68,24 @@ varying gaussianColor: half4;
     var colorRampSampler: sampler;
 #endif
 
+// ===== 二期：**per-splat 状态（选中 / 锁定 / 删除）进这条通路** =====
+// 为什么能这么做：状态贴图是 R8、行主序（Splat.stateTexture，与 per-instance 材质共用同一张），
+// 而这里的 cacheIdx = sortedIndices[order] **就是该 splat 在数据里的行号** —— 引擎的
+// projCache 本来就用「行号 × CACHE_STRIDE」寻址（见下面 let base = cacheIdx * CACHE_STRIDE），
+// 所以不需要任何新资源、也不需要改引擎的 bind group，只要把行号带进着色器。
+//
+// ⚠️ 命名：不要复用引擎/我们 chunk 里已有的名字（splatState / selectedClr / lockedClr /
+// showDeleted / saturation / uProbeGain …）—— 同一个 WGSL 模块里重复声明会编译失败
+// （踩过：uProbeGain），所以这一套统一用 sr 前缀。
+// ⚠️ 本文件是模板字符串，注释里**不能出现反引号**（踩过三次，scripts/audit-code.mjs 有静态护栏）。
+var srStateTex: texture_2d<f32>;
+uniform srStateW: f32;
+uniform srSelectedClr: vec4f;
+uniform srLockedClr: vec4f;
+uniform srShowDeleted: f32;
+// 状态字节原样带到片元（删除但仍在显示时的淡红染色要用 bit2）
+varying @interpolate(flat) srState: u32;
+
 // ===== 我们自己的调色参数（与 per-instance 材质**同名同语义**，由 scene.ts 的 unified 钩子喂）=====
 // 为什么放在顶点：per-instance 通路就是在顶点做这一段的（每组 splat 一次），而且必须在
 // prepareOutputFromGamma 之前（那是 gamma 解码 + 可选 tonemap，做过就逆不回去）。
@@ -161,6 +179,41 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
             var clr: half4 = half4(half(rg.x), half(rg.y), half(ba.x), alpha);
         #endif
     #endif
+
+    // ===== 二期：per-splat 状态（选中 / 锁定 / 删除）=====
+    // 语义**逐字对齐 per-instance 顶点**（splat-shader-wgsl.ts:174-182 与 :398-403）：
+    //   删除位 4：showDeleted 关着 ⇒ 挪出裁剪体（整点丢弃）；开着 ⇒ 交给片元染淡红；
+    //   锁定位 2：整色 × lockedClr；选中位 1：往 selectedClr 混（用它的 alpha 当权重）。
+    // 位置也一致：这两条染色在**调色链之前**（顶点侧），淡红在片元侧调色链之后。
+    let srStateWidth: u32 = u32(max(uniform.srStateW, 1.0));
+    let srStateValue: u32 = u32(
+        textureLoad(
+            srStateTex,
+            vec2i(i32(cacheIdx % srStateWidth), i32(cacheIdx / srStateWidth)),
+            0
+        ).r * 255.0 + 0.5
+    ) & 7u;
+    output.srState = srStateValue;
+    #ifndef PICK_PASS
+        if ((srStateValue & 4u) != 0u && uniform.srShowDeleted < 0.5) {
+            output.position = discardVec;
+            return output;
+        }
+        if ((srStateValue & 2u) != 0u) {
+            clr = half4(vec4f(clr) * uniform.srLockedClr);
+        } else if ((srStateValue & 1u) != 0u) {
+            let srClr: vec4f = vec4f(clr);
+            // ⚠️ 必须显式走一趟 vec4f：half4(vec3f, f32) **没有**对应的构造函数，
+            // 直接写 half4(mix(...), srClr.w) 会编译失败 ⇒ 管线无效 ⇒ 整帧零图元（画面全黑、
+            // 且 createRenderPipeline 不抛异常）。这个坑本仓库踩过一次，这次是探针
+            // docs/probes/probe-wgsl-error.cjs 一眼指出来的。
+            clr = half4(vec4f(
+                mix(srClr.xyz, uniform.srSelectedClr.xyz, uniform.srSelectedClr.a),
+                srClr.w
+            ));
+        }
+    #endif
+
     let cornerUV = vec2f(vertex_position.xy);
     #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
         let alphaClipValue = half(uniform.alphaClip);
@@ -423,6 +476,10 @@ varying gaussianColor: half4;
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
     varying @interpolate(flat) vPickId: u32;
 #endif
+// 二期：per-splat 状态（顶点侧 srState 的原样透传；见顶点里那段说明）。
+// 片元侧只需要删除位：showDeleted 打开时"已删除"的高斯要淡红 + 降透明度，
+// 与 per-instance 片元（splat-shader-wgsl.ts:703-706）同款。
+varying @interpolate(flat) srState: u32;
 
 // 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
 fn srNormExp(x: half) -> half {
@@ -609,7 +666,14 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         // 探针烘焙：朝纯红推（阳性对照）
         c = mix(c, vec3f(1.0, 0.0, 0.0), SR_FRAG_RED);
         // RT0：场景色（预乘输出）
-        let a: f32 = f32(alpha) * SR_FRAG_GAIN;
+        var a: f32 = f32(alpha) * SR_FRAG_GAIN;
+        // 二期：**删除但仍在显示**的高斯（showDeleted 打开）—— 与 per-instance 片元同款：
+        // 淡红混合 + 透明度降到 40%，让"已删掉、只是还在显示"一眼可辨。
+        // 关闭 showDeleted 时这种高斯在顶点就被挪出裁剪体了，根本到不了这里。
+        if ((srState & 4u) != 0u) {
+            c = mix(c, vec3f(1.0, 0.25, 0.25), 0.6);
+            a = a * 0.4;
+        }
         output.color = vec4f(c * a, a);
         // RT1：选区覆盖。一期先写零（选区着色属于二期），但**这一行是这次修复的核心**：
         // 没有它，RT1 就没有对应的片元输出，管线校验直接失败。
