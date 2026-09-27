@@ -44,6 +44,11 @@ import { SplatOverlay } from '../splat/splat-overlay';
 import { ensureUnifiedMaterial, ensureUnifiedWorkBuffer } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
+// unified 钩子每帧算裁剪盒矩阵用的临时对象（避免每帧新建 Mat4）
+const clipToBoxLocal = new Mat4();
+const invView = new Mat4();
+const invProj = new Mat4();
+
 // sort meshInstances by the aabb corner furthest from the camera
 const corner = new Vec3();
 
@@ -817,6 +822,38 @@ class Scene {
         const tintSelected = (!isSelectedElement || outlineSelection) ?
             [0, 0, 0, 0] :
             [selectedClr.r, selectedClr.g, selectedClr.b, selectedClr.a * (s?.selectionAlpha ?? 1)];
+        // 二期：裁剪盒。取值口径**逐条对齐** `Splat.onPreRender` 里给 per-instance 材质的那几行
+        // （同一个 `events.invoke('cropBox')`、同样的 shape 枚举与半径字段），
+        // 只是这里多给一个合成矩阵：`inverse(盒世界) × inverse(视图) × inverse(投影)`
+        // —— 片元那边没有视空间位置可用，由顶点用它把 clip 位置换算成盒局部坐标（见着色器里的说明）。
+        const crop = this.events.invoke('cropBox') as any;
+        let cropParams: any = { enabled: 0 };
+        if (crop && crop.enabled) {
+            const cam = this.camera?.camera as any;
+            if (cam) {
+                clipToBoxLocal.copy(crop.pivot.getWorldTransform()).invert();
+                invView.copy(cam.viewMatrix).invert();
+                invProj.copy(cam.projectionMatrix).invert();
+                clipToBoxLocal.mul2(clipToBoxLocal, invView);
+                clipToBoxLocal.mul2(clipToBoxLocal, invProj);
+                cropParams = {
+                    enabled: 1,
+                    matrix: clipToBoxLocal.data,
+                    preview: crop.preview ? 1 : 0,
+                    softEdge: crop.softEdge,
+                    shape: crop.shape === 'box' ? 0 : crop.shape === 'cylinder' ? 1 : 2,
+                    radiusX: crop.radiusX,
+                    radiusY: crop.radiusY,
+                    radiusZ: crop.radiusZ,
+                    height: crop.height,
+                    capWidth: 0.03,
+                    capAlpha: 0.25,
+                    // 中心/角点混合比例：0.5 是标定出来的折中（见着色器里 srCropMix 的说明）。
+                    // 探针可用 `__SPLATROOM_CROP_MIX__` 覆盖。
+                    cornerMix: (globalThis as any).__SPLATROOM_CROP_MIX__ ?? 0.5
+                };
+            }
+        }
         const ok = ensureUnifiedMaterial(this, s ? {
             color: splatColorParams(s),
             curveTexture: s.curveTexture,
@@ -824,7 +861,8 @@ class Scene {
             stateWidth: s.stateTexture?.width ?? 1,
             selectedClr: tintSelected,
             lockedClr: [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a],
-            showDeleted: s.showDeleted ? 1 : 0
+            showDeleted: s.showDeleted ? 1 : 0,
+            crop: cropParams
         } : {});
 
         // 拾取：这条通路**不用**引擎的 id pass（它给不出逐高斯 id，理由与证据见

@@ -74,6 +74,26 @@ export type UnifiedMaterialParams = {
      * 所以每帧的 `ensureUnifiedMaterialHook()` 不会把 picker 刚设好的模式冲掉。
      */
     pickMode?: number;
+    /**
+     * 二期：裁剪盒。`matrix` = inverse(盒世界) × inverse(视图) × inverse(投影)
+     * （即"clip 位置 → 盒局部"的合成矩阵），其余字段与 per-instance 的 `uCropBox*` 同义。
+     * `enabled = 0` 时整段不生效（画面与不带裁剪盒逐像素一致）。
+     */
+    crop?: {
+        enabled: number;
+        matrix?: ArrayLike<number>;
+        preview?: number;
+        softEdge?: number;
+        shape?: number;
+        radiusX?: number;
+        radiusY?: number;
+        radiusZ?: number;
+        height?: number;
+        capWidth?: number;
+        capAlpha?: number;
+        /** 盒局部坐标的"中心 ↔ 四角"混合比例（1 = 纯角点） */
+        cornerMix?: number;
+    };
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
@@ -383,6 +403,24 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         const pickMode = typeof params.pickMode === 'number' ? params.pickMode : currentPickMode;
         currentPickMode = pickMode;
         material.setParameter('srPickMode', pickMode);
+        // 二期：裁剪盒（缺省关闭 = 中性，着色器整段跳过）
+        const crop = params.crop;
+        material.setParameter('srCropEnabled', crop && crop.enabled > 0.5 ? 1 : 0);
+        if (crop && crop.enabled > 0.5) {
+            if (crop.matrix) {
+                material.setParameter('srClipToBoxLocal', crop.matrix);
+            }
+            material.setParameter('srCropPreview', crop.preview ?? 0);
+            material.setParameter('srCropSoftEdge', crop.softEdge ?? 0.005);
+            material.setParameter('srCropShape', crop.shape ?? 0);
+            material.setParameter('srCropRadiusX', crop.radiusX ?? 0.35);
+            material.setParameter('srCropRadiusY', crop.radiusY ?? 0.35);
+            material.setParameter('srCropRadiusZ', crop.radiusZ ?? 0.35);
+            material.setParameter('srCropHeight', crop.height ?? 0.8);
+            material.setParameter('srCropCapWidth', crop.capWidth ?? 0);
+            material.setParameter('srCropCapAlpha', crop.capAlpha ?? 1);
+            material.setParameter('srCropMix', crop.cornerMix ?? 1);
+        }
         touched++;
     }
 

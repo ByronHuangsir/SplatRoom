@@ -87,6 +87,19 @@ uniform srShowDeleted: f32;
 varying @interpolate(flat) srState: u32;
 // 该 splat 在数据里的行号（= cacheIdx）—— 拾取要用它当 id，见下面 srPickMode 的说明。
 varying @interpolate(flat) srSplatIndex: u32;
+// ===== 二期：裁剪盒（per-pixel）=====
+// 主线是在片元里用 vScreenOffset/vViewCenter + 高斯椭圆**重建视空间位置**再判盒内外的；
+// unified 这条路没有那些 varying，所以这里由顶点把「clip → 盒局部」的合成矩阵乘一次
+// （srClipToBoxLocal 由 app 每帧给 = inverse(盒世界) × inverse(视图) × inverse(投影)），
+// 片元插值就得到每个像素的盒局部坐标。
+// 代价（写清楚）：插值出来的是**高斯中心那条轨迹**上的位置，不是真实表面点 ⇒ 软边是近似；
+// 硬切（判内外）则与主线同式、结果一致。
+#ifndef PICK_PASS
+    uniform srClipToBoxLocal: mat4x4f;
+    varying srBoxLocal: vec3f;
+    /** splat **中心**的盒局部坐标（flat）—— 软边只在"中心本来就贴近边界"的高斯上生效 */
+    varying @interpolate(flat) srBoxLocalCentre: vec3f;
+#endif
 // ===== 拾取模式（0 = 正常出图，1 = id 拾取）=====
 // 为什么需要它：unified 通路的绘制材质是引擎那个（我们挂钩覆盖），**没有** per-instance 的
 // pickMode uniform；而 app 的 picker（prepareId）要靠"渲染一遍、把每个 splat 的 id 写成颜色
@@ -241,6 +254,26 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
     let clipOffset = pixelOffset * c;
     output.position = proj + vec4f(clipOffset, 0.0, 0.0);
+    // 裁剪盒：把**这一个角**的 clip 位置换算到盒局部，片元在其上插值 ⇒ 逐像素的盒局部坐标
+    // （≈ 主线那种"每个片元判内外"的语义）。
+    // ⚠️ 必须用**角的**位置、不能用 splat 中心的：用中心的话四个角同值 ⇒ 退化成"按 splat 硬切"，
+    // 实测那样会把模型边界的一层壳整片丢掉（亮点占比掉 4.3%，而主线只掉 0.06%）。
+    #ifndef PICK_PASS
+        let srCornerClip: vec4f = proj + vec4f(clipOffset, 0.0, 0.0);
+        let srBoxCorner: vec4f = uniform.srClipToBoxLocal * srCornerClip;
+        output.srBoxLocal = select(
+            vec3f(0.0),
+            srBoxCorner.xyz / srBoxCorner.w,
+            abs(srBoxCorner.w) > 1e-6
+        );
+        // 中心那份（flat）：给片元的**软边判定**用。为什么需要它见片元里那段注释。
+        let srBoxCentre: vec4f = uniform.srClipToBoxLocal * proj;
+        output.srBoxLocalCentre = select(
+            vec3f(0.0),
+            srBoxCentre.xyz / srBoxCentre.w,
+            abs(srBoxCentre.w) > 1e-6
+        );
+    #endif
     output.gaussianUV = half2(cornerClipped);
     #ifdef GSPLAT_USER_VARYINGS
         #include "gsplatUserCacheReadVS"
@@ -497,6 +530,30 @@ varying gaussianColor: half4;
 varying @interpolate(flat) srState: u32;
 // 拾取用：该 splat 的行号（= cacheIdx），与 picker.readIds 的解码配套。
 varying @interpolate(flat) srSplatIndex: u32;
+// ===== 二期：裁剪盒（逐字对齐 per-instance 片元，见 splat-shader-wgsl.ts:613-679）=====
+// 唯一的差别是盒局部坐标的来源：那边在片元里重建视空间位置，这边由顶点算好、片元插值
+// （见顶点里那段说明）。dist 的判定与淡出公式完全一致。
+#ifndef PICK_PASS
+    varying srBoxLocal: vec3f;
+    varying @interpolate(flat) srBoxLocalCentre: vec3f;
+    uniform srCropEnabled: f32;
+    /**
+     * 盒局部坐标取"中心 ↔ 四角"的混合比例（1 = 纯角点、0 = 纯中心）。
+     * 为什么要有这个旋钮：角点会把高斯的足迹向盒外"张开"，实测在**默认盒子（= 模型包围盒）**
+     * 下会让外侧一层壳被判到盒外（亮点占比 −5%，而主线只有 −0.06%）。取值由 app 每帧喂，
+     * 探针可以用全局 __SPLATROOM_CROP_MIX__ 覆盖来标定。
+     */
+    uniform srCropMix: f32;
+    uniform srCropPreview: f32;
+    uniform srCropSoftEdge: f32;
+    uniform srCropShape: f32;
+    uniform srCropRadiusX: f32;
+    uniform srCropRadiusY: f32;
+    uniform srCropRadiusZ: f32;
+    uniform srCropHeight: f32;
+    uniform srCropCapWidth: f32;
+    uniform srCropCapAlpha: f32;
+#endif
 uniform srPickMode: f32;
 
 // 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
@@ -703,6 +760,74 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         c = mix(c, vec3f(1.0, 0.0, 0.0), SR_FRAG_RED);
         // RT0：场景色（预乘输出）
         var a: f32 = f32(alpha) * SR_FRAG_GAIN;
+        // ===== 二期：裁剪盒（与 per-instance 片元同式；见文件里那段说明）=====
+        #ifndef PICK_PASS
+            if (uniform.srCropEnabled > 0.5) {
+                // 混合中心与四角（见 srCropMix 的说明）：纯角点会让足迹向盒外张开
+                let lp: vec3f = mix(srBoxLocalCentre, srBoxLocal, clamp(uniform.srCropMix, 0.0, 1.0));
+                // 到裁剪形状边界的距离（>0 在里、<0 在外）：盒 / 圆柱（局部 Y 轴、可椭圆截面）/ 椭球共用
+                var dist: f32;
+                if (uniform.srCropShape > 1.5) {
+                    let rx: f32 = max(uniform.srCropRadiusX, 1e-4);
+                    let ry: f32 = max(uniform.srCropRadiusY, 1e-4);
+                    let rz: f32 = max(uniform.srCropRadiusZ, 1e-4);
+                    let q: vec3f = vec3f(lp.x / rx, lp.y / ry, lp.z / rz);
+                    let s: f32 = length(q);
+                    dist = (1.0 - s) * min(min(rx, ry), rz);
+                } else if (uniform.srCropShape > 0.5) {
+                    let rx: f32 = max(uniform.srCropRadiusX, 1e-4);
+                    let rz: f32 = max(uniform.srCropRadiusZ, 1e-4);
+                    let q: vec2f = vec2f(lp.x / rx, lp.z / rz);
+                    let s: f32 = length(q);
+                    dist = min((1.0 - s) * min(rx, rz), uniform.srCropHeight * 0.5 - abs(lp.y));
+                } else {
+                    let ad: vec3f = abs(lp);
+                    dist = 0.5 - max(max(ad.x, ad.y), ad.z);
+                }
+
+                // 中心到边界的距离（同一条公式，用 flat 的中心局部坐标）
+                let lpc: vec3f = srBoxLocalCentre;
+                var distCentre: f32;
+                if (uniform.srCropShape > 1.5) {
+                    let rx: f32 = max(uniform.srCropRadiusX, 1e-4);
+                    let ry: f32 = max(uniform.srCropRadiusY, 1e-4);
+                    let rz: f32 = max(uniform.srCropRadiusZ, 1e-4);
+                    distCentre = (1.0 - length(vec3f(lpc.x / rx, lpc.y / ry, lpc.z / rz))) * min(min(rx, ry), rz);
+                } else if (uniform.srCropShape > 0.5) {
+                    let rx: f32 = max(uniform.srCropRadiusX, 1e-4);
+                    let rz: f32 = max(uniform.srCropRadiusZ, 1e-4);
+                    let s: f32 = length(vec2f(lpc.x / rx, lpc.z / rz));
+                    distCentre = min((1.0 - s) * min(rx, rz), uniform.srCropHeight * 0.5 - abs(lpc.y));
+                } else {
+                    let adc: vec3f = abs(lpc);
+                    distCentre = 0.5 - max(max(adc.x, adc.y), adc.z);
+                }
+                let softEdge: f32 = max(uniform.srCropSoftEdge, 0.0005);
+
+                if (dist < 0.0) {
+                    if (uniform.srCropPreview > 0.5) {
+                        a = a * 0.035;
+                    } else {
+                        // 切面环带：刚出形状的那一圈保留本来的颜色（不重绘），更外面直接丢
+                        let capW: f32 = max(uniform.srCropCapWidth, 0.0);
+                        if (capW > 0.0 && dist > -capW) {
+                            a = a * smoothstep(-capW, 0.0, dist) * uniform.srCropCapAlpha;
+                        } else {
+                            discard;
+                        }
+                    }
+                } else if (distCentre > softEdge) {
+                    // **软边只在中心本来就贴近边界的高斯上生效**。
+                    // 不这么做的话：外侧高斯的"角"插值出来的局部坐标会落到边界附近（dist≈0），
+                    // 于是它朝外那半边被 smoothstep 压到接近 0 —— 实测默认盒子（= 模型包围盒、
+                    // 本该一点不切）下亮点占比掉了 5.1%，而主线只掉 0.06%，而且预览模式也救不回来
+                    // （淡出不是丢弃）。主线那边不会有这个问题，因为它的片元位置是**重建出来的表面点**，
+                    // 不会像四边形角点那样向盒子外"张开"。
+                } else {
+                    a = a * smoothstep(0.0, softEdge, dist);
+                }
+            }
+        #endif
         // 二期：**删除但仍在显示**的高斯（showDeleted 打开）—— 与 per-instance 片元同款：
         // 淡红混合 + 透明度降到 40%，让"已删掉、只是还在显示"一眼可辨。
         // 关闭 showDeleted 时这种高斯在顶点就被挪出裁剪体了，根本到不了这里。
