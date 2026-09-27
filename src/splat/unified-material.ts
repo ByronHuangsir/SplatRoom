@@ -432,7 +432,7 @@ export function isUnifiedMaterialInstalled(scene: any): boolean {
  *
  * @returns 这一次是否真的触发了强制重建
  */
-export function ensureUnifiedWorkBuffer(scene: any): boolean {
+export function ensureUnifiedWorkBuffer(scene: any, force = false): boolean {
     const director = scene?.app?.renderer?.gsplatDirector;
     if (!director?.camerasMap) {
         return false;
@@ -447,7 +447,9 @@ export function ensureUnifiedWorkBuffer(scene: any): boolean {
                 return;
             }
             const version = Number(world.currentVersion ?? 0);
-            if (forcedWorldVersions.get(world) === version) {
+            // `force = true`：绕过"每版本一次"的幂等（往 pcId 流里写完 id 之后必须**再**重传一次，
+            // 否则投影器读到的还是空的 pcId）。
+            if (!force && forcedWorldVersions.get(world) === version) {
                 return;
             }
             if (typeof world.invalidate !== 'function') {
@@ -459,4 +461,68 @@ export function ensureUnifiedWorkBuffer(scene: any): boolean {
         });
     });
     return forced > 0;
+}
+
+/**
+ * 把 unified 通路的 **`pcId` 流填成 `[0..numSplats)`** —— GPU 逐 splat 拾取的最后一块。
+ *
+ * 为什么需要（这一条是量出来的，不是猜的，见 `docs/进度存档.md` 的探针 61~63）：
+ *   · 引擎的拾取那一遍（`SHADER_PICK`）用的是**它自己的拾取材质**，我们的片元根本不参与
+ *     （绘制瞬间读到的材质 `matIsOurs = false`）⇒ 我们无论怎么设 `srPickMode` 都没用；
+ *   · 那份拾取材质写的是 `vPickId`，而 `vPickId` 来自 work buffer 的 **pcId 流**；
+ *   · `scene.gsplat.enableIds = true` 只是**声明**了这条流
+ *     （`format.addExtraStreams([{ name: 'pcId', format: R32U, storage: GSPLAT_STREAM_RESOURCE }])`），
+ *     **没有任何东西往里填每 splat 的值**（引擎自带的写入用的是 `splatInfo.placementId`，
+ *     是"按元素"不是"按高斯"）⇒ `vPickId` 恒为 0 ⇒ 拾取读回来全是 0。
+ *
+ * 填法按 PlayCanvas 的流机制：`GSPLAT_STREAM_RESOURCE` 的流每个都有一张纹理
+ * （`GSplatStreams.init` 建的），把 `i` 逐行写进去即可；写完必须**强制重传一次 work buffer**，
+ * 否则投影器读到的还是空 pcId。
+ *
+ * 幂等：同一个 splat 的同一个 `numSplats` 只写一次（`splat._pickIdsWritten` 记账）。
+ *
+ * @returns 这一次是否真的写了（调用方据此决定要不要强制重传）
+ */
+export function ensureUnifiedPickIds(scene: any, splat: any): boolean {
+    const numSplats = Number(splat?.splatData?.numSplats ?? 0);
+    if (!numSplats) {
+        return false;
+    }
+    if (splat._pickIdsWritten === numSplats) {
+        return false;
+    }
+    const component = splat?.entity?.gsplat;
+    const resource = component?.instance?.resource ?? component?.resource ?? component?._placement?.resource ?? splat?.asset?.resource;
+    const streams = resource?.streams;
+    if (!streams?.getTexture) {
+        return false;
+    }
+    // enableIds 打开后 pcId 才出现在格式里，流的纹理要跟格式对齐一次
+    try {
+        resource.syncWithFormat?.();
+    } catch {
+        /* 对齐失败就按"这张流还没准备好"处理 */
+    }
+    const texture = streams.getTexture('pcId');
+    if (!texture?.lock) {
+        return false;
+    }
+    let ok = false;
+    try {
+        const data = texture.lock();
+        if (data && data.length >= numSplats) {
+            for (let i = 0; i < numSplats; i++) {
+                data[i] = i;
+            }
+            ok = true;
+        }
+    } catch {
+        ok = false;
+    } finally {
+        texture.unlock();
+    }
+    if (ok) {
+        splat._pickIdsWritten = numSplats;
+    }
+    return ok;
 }

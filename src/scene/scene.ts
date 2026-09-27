@@ -41,7 +41,7 @@ import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
 import { SplatOverlay } from '../splat/splat-overlay';
-import { ensureUnifiedMaterial, ensureUnifiedWorkBuffer } from '../splat/unified-material';
+import { ensureUnifiedMaterial, ensureUnifiedPickIds, ensureUnifiedWorkBuffer } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
 // sort meshInstances by the aabb corner furthest from the camera
@@ -798,6 +798,19 @@ class Scene {
         if (!this._unifiedMaterialEnabled) {
             return;
         }
+        // 拾取（ring 模式"只选表面" / GPU 点选）在这条通路上要靠引擎那条**拾取网格实例**
+        // （`gsplatDirector.prepareForPicking` → `GSplatManager.preparePickingView`），而它的
+        // 投影器只有在 work buffer 带 `pcId` 流时才会编译成 PICK_MODE（引擎里那句
+        // `pickMode = !!world.workBuffer.format.getStream("pcId")`），`pcId` 流由
+        // `scene.gsplat.enableIds` 添加。
+        //
+        // ⚠️ **必须早于任何模型导入**：`enableIds` 只改 `scene.gsplat` 那份格式，而**资源的格式
+        // 是建资源时定下的**（实测：导入后才打开的话，`resource.format.getStream('pcId') = false`、
+        // `resource.streams.getTexture('pcId') = null` ⇒ 没有地方能写每 splat 的 id ⇒ 拾取恒为 0）。
+        // 所以这里**不等有 splat**就打开（钩子每帧都会跑，第一帧就设好，导入在后面）。
+        if (!(this.app.scene.gsplat as any).enableIds) {
+            (this.app.scene.gsplat as any).enableIds = true;
+        }
         // 一期：把 splat 元素上的调色参数喂给 unified 材质。
         // 材质是**按 layer** 的，而元素是多个 —— 单模型场景取最后一个（绝大多数情况只有一个）；
         // 多模型时这条通路目前只反映最后一个（一期已知边界，二期再谈聚合）。
@@ -827,14 +840,11 @@ class Scene {
             showDeleted: s.showDeleted ? 1 : 0
         } : {});
 
-        // 拾取（ring 模式"只选表面" / GPU 点选）在这条通路上要靠引擎那条**拾取网格实例**
-        // （`gsplatDirector.prepareForPicking` → `GSplatManager.preparePickingView`），而它的
-        // 投影器只有在 work buffer 带 `pcId` 流时才会编译成 PICK_MODE（引擎里那句
-        // `pickMode = !!world.workBuffer.format.getStream("pcId")`），`pcId` 流由
-        // `scene.gsplat.enableIds` 开关添加。所以这条路开着的时候把 ids 打开一次。
-        // 幂等：`enableIds` 的 setter 自己判重。
-        if (s && !(this.app.scene.gsplat as any).enableIds) {
-            (this.app.scene.gsplat as any).enableIds = true;
+        // 光声明流不够：**还要把每 splat 的 id 填进去**（引擎自带的写入是"按元素"的
+        // placementId，不是高斯序号）—— 见 ensureUnifiedPickIds 的说明。
+        // 填完必须强制重传一次 work buffer，否则投影器读到的还是空 pcId。
+        if (s && ensureUnifiedPickIds(this, s)) {
+            ensureUnifiedWorkBuffer(this, true);
         }
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;
