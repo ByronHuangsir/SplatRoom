@@ -657,17 +657,26 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         if (alpha < half(uniform.alphaClip)) {
             discard;
         }
-        #ifdef GSPLAT_UNIFIED_ID
-            let id: u32 = vPickId;
-            output.color = vec4f(
-                f32((id >> 0u) & 0xFFu) / 255.0,
-                f32((id >> 8u) & 0xFFu) / 255.0,
-                f32((id >> 16u) & 0xFFu) / 255.0,
-                f32((id >> 24u) & 0xFFu) / 255.0
-            );
-        #else
-            output.color = vec4f(0.0, 0.0, 0.0, 0.0);
-        #endif
+        // **我们的逐 splat 拾取**（srPickMode = 1）：写高斯**行号**，编码与 picker.readIds 的解码一致。
+        // 为什么不直接用引擎那份 vPickId：引擎的 pcId 流装的是 **placementId（按元素/组件）**
+        // —— 见引擎里 scope.resolve("uId").setValue(splatInfo.placementId) 那一行 —— 而 app 的 picker
+        // 要的是"这个像素上是**哪个高斯**"。实测：走引擎那条分支时读回来全是 0。
+        if (uniform.srPickMode > 0.5) {
+            let srBits: vec4u = (vec4u(srSplatIndex) >> vec4u(0u, 8u, 16u, 24u)) & vec4u(255u);
+            output.color = vec4f(srBits) / 255.0;
+        } else {
+            #ifdef GSPLAT_UNIFIED_ID
+                let id: u32 = vPickId;
+                output.color = vec4f(
+                    f32((id >> 0u) & 0xFFu) / 255.0,
+                    f32((id >> 8u) & 0xFFu) / 255.0,
+                    f32((id >> 16u) & 0xFFu) / 255.0,
+                    f32((id >> 24u) & 0xFFu) / 255.0
+                );
+            #else
+                output.color = vec4f(0.0, 0.0, 0.0, 0.0);
+            #endif
+        }
     #else
         if (alpha < half(uniform.alphaClipForward)) {
             discard;
