@@ -1,16 +1,11 @@
 import {
-    ADDRESS_CLAMP_TO_EDGE,
     BLENDEQUATION_ADD,
     BLENDMODE_ONE,
     BLENDMODE_ZERO,
     BLENDMODE_ONE_MINUS_SRC_ALPHA,
     BlendState,
-    CameraComponent,
     Color,
-    FILTER_NEAREST,
     GraphicsDevice,
-    PIXELFORMAT_DEPTH,
-    PIXELFORMAT_RGBA8,
     RenderPassPicker,
     RenderTarget,
     Texture
@@ -18,8 +13,8 @@ import {
 
 import { ElementType } from './element';
 import { Scene } from './scene';
+import { cpuPickNearest, cpuPickRect } from '../splat/cpu-pick';
 import { Splat } from '../splat/splat';
-import { setUnifiedPickMode } from '../splat/unified-material';
 
 const idClearColor = new Color(1, 1, 1, 1);
 const depthClearColor = new Color(0, 0, 0, 1);
@@ -78,6 +73,11 @@ class Picker {
      */
     private unifiedPickTarget: RenderTarget | null = null;
 
+    /** unified 通路上"这次要拾取哪个元素"（prepareId 记下，readIds 用） */
+    private cpuPickSplat: Splat | null = null;
+    /** 最近一次 CPU 拾取的耗时（ms）—— 探针/性能记录用 */
+    lastCpuPickMs = 0;
+
     // Render pass (shared for depth and ID picking)
     private renderPass: RenderPassPicker;
 
@@ -107,76 +107,18 @@ class Picker {
         this.idRenderTarget = idRT;
     }
 
-    /** unified 通路：按引擎的附件结构建一个两附件的 id 目标（见字段上的说明）。 */
-    private ensureUnifiedPickTarget(): RenderTarget | null {
-        const src = this.idRenderTarget;
-        if (!src) {
-            return null;
-        }
-        const { width, height } = src;
-        if (this.unifiedPickTarget && this.unifiedPickTarget.width === width && this.unifiedPickTarget.height === height) {
-            return this.unifiedPickTarget;
-        }
-        this.unifiedPickTarget?.destroy();
-
-        const make = (name: string, format: number) => new Texture(this.device, {
-            name,
-            width,
-            height,
-            format,
-            mipmaps: false,
-            minFilter: FILTER_NEAREST,
-            magFilter: FILTER_NEAREST,
-            addressU: ADDRESS_CLAMP_TO_EDGE,
-            addressV: ADDRESS_CLAMP_TO_EDGE
-        });
-
-        this.unifiedPickTarget = new RenderTarget({
-            colorBuffers: [
-                make('splatPickId', PIXELFORMAT_RGBA8),     // RT0：id（readIds 读这一个）
-                make('splatPickWork', PIXELFORMAT_RGBA8)    // RT1：引擎的第二个附件（内容不使用）
-            ],
-            depthBuffer: make('splatPickDepth', PIXELFORMAT_DEPTH),
-            flipY: false,
-            autoResolve: false
-        });
-        return this.unifiedPickTarget;
-    }
-
-    /** 拾取用的目标：unified 走专用 MRT，主线沿用 camera 给的那一个。 */
-    private get pickTarget(): RenderTarget | null {
-        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
-            return this.ensureUnifiedPickTarget() ?? this.idRenderTarget;
-        }
-        return this.idRenderTarget;
-    }
-
     /**
-     * unified 通路上**引擎认识的那个 camera**。
+     * 拾取用的目标：主线就是 camera 给的那一个。
      *
-     * 为什么不能直接用 `scene.camera.camera`：引擎的 `gsplatDirector.camerasMap` 是**按 Camera 对象**
-     * 索引的，而里面的 key 并不是 app 这个 camera（实测 `sameAsAppCamera: false`）——
-     * `director.prepareForPicking(camera, ...)` 用它查不到 cameraData 就直接返回 null ⇒
-     * 引擎那条拾取网格实例根本拿不到 ⇒ 拾取那一遍既不画也不清屏（读回来的是 work 贴图残留）。
-     * 这里按"哪个 camera 的 layersMap 里有我们这个 splat layer 且带 gsplatManager"来找，
-     * 不猜对象身份。
+     * 这里**曾经**给 unified（引擎 GPU 排序）建过一个"与引擎同构的两附件 MRT"、并用
+     * `gsplatDirector` 里那个相机驱动引擎的拾取 pass —— 但那条路**结构上走不通**，证据（探针
+     * 54~64，见 docs/进度存档.md）：引擎拾取那一遍用的是**它自己的拾取材质**（绘制瞬间读到
+     * `matIsOurs = false`），写的是来自 `pcId` 流的 `vPickId`；而 `GSplatResource` 的流列表是写死的
+     * （没有 pcId），引擎自带的 id 又是 `placementId`（按元素、不是按高斯）⇒ 读回来恒为 0。
+     * unified 因此改走 `src/splat/cpu-pick.ts` 的 CPU 实现，这里不再需要那条分支。
      */
-    private unifiedPickCamera(): any | null {
-        const director = (this.scene.app.renderer as any)?.gsplatDirector;
-        if (!director?.camerasMap) {
-            return null;
-        }
-        let found: any = null;
-        director.camerasMap.forEach((cameraData: any, camera: any) => {
-            if (found) {
-                return;
-            }
-            const layerData = cameraData?.layersMap?.get(this.scene.splatLayer);
-            if (layerData?.gsplatManager) {
-                found = camera;
-            }
-        });
-        return found;
+    private get pickTarget(): RenderTarget | null {
+        return this.idRenderTarget;
     }
 
     // The color buffer of the last ID pass (front-most splat index per pixel,
@@ -188,6 +130,16 @@ class Picker {
 
     // Prepare for ID picking by rendering the specified splat
     prepareId(splat: Splat, mode: 'add' | 'remove' | 'set' | 'intersect') {
+        // unified（引擎 GPU 排序）通路：**不走**这里的 GPU id pass。
+        // 引擎在这条路上的拾取那一遍用的是它自己的材质（`matIsOurs = false`），写的是来自
+        // `pcId` 流的 `vPickId`，而资源格式里根本没有 pcId 流、引擎自带的 id 又是 placementId
+        // —— 实测读回来恒为 0（探针 54~64，见 docs/进度存档.md）。所以这条路改走 CPU 实现：
+        // 这里只记下"要拾取哪个元素"，真正的计算在 readIds 里（见 cpu-pick.ts）。
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            this.cpuPickSplat = splat;
+            return;
+        }
+
         const target = this.pickTarget;
         if (!target) {
             return;
@@ -210,28 +162,12 @@ class Picker {
             this.device.scope.resolve('pickOp').setValue(['add', 'remove', 'set'].indexOf(pickOp));
             this.device.scope.resolve('pickMode').setValue(0);
 
-            // unified 通路（引擎 GPU 排序）没有 per-instance 材质，上面那两个 uniform 到不了
-            // 它的着色器（材质是引擎那个、由我们挂钩覆盖），所以要走我们自己的开关：
-            // `srPickMode = 1` 让片元把 splat 行号当 id 写成颜色。**必须在 render 之前设、
-            // 在回读之后清**（回读用 immediate:true，会把这一遍绘制立即提交）。
-            const unified = (globalThis as any).__SPLATROOM_UNIFIED__ === true;
-            if (unified) {
-                setUnifiedPickMode(this.scene, 1);
-            }
-
             // Render ID picking pass
             const emptyMap = new Map();
             this.renderPass.blendState = BlendState.NOBLEND;
             this.renderPass.init(target);
             this.renderPass.setClearColor(idClearColor);
-            // 引擎的 RenderPassPicker 期望"相机组件"（内部读 `camera.camera`）并据此向
-            // gsplatDirector 要拾取网格实例；unified 通路上必须给它**引擎认识的那个 camera**
-            // （见 unifiedPickCamera 的说明），否则那一遍什么都不画。
-            // 这里传一个只带 `camera` 的等价物 —— 引擎在 before()/execute() 里用到的就只有
-            // `camera.camera`（还有 scene.layers / renderTarget），不需要整个组件。
-            const engineCamera = unified ? this.unifiedPickCamera() : null;
-            const pickCamera = (engineCamera ? { camera: engineCamera } : this.scene.camera.camera) as unknown as CameraComponent;
-            this.renderPass.update(pickCamera, this.scene.app.scene, [splatLayer], emptyMap, false);
+            this.renderPass.update(this.scene.camera.camera, this.scene.app.scene, [splatLayer], emptyMap, false);
             this.renderPass.render();
         } finally {
             // Re-enable all splats — even if the render pass throws, otherwise a
@@ -244,6 +180,11 @@ class Picker {
 
     // Read single splat ID at normalized screen position (after prepareId)
     async readId(x: number, y: number): Promise<number> {
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            const { width, height } = this.scene.targetSize;
+            const ids = await this.readIds(x, y, 1 / Math.max(width, 1), 1 / Math.max(height, 1));
+            return ids.length ? ids[0] : -1;
+        }
         const rt = this.pickTarget;
         if (!rt) {
             return -1;
@@ -253,8 +194,61 @@ class Picker {
         return ids[0];
     }
 
+    /**
+     * unified 通路的拾取：CPU 版"每像素最前表面"（实现与理由见 `src/splat/cpu-pick.ts`）。
+     * 坐标口径与 GPU 那条路完全一致：入参是归一化 (0-1)、y 向下，返回行主序 id（背景 = 0xFFFFFFFF）。
+     */
+    private readIdsCpu(x: number, y: number, width: number, height: number): number[] {
+        const splat = this.cpuPickSplat;
+        const data = splat?.splatData as any;
+        if (!data) {
+            return [];
+        }
+        const { width: tw, height: th } = this.scene.targetSize;
+        if (!(tw > 0 && th > 0)) {
+            return [];
+        }
+        const px = Math.max(0, Math.floor(x * tw));
+        const py = Math.max(0, Math.floor(y * th));
+        const pw = Math.max(1, Math.min(tw - px, Math.ceil((x + width) * tw) - px));
+        const ph = Math.max(1, Math.min(th - py, Math.ceil((y + height) * th) - py));
+
+        const camera = this.scene.camera;
+        const common = {
+            numSplats: data.numSplats as number,
+            x: data.getProp('x') as Float32Array,
+            y: data.getProp('y') as Float32Array,
+            z: data.getProp('z') as Float32Array,
+            state: data.getProp('state') as Uint8Array,
+            showDeleted: !!splat.showDeleted,
+            projection: camera.camera.projectionMatrix.data,
+            view: camera.camera.viewMatrix.data,
+            worldTransform: splat.entity.getWorldTransform().data,
+            width: tw,
+            height: th
+        };
+
+        const t0 = performance.now();
+        let ids: Uint32Array;
+        if (pw <= 2 && ph <= 2) {
+            // 单像素（`readId`）：走"半径内最近的候选里取最前"那条 —— 只按中心点写像素的话，
+            // 点画面正中经常落在两个中心之间 ⇒ 返回背景（见 cpu-pick.ts 的说明）。
+            const id = cpuPickNearest({ ...common, px: px + 0.5, py: py + 0.5, radius: 6 });
+            ids = new Uint32Array([id >= 0 ? id : 0xFFFFFFFF]);
+        } else {
+            ids = cpuPickRect({ ...common, px0: px, py0: py, pw, ph }).ids;
+        }
+        this.lastCpuPickMs = performance.now() - t0;
+        return Array.from(ids);
+    }
+
     // Read rectangle of splat IDs using normalized coordinates (0-1 range) (after prepareId)
     async readIds(x: number, y: number, width: number, height: number): Promise<number[]> {
+        // unified 通路：CPU 版逐像素最前表面（见 prepareId 里的说明）
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            return this.readIdsCpu(x, y, width, height);
+        }
+
         const rt = this.pickTarget;
         if (!rt) {
             return [];
@@ -280,12 +274,6 @@ class Picker {
             renderTarget: rt,
             immediate: true
         });
-
-        // 回读完成（immediate:true 已经把这一遍绘制提交掉了）⇒ 收回拾取模式。
-        // 不收的话，视口下一帧就会把 id 当颜色画出来。
-        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
-            setUnifiedPickMode(this.scene, 0);
-        }
 
         const result: number[] = [];
         for (let i = 0; i < pw * ph; i++) {
