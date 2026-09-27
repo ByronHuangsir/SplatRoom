@@ -85,6 +85,15 @@ uniform srLockedClr: vec4f;
 uniform srShowDeleted: f32;
 // 状态字节原样带到片元（删除但仍在显示时的淡红染色要用 bit2）
 varying @interpolate(flat) srState: u32;
+// 该 splat 在数据里的行号（= cacheIdx）—— 拾取要用它当 id，见下面 srPickMode 的说明。
+varying @interpolate(flat) srSplatIndex: u32;
+// ===== 拾取模式（0 = 正常出图，1 = id 拾取）=====
+// 为什么需要它：unified 通路的绘制材质是引擎那个（我们挂钩覆盖），**没有** per-instance 的
+// pickMode uniform；而 app 的 picker（prepareId）要靠"渲染一遍、把每个 splat 的 id 写成颜色
+// 再读回"来回答"这个像素上是哪个 splat"。id 的编码必须与 picker.readIds 的解码一致：
+//   id = r | g<<8 | b<<16 | a<<24   （低字节在 r）
+// 于是这里按同样的顺序写字节；行号本身来自 cacheIdx（就是数据行号）。
+uniform srPickMode: f32;
 
 // ===== 我们自己的调色参数（与 per-instance 材质**同名同语义**，由 scene.ts 的 unified 钩子喂）=====
 // 为什么放在顶点：per-instance 通路就是在顶点做这一段的（每组 splat 一次），而且必须在
@@ -194,23 +203,29 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         ).r * 255.0 + 0.5
     ) & 7u;
     output.srState = srStateValue;
+    output.srSplatIndex = cacheIdx;
+    // 删除点：隐藏时整点丢弃。**拾取模式也一样**（与 per-instance 的 PICK_PASS 分支同义：
+    // "删掉且不显示"的点不该被拾取到），所以这一条不再放在 PICK_PASS 守卫里。
+    if ((srStateValue & 4u) != 0u && uniform.srShowDeleted < 0.5) {
+        output.position = discardVec;
+        return output;
+    }
     #ifndef PICK_PASS
-        if ((srStateValue & 4u) != 0u && uniform.srShowDeleted < 0.5) {
-            output.position = discardVec;
-            return output;
-        }
-        if ((srStateValue & 2u) != 0u) {
-            clr = half4(vec4f(clr) * uniform.srLockedClr);
-        } else if ((srStateValue & 1u) != 0u) {
-            let srClr: vec4f = vec4f(clr);
-            // ⚠️ 必须显式走一趟 vec4f：half4(vec3f, f32) **没有**对应的构造函数，
-            // 直接写 half4(mix(...), srClr.w) 会编译失败 ⇒ 管线无效 ⇒ 整帧零图元（画面全黑、
-            // 且 createRenderPipeline 不抛异常）。这个坑本仓库踩过一次，这次是探针
-            // docs/probes/probe-wgsl-error.cjs 一眼指出来的。
-            clr = half4(vec4f(
-                mix(srClr.xyz, uniform.srSelectedClr.xyz, uniform.srSelectedClr.a),
-                srClr.w
-            ));
+        // 拾取/深度模式下**不染色**：id 是被当数据读的，染一下就把 id 改坏了。
+        if (uniform.srPickMode < 0.5) {
+            if ((srStateValue & 2u) != 0u) {
+                clr = half4(vec4f(clr) * uniform.srLockedClr);
+            } else if ((srStateValue & 1u) != 0u) {
+                let srClr: vec4f = vec4f(clr);
+                // ⚠️ 必须显式走一趟 vec4f：half4(vec3f, f32) **没有**对应的构造函数，
+                // 直接写 half4(mix(...), srClr.w) 会编译失败 ⇒ 管线无效 ⇒ 整帧零图元（画面全黑、
+                // 且 createRenderPipeline 不抛异常）。这个坑本仓库踩过一次，这次是探针
+                // docs/probes/probe-wgsl-error.cjs 一眼指出来的。
+                clr = half4(vec4f(
+                    mix(srClr.xyz, uniform.srSelectedClr.xyz, uniform.srSelectedClr.a),
+                    srClr.w
+                ));
+            }
         }
     #endif
 
@@ -480,6 +495,9 @@ varying gaussianColor: half4;
 // 片元侧只需要删除位：showDeleted 打开时"已删除"的高斯要淡红 + 降透明度，
 // 与 per-instance 片元（splat-shader-wgsl.ts:703-706）同款。
 varying @interpolate(flat) srState: u32;
+// 拾取用：该 splat 的行号（= cacheIdx），与 picker.readIds 的解码配套。
+varying @interpolate(flat) srSplatIndex: u32;
+uniform srPickMode: f32;
 
 // 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
 fn srNormExp(x: half) -> half {
@@ -653,6 +671,15 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     #else
         if (alpha < half(uniform.alphaClipForward)) {
             discard;
+        }
+        // ===== 拾取模式：把行号写成颜色（id = r | g<<8 | b<<16 | a<<24，与 picker.readIds 一致）=====
+        // 注意这里在 alphaClip 之后：太透明的高斯不该被拾取到（与主线 pick pass 的语义一致）。
+        // immediate: true 的那次回读会把这一遍绘制立即提交，所以材质参数不会被下一帧的钩子冲掉。
+        if (uniform.srPickMode > 0.5) {
+            let srBits: vec4u = (vec4u(srSplatIndex) >> vec4u(0u, 8u, 16u, 24u)) & vec4u(255u);
+            output.color = vec4f(srBits) / 255.0;
+            output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+            return output;
         }
         // 调色（片元侧这一段，与 per-instance 片元**同序同公式**：高光 → 阴影 → 对比 → 逐通道 HSL）。
         // 顶点侧那一段（clrScale/clrOffset → 曲线 → 饱和度）已经在 gamma 解码之前做过，

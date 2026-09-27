@@ -1,11 +1,16 @@
 import {
+    ADDRESS_CLAMP_TO_EDGE,
     BLENDEQUATION_ADD,
     BLENDMODE_ONE,
     BLENDMODE_ZERO,
     BLENDMODE_ONE_MINUS_SRC_ALPHA,
     BlendState,
+    CameraComponent,
     Color,
+    FILTER_NEAREST,
     GraphicsDevice,
+    PIXELFORMAT_DEPTH,
+    PIXELFORMAT_RGBA8,
     RenderPassPicker,
     RenderTarget,
     Texture
@@ -14,6 +19,7 @@ import {
 import { ElementType } from './element';
 import { Scene } from './scene';
 import { Splat } from '../splat/splat';
+import { setUnifiedPickMode } from '../splat/unified-material';
 
 const idClearColor = new Color(1, 1, 1, 1);
 const depthClearColor = new Color(0, 0, 0, 1);
@@ -61,6 +67,17 @@ class Picker {
     private depthRenderTarget: RenderTarget | null = null;
     private idRenderTarget: RenderTarget | null = null;
 
+    /**
+     * unified（引擎 GPU 排序）通路专用的 id 目标。
+     *
+     * 为什么不能直接用上面那个：引擎在这条通路上的绘制管线是**两个颜色附件**
+     * （cameraColor + workColor，见 camera.ts 的 splatTarget），而 camera 交给我们的
+     * id 目标是**单附件**的（就是 work 贴图本身）。附件数不匹配 ⇒ 引擎那一遍绘制记不进去
+     * ⇒ 读回来的是 work 贴图里的**残留数据**（实测：38160 个像素里 0 个合法 id，
+     * 值恒为 workColor 的残留）。所以这里按同样的附件结构单独建一个 MRT，读第 0 个附件。
+     */
+    private unifiedPickTarget: RenderTarget | null = null;
+
     // Render pass (shared for depth and ID picking)
     private renderPass: RenderPassPicker;
 
@@ -90,15 +107,89 @@ class Picker {
         this.idRenderTarget = idRT;
     }
 
+    /** unified 通路：按引擎的附件结构建一个两附件的 id 目标（见字段上的说明）。 */
+    private ensureUnifiedPickTarget(): RenderTarget | null {
+        const src = this.idRenderTarget;
+        if (!src) {
+            return null;
+        }
+        const { width, height } = src;
+        if (this.unifiedPickTarget && this.unifiedPickTarget.width === width && this.unifiedPickTarget.height === height) {
+            return this.unifiedPickTarget;
+        }
+        this.unifiedPickTarget?.destroy();
+
+        const make = (name: string, format: number) => new Texture(this.device, {
+            name,
+            width,
+            height,
+            format,
+            mipmaps: false,
+            minFilter: FILTER_NEAREST,
+            magFilter: FILTER_NEAREST,
+            addressU: ADDRESS_CLAMP_TO_EDGE,
+            addressV: ADDRESS_CLAMP_TO_EDGE
+        });
+
+        this.unifiedPickTarget = new RenderTarget({
+            colorBuffers: [
+                make('splatPickId', PIXELFORMAT_RGBA8),     // RT0：id（readIds 读这一个）
+                make('splatPickWork', PIXELFORMAT_RGBA8)    // RT1：引擎的第二个附件（内容不使用）
+            ],
+            depthBuffer: make('splatPickDepth', PIXELFORMAT_DEPTH),
+            flipY: false,
+            autoResolve: false
+        });
+        return this.unifiedPickTarget;
+    }
+
+    /** 拾取用的目标：unified 走专用 MRT，主线沿用 camera 给的那一个。 */
+    private get pickTarget(): RenderTarget | null {
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            return this.ensureUnifiedPickTarget() ?? this.idRenderTarget;
+        }
+        return this.idRenderTarget;
+    }
+
+    /**
+     * unified 通路上**引擎认识的那个 camera**。
+     *
+     * 为什么不能直接用 `scene.camera.camera`：引擎的 `gsplatDirector.camerasMap` 是**按 Camera 对象**
+     * 索引的，而里面的 key 并不是 app 这个 camera（实测 `sameAsAppCamera: false`）——
+     * `director.prepareForPicking(camera, ...)` 用它查不到 cameraData 就直接返回 null ⇒
+     * 引擎那条拾取网格实例根本拿不到 ⇒ 拾取那一遍既不画也不清屏（读回来的是 work 贴图残留）。
+     * 这里按"哪个 camera 的 layersMap 里有我们这个 splat layer 且带 gsplatManager"来找，
+     * 不猜对象身份。
+     */
+    private unifiedPickCamera(): any | null {
+        const director = (this.scene.app.renderer as any)?.gsplatDirector;
+        if (!director?.camerasMap) {
+            return null;
+        }
+        let found: any = null;
+        director.camerasMap.forEach((cameraData: any, camera: any) => {
+            if (found) {
+                return;
+            }
+            const layerData = cameraData?.layersMap?.get(this.scene.splatLayer);
+            if (layerData?.gsplatManager) {
+                found = camera;
+            }
+        });
+        return found;
+    }
+
     // The color buffer of the last ID pass (front-most splat index per pixel,
     // RGBA8-encoded).
     get idTexture(): Texture | null {
-        return this.idRenderTarget ? this.idRenderTarget.colorBuffer : null;
+        const rt = this.pickTarget;
+        return rt ? rt.colorBuffer : null;
     }
 
     // Prepare for ID picking by rendering the specified splat
     prepareId(splat: Splat, mode: 'add' | 'remove' | 'set' | 'intersect') {
-        if (!this.idRenderTarget) {
+        const target = this.pickTarget;
+        if (!target) {
             return;
         }
 
@@ -119,12 +210,28 @@ class Picker {
             this.device.scope.resolve('pickOp').setValue(['add', 'remove', 'set'].indexOf(pickOp));
             this.device.scope.resolve('pickMode').setValue(0);
 
+            // unified 通路（引擎 GPU 排序）没有 per-instance 材质，上面那两个 uniform 到不了
+            // 它的着色器（材质是引擎那个、由我们挂钩覆盖），所以要走我们自己的开关：
+            // `srPickMode = 1` 让片元把 splat 行号当 id 写成颜色。**必须在 render 之前设、
+            // 在回读之后清**（回读用 immediate:true，会把这一遍绘制立即提交）。
+            const unified = (globalThis as any).__SPLATROOM_UNIFIED__ === true;
+            if (unified) {
+                setUnifiedPickMode(this.scene, 1);
+            }
+
             // Render ID picking pass
             const emptyMap = new Map();
             this.renderPass.blendState = BlendState.NOBLEND;
-            this.renderPass.init(this.idRenderTarget);
+            this.renderPass.init(target);
             this.renderPass.setClearColor(idClearColor);
-            this.renderPass.update(this.scene.camera.camera, this.scene.app.scene, [splatLayer], emptyMap, false);
+            // 引擎的 RenderPassPicker 期望"相机组件"（内部读 `camera.camera`）并据此向
+            // gsplatDirector 要拾取网格实例；unified 通路上必须给它**引擎认识的那个 camera**
+            // （见 unifiedPickCamera 的说明），否则那一遍什么都不画。
+            // 这里传一个只带 `camera` 的等价物 —— 引擎在 before()/execute() 里用到的就只有
+            // `camera.camera`（还有 scene.layers / renderTarget），不需要整个组件。
+            const engineCamera = unified ? this.unifiedPickCamera() : null;
+            const pickCamera = (engineCamera ? { camera: engineCamera } : this.scene.camera.camera) as unknown as CameraComponent;
+            this.renderPass.update(pickCamera, this.scene.app.scene, [splatLayer], emptyMap, false);
             this.renderPass.render();
         } finally {
             // Re-enable all splats — even if the render pass throws, otherwise a
@@ -137,22 +244,22 @@ class Picker {
 
     // Read single splat ID at normalized screen position (after prepareId)
     async readId(x: number, y: number): Promise<number> {
-        if (!this.idRenderTarget) {
+        const rt = this.pickTarget;
+        if (!rt) {
             return -1;
         }
         // For single pixel read, use a minimal normalized size
-        const rt = this.idRenderTarget;
         const ids = await this.readIds(x, y, 1 / rt.width, 1 / rt.height);
         return ids[0];
     }
 
     // Read rectangle of splat IDs using normalized coordinates (0-1 range) (after prepareId)
     async readIds(x: number, y: number, width: number, height: number): Promise<number[]> {
-        if (!this.idRenderTarget) {
+        const rt = this.pickTarget;
+        if (!rt) {
             return [];
         }
 
-        const rt = this.idRenderTarget;
         const colorBuffer = rt.colorBuffer;
 
         // Convert normalized coordinates to render target pixels
@@ -173,6 +280,12 @@ class Picker {
             renderTarget: rt,
             immediate: true
         });
+
+        // 回读完成（immediate:true 已经把这一遍绘制提交掉了）⇒ 收回拾取模式。
+        // 不收的话，视口下一帧就会把 id 当颜色画出来。
+        if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
+            setUnifiedPickMode(this.scene, 0);
+        }
 
         const result: number[] = [];
         for (let i = 0; i < pw * ph; i++) {

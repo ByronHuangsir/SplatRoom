@@ -68,12 +68,59 @@ export type UnifiedMaterialParams = {
     lockedClr?: number[];
     /** 1 = 显示"已删除"的高斯（淡红 + 降透明度），0 = 整点隐藏 */
     showDeleted?: number;
+    /**
+     * 拾取模式：0 = 正常出图，1 = **id 拾取**（片元把 splat 行号写成颜色，供
+     * `Picker.prepareId` + `readIds` 读回）。缺省沿用当前值（见 `setUnifiedPickMode`），
+     * 所以每帧的 `ensureUnifiedMaterialHook()` 不会把 picker 刚设好的模式冲掉。
+     */
+    pickMode?: number;
 };
 
 const UNIFIED_MATERIAL_NAME = 'SplatRoomUnifiedMaterial';
 const ATTRS = { vertex_position: 'POSITION' } as const;
 
 let cachedVertexSource: string | null = null;
+
+/**
+ * 当前的拾取模式（0 = 正常出图，1 = id 拾取）。
+ *
+ * 为什么要有这个模块级状态：材质参数是**每帧**由 `Scene.ensureUnifiedMaterialHook()` 重设的，
+ * 而 picker 的 `prepareId()` 是在帧中间"设模式 → 立刻渲染一遍 → 立刻回读"的。如果钩子
+ * 每次都把 `srPickMode` 写回 0，picker 那一遍绘制就会出成正常的画（读回来的全是垃圾 ——
+ * 实测就是这样：47790 个像素里 0 个合法 id）。
+ */
+let currentPickMode = 0;
+
+/** 读当前拾取模式（给探针/套件用）。 */
+export function getUnifiedPickMode(): number {
+    return currentPickMode;
+}
+
+// 探针句柄（与仓库里其它 `__SPLATROOM_*` 逃生开关同一约定：只读/只写自身状态，无副作用）。
+// 为什么需要：材质参数是**每帧**由 scene 的钩子重设的，所以"手动 setParameter 再截图"这种
+// 验证方式会被下一帧的钩子冲掉（实测踩过：截图里参数已经回到 0，误判成"着色器不听话"）。
+// 走这个入口才能把"我们的拾取模式"钉住。
+(globalThis as any).__SPLATROOM_UNIFIED_SET_PICK_MODE__ = (scene: unknown, mode: number) => {
+    return setUnifiedPickMode(scene, mode);
+};
+(globalThis as any).__SPLATROOM_UNIFIED_GET_PICK_MODE__ = () => currentPickMode;
+
+/**
+ * 只改拾取模式，不动其它参数（别用 `ensureUnifiedMaterial` —— 它会把调色参数一并按缺省重设）。
+ * 返回是否真的改到了 unified 材质。
+ */
+export function setUnifiedPickMode(scene: any, mode: number): boolean {
+    currentPickMode = mode;
+    let touched = 0;
+    for (const material of collectUnifiedMaterials(scene)) {
+        if (!material.__splatRoomUnified) {
+            continue;
+        }
+        material.setParameter('srPickMode', mode);
+        touched++;
+    }
+    return touched > 0;
+}
 
 /**
  * 已经强制重建过 work buffer 的 world → 版本号（幂等用）。
@@ -331,6 +378,11 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         material.setParameter('srSelectedClr', params.selectedClr ?? [0, 0, 0, 0]);
         material.setParameter('srLockedClr', params.lockedClr ?? [1, 1, 1, 1]);
         material.setParameter('srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
+        // 拾取模式：调用方没给就**沿用上一次设的值** —— 否则每帧的钩子会把
+        // picker 刚刚设好的 id 模式冲回 0，而 picker 的那一遍绘制就出成正常的画了。
+        const pickMode = typeof params.pickMode === 'number' ? params.pickMode : currentPickMode;
+        currentPickMode = pickMode;
+        material.setParameter('srPickMode', pickMode);
         touched++;
     }
 

@@ -826,6 +826,16 @@ class Scene {
             lockedClr: [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a],
             showDeleted: s.showDeleted ? 1 : 0
         } : {});
+
+        // 拾取（ring 模式"只选表面" / GPU 点选）在这条通路上要靠引擎那条**拾取网格实例**
+        // （`gsplatDirector.prepareForPicking` → `GSplatManager.preparePickingView`），而它的
+        // 投影器只有在 work buffer 带 `pcId` 流时才会编译成 PICK_MODE（引擎里那句
+        // `pickMode = !!world.workBuffer.format.getStream("pcId")`），`pcId` 流由
+        // `scene.gsplat.enableIds` 开关添加。所以这条路开着的时候把 ids 打开一次。
+        // 幂等：`enableIds` 的 setter 自己判重。
+        if (s && !(this.app.scene.gsplat as any).enableIds) {
+            (this.app.scene.gsplat as any).enableIds = true;
+        }
         if (ok && !this._unifiedMaterialInstalledLogged) {
             this._unifiedMaterialInstalledLogged = true;
             console.log('[SplatRoom] unified 通路材质已装（引擎 GPU 排序 + 我们的着色器）');
