@@ -184,6 +184,14 @@ export type RuntimePolicy = {
     budgetMs: number;
     /** 没有 timestamp query 时，凭多少点就启用降级 */
     minSplatsWithoutTiming: number;
+    /**
+     * 运动期贡献剔除的上限（`scene.gsplat.minContribution`，unified 通路；基线 3 = 引擎默认）。
+     * 等于 3 即关闭该杠杆。语义是**运动期画质硬边界**（不是性能目标 —— 预算导向的控制器
+     * 会在上限之内停在预算上）。定标依据 20M 填充夹具的剂量响应（motion-quality.ts 头注）：
+     * mc 1000 时 lit 80%→49%（结构完整、细节变稀），3000 时 →30%，10000 画面消失。
+     * A 档 + 高配保持 3（今天的运动行为原样）；A/low 800；B 1500；C（可用优先）4000。
+     */
+    motionContributionCeiling: number;
 };
 
 /**
@@ -206,7 +214,9 @@ export const runtimePolicy = (numSplats: number, facts: DeviceFacts = {}): Runti
                 [{ renderScale: 0.7, pixelSize: 0 }],
             engageGpuMs: device === 'low' ? 45 : 60,
             budgetMs: 33,
-            minSplatsWithoutTiming: 2_000_000
+            minSplatsWithoutTiming: 2_000_000,
+            // A 档高配/中配：贡献剔除关闭（今天的运动行为原样）；低配给一档
+            motionContributionCeiling: device === 'low' ? 800 : 3
         };
     }
 
@@ -220,7 +230,8 @@ export const runtimePolicy = (numSplats: number, facts: DeviceFacts = {}): Runti
                 [{ renderScale: 0.7, pixelSize: 0 }, { renderScale: 0.5, pixelSize: 0 }, { renderScale: 0.35, pixelSize: 0 }],
             engageGpuMs: device === 'high' ? 60 : 45,
             budgetMs: 33,
-            minSplatsWithoutTiming: 2_000_000
+            minSplatsWithoutTiming: 2_000_000,
+            motionContributionCeiling: 1500
         };
     }
 
@@ -233,7 +244,8 @@ export const runtimePolicy = (numSplats: number, facts: DeviceFacts = {}): Runti
             [{ renderScale: 0.7, pixelSize: 0 }, { renderScale: 0.5, pixelSize: 0 }, { renderScale: 0.35, pixelSize: 0 }],
         engageGpuMs: device === 'high' ? 45 : 33,
         budgetMs: 33,
-        minSplatsWithoutTiming: 1_000_000
+        minSplatsWithoutTiming: 1_000_000,
+        motionContributionCeiling: 4000
     };
 };
 

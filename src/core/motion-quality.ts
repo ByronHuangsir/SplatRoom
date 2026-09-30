@@ -38,6 +38,12 @@ type QualityLevel = {
     pixelSize: number;
 };
 
+/**
+ * 贡献剔除（v2，M2-1）的基线：unified 通路下引擎 `scene.gsplat.minContribution` 的默认值。
+ * 静止帧**永远停在这个值上** —— v2 不改变静止画面（与今天的 unified 基线逐项一致）。
+ */
+export const MIN_CONTRIBUTION_BASE = 3;
+
 class MotionQuality {
     /** master switch (kept for probes/tests and a future user-facing setting) */
     enabled = true;
@@ -69,6 +75,55 @@ class MotionQuality {
      * a quality drop for no reason.
      */
     minSplatsWithoutTiming = 2000000;
+
+    // ---- 贡献剔除（v2，M2-1）：unified 通路专属的第二个降级杠杆 ----
+    //
+    // 机制：引擎 hybrid 管线的 projector compute 里就有这条剔除（`compute-gsplat-common.wgsl`：
+    // `opacity * 2π * sqrt(det) < minContribution` 即剔），剔掉的点不进排序键也不进绘制 ——
+    // 在"每帧 projector+排序的 per-splat 计算主导"的 unified 大模型上，这是实测最大的杠杆
+    // （20M 填充夹具 @ RTX 3070 Ti，旋转中 GPU p50：78.3ms → 18.9ms，mc 3→1000，lit 80%→49%）。
+    // 杠杆本身是**一个 uniform**，无 realloc 代价，步进频率可以远快于分辨率阶梯。
+    //
+    // 与上游 SuperSplat 3.3.0 的两点刻意不同（`projected-splat-renderer.ts:67-77`）：
+    //   1. **量纲**：判据是 α·π·radius²（像素单位），本仓库的模型/夹具里存活高斯的贡献普遍
+    //      在 10²–10⁴ 量级，上游 0–1 的加法步进（+0.05/50ms）在本仓库要几分钟才爬到有效区
+    //      （实测：加法步进 5 秒只到 88，毫无效果）。因此改为**几何步进**：超预算 ×2、
+    //      富余 ÷1.4，从基线 3 到 ~1000 只要 ~9 步（450 ms）。
+    //   2. **基线**：我们的静止值是引擎默认 **3**（上游静止帧用 0）—— 静止画面保持今天的
+    //      unified 基线不变，运动期只往上抬，停手精确回落。上限按分级策略给（applyPolicy），
+    //      语义是"运动期最多愿意丢多少画面"（画质硬边界，不是性能目标 —— 预算导向的控制器
+    //      会在到达上限之前就停在预算内）。
+    //
+    // 剂量响应（20M 填充夹具，旋转中，直接设引擎参数测得，_tmp/probe-mc-direct-dose.cjs）：
+    //   mc    rAF p50   GPU p50   lit
+    //   3      78.1     78.3     79.9%
+    //   1000   18.9     18.9     48.5%
+    //   3000   16.7      5.8     29.7%
+    //   10000  16.7      4.0      0.2%（画面基本消失 —— 上限必须远离这里）
+
+    /** 总开关（排障/回归用：`window.__SPLATROOM_MOTION_CONTRIBUTION__ = false`） */
+    contributionEnabled = true;
+
+    /** 静止值 = 引擎默认。运动结束后精确回到这里（见 MIN_CONTRIBUTION_BASE）。 */
+    contributionBase = MIN_CONTRIBUTION_BASE;
+
+    /** 运动期上限（applyPolicy 按分级覆盖；等于 base 即关闭该杠杆）。 */
+    contributionCeiling = MIN_CONTRIBUTION_BASE;
+
+    /** 超预算时每步的乘数（几何步进，见上面的量纲说明）。 */
+    contributionUpFactor = 2;
+
+    /** 富余时每步的除数（放松比收紧慢半档，避免在预算线附近震荡）。 */
+    contributionDownFactor = 1.4;
+
+    /** 两次贡献步进的最小间隔（ms）。无 realloc 代价，可比分辨率阶梯快得多（上游同值 50）。 */
+    contributionStepMs = 50;
+
+    /**
+     * 测试钩子（与 forceEngaged 同一约定）：非 null 时 update() 用它代替实测的 moving GPU span，
+     * 让浏览器套件能在小模型上确定性地把控制器推过预算。
+     */
+    forceMovingGpuMs: number | null = null;
 
     /**
      * Degradation ladder, cheapest step first. Values come from measuring the GPU-bound 20M fill
@@ -109,9 +164,13 @@ class MotionQuality {
         this.engageGpuMs = policy.engageGpuMs;
         this.budgetMs = policy.budgetMs;
         this.minSplatsWithoutTiming = policy.minSplatsWithoutTiming;
+        this.contributionCeiling = policy.motionContributionCeiling;
         const maxLevel = this.levels.length - 1;
         if (this._level > maxLevel) {
             this._level = Math.max(0, maxLevel);
+        }
+        if (this._contribution > this.contributionCeiling) {
+            this._contribution = this.contributionCeiling;
         }
     }
 
@@ -119,6 +178,12 @@ class MotionQuality {
     private _engaged = false;
     private _autoEngaged = false;
     private _lastStepAt = 0;
+    // 贡献剔除的当前值（engaged 之外不消费，见 minContribution getter）
+    private _contribution = MIN_CONTRIBUTION_BASE;
+    private _lastContributionStepAt = 0;
+    // 上一次手势收敛到的工作点（0 = 没有记忆）。再次拖拽直接从它暖启动，
+    // 否则每次手势的前 ~500 ms 都要付几何爬坡的慢帧（实测 p95 被起步期拖到 75 ms）。
+    private _contributionMemory = 0;
 
     /** currently applied level index */
     get level() {
@@ -143,6 +208,19 @@ class MotionQuality {
     /** `minPixelSize` to apply (0 = leave the engine default alone) */
     get pixelSize() {
         return this._engaged ? this.levels[this._level].pixelSize : 0;
+    }
+
+    /**
+     * 当前应施加到引擎 `scene.gsplat.minContribution` 的值（只对 unified 通路有意义）。
+     * 未 engaged / 总开关关闭时 = 基线（引擎默认），静止画面零变化。
+     */
+    get minContribution() {
+        return this._engaged && this.contributionEnabled ? this._contribution : this.contributionBase;
+    }
+
+    /** 贡献值是否已经顶到上限（分辨率阶梯只在此时才往下走 —— 便宜的杠杆先用尽） */
+    get contributionAtCeiling() {
+        return this._contribution >= this.contributionCeiling - 1e-6;
     }
 
     /**
@@ -183,16 +261,56 @@ class MotionQuality {
         if (!engaged) {
             this._level = 0;
             this._engaged = false;
+            // 停手前控制器停在哪就记住哪：下一次拖拽从这个工作点暖启动（见 _contributionMemory）
+            if (this._contribution > this.contributionBase) {
+                this._contributionMemory = this._contribution;
+            }
+            // 贡献值回到基线：静止帧的画面与"从未降级"逐项一致（applyMinContribution 幂等）
+            this._contribution = this.contributionBase;
             return previousEngaged !== this._engaged || previousLevel !== this._level;
         }
 
         this._engaged = true;
         const maxLevel = this.levels.length - 1;
+        const measuredMovingGpuMs = this.forceMovingGpuMs ?? movingGpuMs;
+        let changed = previousEngaged !== this._engaged;
 
-        if (movingGpuMs !== null && now - this._lastStepAt >= this.stepMs) {
-            this._lastStepAt = now;
-            const ratio = movingGpuMs / this.budgetMs;
+        // 暖启动：本次拖拽的起点 = 上次收敛的工作点（首次手势没有记忆，从基线几何爬坡）。
+        // 同时把步进时钟重置：暖启动帧不再立刻 ×2 —— 让预算控制器先用这个工作点量一帧，
+        // 再决定抬还是松（否则每次再拖拽都会先冲过工作点再回落）。
+        if (!previousEngaged && this._contributionMemory > this.contributionBase) {
+            const warm = Math.min(this.contributionCeiling, this._contributionMemory);
+            if (warm > this.contributionBase) {
+                this._contribution = warm;
+                this._lastContributionStepAt = now;
+                changed = true;
+            }
+        }
+
+        // ---- 杠杆 ①：贡献剔除（便宜、无 realloc，50 ms 步进，几何步进见头部注释）----
+        // 超预算 → ×2 朝上限抬；富余 → ÷1.4 朝基线放松。放松比收紧慢，
+        // 报告滞后于它测量的帧，两侧同速会在预算线附近震荡。
+        if (this.contributionEnabled && this.contributionCeiling > this.contributionBase &&
+            measuredMovingGpuMs !== null && now - this._lastContributionStepAt >= this.contributionStepMs) {
+            this._lastContributionStepAt = now;
+            const ratio = measuredMovingGpuMs / this.budgetMs;
+            const prev = this._contribution;
             if (ratio > 1.05) {
+                this._contribution = Math.min(this.contributionCeiling, this._contribution * this.contributionUpFactor);
+            } else if (ratio < 0.9) {
+                this._contribution = Math.max(this.contributionBase, this._contribution / this.contributionDownFactor);
+            }
+            if (this._contribution !== prev) {
+                changed = true;
+            }
+        }
+
+        // ---- 杠杆 ②：分辨率阶梯（贵、要 realloc，300 ms 步进）----
+        // 只在杠杆 ① 顶到上限（或被关掉）还超预算时才往下走 —— 同一个预算信号，便宜的先动。
+        if (measuredMovingGpuMs !== null && now - this._lastStepAt >= this.stepMs) {
+            this._lastStepAt = now;
+            const ratio = measuredMovingGpuMs / this.budgetMs;
+            if (ratio > 1.05 && (!this.contributionEnabled || this.contributionCeiling <= this.contributionBase || this.contributionAtCeiling)) {
                 // too slow even degraded: one step coarser
                 this._level = Math.min(maxLevel, this._level + 1);
             } else if (ratio < 0.9) {
@@ -202,7 +320,7 @@ class MotionQuality {
             }
         }
 
-        return previousEngaged !== this._engaged || previousLevel !== this._level;
+        return changed || previousLevel !== this._level;
     }
 
     reset() {
@@ -210,6 +328,9 @@ class MotionQuality {
         this._engaged = false;
         this._autoEngaged = false;
         this._lastStepAt = 0;
+        this._contribution = this.contributionBase;
+        this._lastContributionStepAt = 0;
+        this._contributionMemory = 0;
     }
 }
 

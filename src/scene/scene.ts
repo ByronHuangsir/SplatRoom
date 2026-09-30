@@ -235,6 +235,11 @@ class Scene {
     private _appliedRenderScaleBaseHeight = 0;
     // 上一次调用是否因为"导出/锁定渲染模式"而跳过（跳过之后必须重新施加一次，见 applyRenderScale）
     private _renderScaleSkippedForLock = false;
+    // 当前实际生效的 minContribution（NaN = 从未施加；基线 = 引擎默认 3，见 MIN_CONTRIBUTION_BASE）。
+    // 用于幂等地施加/恢复 unified 通路的贡献剔除（v2 第二杠杆）
+    private _appliedMinContribution = NaN;
+    // 上一次调用是否因为锁定渲染模式而跳过（解锁后必须把当前值重新施加一遍）
+    private _minContributionSkippedForLock = false;
     // 上一帧相机是否在动，用于检测"运动 → 停手"这一次跳变（停手时要补一帧干净排序）
     private _wasMoving = false;
     // 停手补帧的武装时刻（0 = 没有欠着的补帧）；用于在补帧落地前持续出帧，并给它一个上限
@@ -959,6 +964,39 @@ class Scene {
         cam.rebuildRenderTargets();
     }
 
+    // 贡献剔除（M2-1 v2 第二杠杆）的"施加/恢复"：幂等地把引擎 `scene.gsplat.minContribution`
+    // 设成给定量。只对 unified 通路有意义（projector compute 里的剔除判据
+    // `opacity * 2π * sqrt(det) < minContribution`，被剔的点不进排序键也不进绘制）；
+    // 主线（per-instance）通路没有这个消费者，开关关着时这里直接早退 —— 主线行为零变化。
+    //
+    // 静止值 = 引擎默认（MIN_CONTRIBUTION_BASE = 3）：v2 **不改变静止画面**，运动期只往上加，
+    // 停手后精确回到基线。和 applyRenderScale 一样，导出/360/快照（lockedRenderMode）期间不碰：
+    // 导出动画相机一直在动，若此时抬高剔除，导出视频会丢淡 splat。
+    private applyMinContribution(value: number) {
+        if (!this._unifiedMaterialEnabled) {
+            return;
+        }
+        if (this.lockedRenderMode) {
+            // 记账与 applyRenderScale 同一套约定：锁定期按"未施加"记账（不触发强制出帧），
+            // 并记住"这次是跳过的"—— 解锁后第一帧把当前值重新施加一遍
+            this._minContributionSkippedForLock = true;
+            this._appliedMinContribution = this.motionQuality.contributionBase;
+            return;
+        }
+        if (this._minContributionSkippedForLock) {
+            this._minContributionSkippedForLock = false;
+            this._appliedMinContribution = NaN;
+        }
+        if (Math.abs(value - this._appliedMinContribution) < 1e-6) {
+            return;
+        }
+        this._appliedMinContribution = value;
+        const gsplat = (this.app.scene as any)?.gsplat;
+        if (gsplat) {
+            gsplat.minContribution = value;
+        }
+    }
+
     /**
      * 合并实体的 sorter 会在组建立/解散时换掉，所以按实例登记 `'updated'` 监听：
      * 没听过就登记，实例换了就换监听，组没了就摘掉并清掉"在飞"状态
@@ -1151,6 +1189,12 @@ class Scene {
             this.gpuFrameTiming.setEnabled(false);
         }
 
+        // 贡献剔除（v2 第二杠杆）的总开关，与上面同一个约定：
+        //   window.__SPLATROOM_MOTION_CONTRIBUTION__ = false
+        // 只关贡献剔除、保留分辨率阶梯 —— 两杠杆可独立回归。
+        this.motionQuality.contributionEnabled =
+            qualityEnabled && (globalThis as any).__SPLATROOM_MOTION_CONTRIBUTION__ !== false;
+
         this.gpuFrameTiming.noteFrame(this.cameraMotion.moving);
 
         // 分级策略：模型规模/设备档位变了才重设阶梯与门槛（见 src/core/splat-tier.ts）
@@ -1169,6 +1213,9 @@ class Scene {
         if (qualityChanged) {
             this.applyRenderScale(this.motionQuality.renderScale);
         }
+        // 贡献剔除：与分辨率不同，它的步进频率高（50 ms），不能只在 qualityChanged 时施加 ——
+        // 每帧幂等地对一次当前值即可（未变化时早退，代价是浮点比较）
+        this.applyMinContribution(this.motionQuality.minContribution);
 
         // 停手后的收尾：给每个 splat 补一帧"干净排序"，让静止画面用的是最终位姿的顺序。
         // 为什么要显式做：`_sortSettleAt` 那套启发式只在"被闸门挡下的帧"里才会武装，
@@ -1220,7 +1267,12 @@ class Scene {
                 }
             }
         }
-        if (settleSortPending || sortInFlight || this.motionQuality.engaged || this._appliedRenderScale !== 1) {
+        // （贡献剔除的恢复：applyMinContribution 在本帧 prerender 里就把引擎参数放回基线，
+        // 本帧即按全量渲染，不需要额外的补帧条件；"engaged 期间持续出帧"已被上面覆盖，
+        // 这里只兜"贡献单独生效、分辨率一直是 1"的场合 —— 停手后最后一帧必须真正发生。）
+        if (settleSortPending || sortInFlight || this.motionQuality.engaged || this._appliedRenderScale !== 1 ||
+            (!Number.isNaN(this._appliedMinContribution) &&
+                Math.abs(this._appliedMinContribution - this.motionQuality.contributionBase) > 1e-6)) {
             this.forceRender = true;
         }
 

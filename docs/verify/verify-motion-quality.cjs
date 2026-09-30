@@ -108,7 +108,10 @@ const canvasCoverage = async (page) => {
             override: cam.targetSizeOverride ? `${cam.targetSizeOverride.width}x${cam.targetSizeOverride.height}` : null,
             mainTarget: cam.mainTarget ? `${cam.mainTarget.width}x${cam.mainTarget.height}` : null,
             fullTarget: `${scene.targetSize.width}x${scene.targetSize.height}`,
-            viewBands: scene.events.invoke('view.bands')
+            viewBands: scene.events.invoke('view.bands'),
+            // v2 第二杠杆：策略值 + 引擎侧实际生效值（unified 通路的贡献剔除）
+            contribution: scene.motionQuality.minContribution,
+            engineMinContribution: scene.app.scene.gsplat.minContribution
         };
     });
 
@@ -194,6 +197,54 @@ const canvasCoverage = async (page) => {
             disabled.engaged === false && disabled.override === null,
             `engaged=${disabled.engaged} override=${disabled.override} moving=${disabled.moving}`);
 
+        // ---- v2 second lever: adaptive contribution cull (engine scene.gsplat.minContribution) ----
+        // The test model is tier A on a high-class device, whose policy ceiling is the base (lever
+        // off, keeps today's behaviour) — so the ceiling is raised explicitly here to exercise the
+        // mechanism. forceMovingGpuMs makes the controller see an over-budget moving frame without
+        // needing a heavy model (same convention as forceEngaged). The ceiling 96 is reached by the
+        // geometric ramp (3 -> 6 -> 12 -> 24 -> 48 -> 96) within ~250 ms of over-budget motion.
+        await page.evaluate(() => {
+            delete window.__SPLATROOM_MOTION_QUALITY__;
+            window.scene.motionQuality.enabled = true;
+            window.scene.motionQuality.forceEngaged = true;
+            window.scene.motionQuality.contributionCeiling = 96;
+            window.scene.motionQuality.forceMovingGpuMs = 50;      // > budgetMs (33)
+        });
+        await sleep(300);
+        const settledC = await state();
+        check('contribution: settled frames keep the engine default (3)',
+            settledC.engaged === false && settledC.engineMinContribution === 3 && settledC.contribution === 3,
+            `engaged=${settledC.engaged} engine=${settledC.engineMinContribution} policy=${settledC.contribution}`);
+
+        const spinC = rotate(1500);
+        await sleep(800);
+        const movingC = await state();
+        await spinC;
+        check('contribution: an over-budget drag raises the engine minContribution above 3',
+            movingC.moving === true && movingC.engaged === true && movingC.engineMinContribution > 3 && movingC.engineMinContribution <= 96,
+            `moving=${movingC.moving} engine=${movingC.engineMinContribution} policy=${movingC.contribution}`);
+
+        await sleep(900);                                        // past the settle window
+        const settledC2 = await state();
+        check('contribution: settling restores the engine default exactly',
+            settledC2.moving === false && settledC2.engineMinContribution === 3 && settledC2.contribution === 3,
+            `moving=${settledC2.moving} engine=${settledC2.engineMinContribution} policy=${settledC2.contribution}`);
+
+        // the contribution lever has its OWN escape hatch, independent of the resolution ladder
+        await page.evaluate(() => { window.__SPLATROOM_MOTION_CONTRIBUTION__ = false; });
+        const spinD = rotate(1200);
+        await sleep(600);
+        const movingD = await state();
+        await spinD;
+        check('window.__SPLATROOM_MOTION_CONTRIBUTION__ = false pins the engine value at 3 while the ladder still works',
+            movingD.engaged === true && movingD.engineMinContribution === 3 && movingD.renderScale < 1,
+            `engaged=${movingD.engaged} engine=${movingD.engineMinContribution} scale=${movingD.renderScale}`);
+        await page.evaluate(() => {
+            delete window.__SPLATROOM_MOTION_CONTRIBUTION__;
+            window.scene.motionQuality.forceMovingGpuMs = null;
+        });
+        await sleep(400);
+
         // ---- sorter gate + settle-time clean frame ----
         // The degradation must not disturb the P0-2 gate, and the frame that settles must issue a final
         // sort so the resting image uses the final pose.
@@ -224,55 +275,74 @@ const canvasCoverage = async (page) => {
         });
         await sleep(300);
 
-        // Count real worker posts, not just dispatch opportunities. The check exists because the
-        // dispatch path was found **permanently dead** (2026-09-21): it gated on `ws._sortInFlight`,
-        // a field that does not exist in this engine, so after the first dispatch every later request
-        // was written to a `_pendingCamera` branch and never sent (measured: 2 calls, 0 posts). The
-        // user-visible symptom was exactly the reported one — during a fast rotation the order stayed
-        // frozen, so back-facing splats drew in front.
-        await page.evaluate(() => {
+        // 通路自适应（2026-09-30，unified 转默认后补）：主线（per-instance + worker 排序）才有
+        // `instance.sorter`；unified 通路（引擎 GPU 同帧排序）没有这个对象 —— 排序与绘制同帧发生，
+        // "顺序冻结/派发洪泛/停手补帧"三条对主线存在的风险在 unified 下结构性不存在，
+        // 改为验证"拖拽期间真的在出帧"（app.frame 计数）。
+        const mainlineSorter = await page.evaluate(() => {
             const splat = window.scene.getElementsByType('splat').slice(-1)[0];
-            const ws = splat.entity.gsplat.instance.sorter;
-            if (ws && ws.worker && !ws.worker.__counted) {
-                const real = ws.worker.postMessage.bind(ws.worker);
-                ws.worker.__posts = 0;
-                ws.worker.postMessage = (msg, ...rest) => {
-                    ws.worker.__posts++;
-                    return real(msg, ...rest);
-                };
-                ws.worker.__counted = true;
-            }
+            return !!(splat && splat.entity && splat.entity.gsplat && splat.entity.gsplat.instance && splat.entity.gsplat.instance.sorter);
         });
-        const posts = () => page.evaluate(() => {
-            const splat = window.scene.getElementsByType('splat').slice(-1)[0];
-            const ws = splat && splat.entity.gsplat.instance.sorter;
-            return ws && ws.worker ? ws.worker.__posts : null;
-        });
-        const postsBefore = await posts();
-        await rotate(2500);
-        const postsAfter = await posts();
-        const postsDuring = postsAfter - postsBefore;
 
-        check('a fast drag keeps issuing sorts (the order is not frozen)',
-            postsBefore !== null && postsDuring >= 2,
-            `worker posts during a 2.5 s drag = ${postsDuring} (must be > 0; a dead dispatch path reports 0)`);
-        check('sorts during a drag stay bounded (no request flood)',
-            postsDuring <= 80,
-            `worker posts during a 2.5 s drag = ${postsDuring} (floor is 200 ms plus the 2.5 deg motion gate)`);
+        if (mainlineSorter) {
+            // Count real worker posts, not just dispatch opportunities. The check exists because the
+            // dispatch path was found **permanently dead** (2026-09-21): it gated on `ws._sortInFlight`,
+            // a field that does not exist in this engine, so after the first dispatch every later request
+            // was written to a `_pendingCamera` branch and never sent (measured: 2 calls, 0 posts). The
+            // user-visible symptom was exactly the reported one — during a fast rotation the order stayed
+            // frozen, so back-facing splats drew in front.
+            await page.evaluate(() => {
+                const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+                const ws = splat.entity.gsplat.instance.sorter;
+                if (ws && ws.worker && !ws.worker.__counted) {
+                    const real = ws.worker.postMessage.bind(ws.worker);
+                    ws.worker.__posts = 0;
+                    ws.worker.postMessage = (msg, ...rest) => {
+                        ws.worker.__posts++;
+                        return real(msg, ...rest);
+                    };
+                    ws.worker.__counted = true;
+                }
+            });
+            const posts = () => page.evaluate(() => {
+                const splat = window.scene.getElementsByType('splat').slice(-1)[0];
+                const ws = splat && splat.entity.gsplat.instance.sorter;
+                return ws && ws.worker ? ws.worker.__posts : null;
+            });
+            const postsBefore = await posts();
+            await rotate(2500);
+            const postsAfter = await posts();
+            const postsDuring = postsAfter - postsBefore;
 
-        // the settle sort must be consumed, not left owed (this is the deadlock guard: the armed frame
-        // only happens if something keeps rendering)
-        let owed = null;
-        for (let i = 0; i < 12; i++) {
-            await sleep(100);
-            owed = await gateState();
-            if (!owed.pending) {
-                break;
+            check('a fast drag keeps issuing sorts (the order is not frozen)',
+                postsBefore !== null && postsDuring >= 2,
+                `worker posts during a 2.5 s drag = ${postsDuring} (must be > 0; a dead dispatch path reports 0)`);
+            check('sorts during a drag stay bounded (no request flood)',
+                postsDuring <= 80,
+                `worker posts during a 2.5 s drag = ${postsDuring} (floor is 200 ms plus the 2.5 deg motion gate)`);
+
+            // the settle sort must be consumed, not left owed (this is the deadlock guard: the armed frame
+            // only happens if something keeps rendering)
+            let owed = null;
+            for (let i = 0; i < 12; i++) {
+                await sleep(100);
+                owed = await gateState();
+                if (!owed.pending) {
+                    break;
+                }
             }
+            check('the settle sort is issued, not left pending',
+                owed !== null && owed.pending === false,
+                `sortSettlePending after the drag = ${owed ? owed.pending : 'null'}`);
+        } else {
+            const framesBefore = await page.evaluate(() => window.scene.app.frame);
+            await rotate(2500);
+            const framesAfter = await page.evaluate(() => window.scene.app.frame);
+            const framesDuring = framesAfter - framesBefore;
+            check('unified: a fast drag keeps rendering frames (same-frame GPU sort runs per frame)',
+                framesDuring >= 30,
+                `app frames during a 2.5 s drag = ${framesDuring} (unified sorts with the draw, no worker posts to count)`);
         }
-        check('the settle sort is issued, not left pending',
-            owed !== null && owed.pending === false,
-            `sortSettlePending after the drag = ${owed ? owed.pending : 'null'}`);
 
         // ---- the degraded frame must still cover the whole canvas ----
         // A 1:1 blit regression is invisible to every other check here (the render target *is*
