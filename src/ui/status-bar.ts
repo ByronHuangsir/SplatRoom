@@ -73,8 +73,18 @@ class StatusBar extends Container {
         const lockedValue = createStat('status-bar.locked');
         const deletedValue = createStat('status-bar.deleted');
 
+        // WebGL2 后端提示：CPU 排序在相机运动时必然滞后（结构性，见
+        // docs/旋转错序-结构性规避与SuperSplat对照-2026-09-22.md），WebGPU 才能同帧排序。
+        // 由 main.ts 在设备创建后 fire 'backend.ready' 决定显隐 —— WebGPU 下整条不出现。
+        const backendHint = new Label({
+            class: 'status-bar-backend-hint',
+            hidden: true
+        });
+        i18n.bindText(backendHint, 'status-bar.backend-hint');
+
         this.append(timelineButton);
         this.append(splatDataButton);
+        this.append(backendHint);
         this.append(statsContainer);
 
         // register tooltips
@@ -92,6 +102,11 @@ class StatusBar extends Container {
 
         tooltips.register(timelineButton, tooltip('tooltip.status-bar.timeline', 'timelinePanel.toggle'), 'top');
         tooltips.register(splatDataButton, tooltip('tooltip.status-bar.splat-data', 'dataPanel.toggle'), 'top');
+        tooltips.register(backendHint, tooltip('tooltip.status-bar.backend-hint'), 'top');
+
+        events.on('backend.ready', (backend: string) => {
+            backendHint.hidden = backend !== 'webgl2';
+        });
 
         // Handle keyboard shortcuts for panel toggles
         events.on('dataPanel.toggle', () => {

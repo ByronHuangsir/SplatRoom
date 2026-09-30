@@ -274,6 +274,10 @@ const main = async () => {
         commandQueue
     );
 
+    // 广播实际生效的后端（状态栏的 WebGL2 排序滞后提示等按它显隐）。
+    // 注意要发"实际设备"而不是"请求值"：请求 webgpu 但机器不支持时会回落 webgl2。
+    events.fire('backend.ready', graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2');
+
     // tell the user when the request fell back to WebGL2 (a browser or machine without
     // WebGPU support), once the UI can show a popup (deferred so startup stays responsive)
     if (gpuBackend === 'webgpu' && !graphicsDevice.isWebGPU) {

@@ -46,6 +46,15 @@
     padding-right: 8px;
 }
 
+// WebGL2 后端提示（排序滞后说明）：低调但可辨的琥珀色，不抢主视觉
+.status-bar-backend-hint {
+    color: #d9a13b;
+    font-size: 11px;
+    padding: 0 8px;
+    white-space: nowrap;
+    cursor: default;
+}
+
 .status-bar-stat {
     display: flex;
     flex-direction: row;
