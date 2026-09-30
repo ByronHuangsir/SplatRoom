@@ -188,30 +188,9 @@ const surfaceWorker = {
     cache: false
 };
 
-// LOD build worker (V3): decimates a large splat into coarser proxy levels off
-// the main thread via splat-transform's adaptive decimation. Instantiated with
-// `new Worker('lod-worker.js', { type: 'module' })`.
-const lodWorker = {
-    input: 'src/workers/lod-worker.ts',
-    output: {
-        dir: 'dist',
-        format: 'esm',
-        sourcemap: true
-    },
-    plugins: [
-        alias({
-            entries: {
-                'playcanvas': ENGINE_DIR,
-                '@playcanvas/pcui': PCUI_DIR
-            }
-        }),
-        resolve(),
-        json(),
-        typescript()
-    ],
-    treeshake: 'smallest',
-    cache: false
-};
+// （原 LOD build worker 已随 M3-4 退役：代理层统一改主线程 stride 抽样，
+// 见 src/lod/lod.ts 末尾"§为什么不再用 decimation"。源文件 src/workers/lod-worker.ts
+// 已删除，需要回退时从 git 取回并在这里补回一个入口即可。）
 
 // Selection worker (V3): runs the 20M-splat projection / mask / preMask passes
 // off the main thread, so a box/lasso/polygon/brush gesture no longer blocks the
@@ -270,7 +249,7 @@ const lwProbe = {
     cache: false
 };
 
-const configs = [application, serviceWorker, loadWorker, surfaceWorker, lodWorker, selectionWorker];
+const configs = [application, serviceWorker, loadWorker, surfaceWorker, selectionWorker];
 if (process.env.BUILD_PROBE) {
     configs.push(lwProbe);
 }

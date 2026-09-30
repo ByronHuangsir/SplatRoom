@@ -88,11 +88,31 @@ class EditHistory {
         }
     }
 
+    /**
+     * M3-4：op 的 do/undo **执行之前**先让渲染侧的代理层回到全分辨率。
+     *
+     * 理由是代码级的：`StateOp.apply()` 写在 `this.splat.state` 上，而它的行范围是
+     * `captureRanges()` 按 `this.splat.splatData.numSplats` 数出来的 —— 也就是说
+     * **op 记的行号是"执行那一刻绑定的那份数据"的行号**。代理层只有全分辨率的 10%~35%，
+     * 行号完全不同；让 op 落在代理层上，等于按代理层的行号去改全分辨率的数据
+     * ⇒ **删错点**（改的是用户的数据，不是慢一点的问题）。
+     * 这就是 M3-4 敢放宽"编辑过就永不用代理层"的前提：编辑一律发生在最高级。
+     *
+     * 走事件而不是直接依赖 LOD 模块：EditHistory 不该知道 LOD 的存在。
+     * 注册方见 `src/lod/editor-lod.ts` 的 `edit.beforeApply`。
+     */
+    private async beforeApply() {
+        if (!this.events.functions.has('edit.beforeApply')) return;
+        const r = this.events.invoke('edit.beforeApply');
+        if (r && typeof (r as any).then === 'function') await r;
+    }
+
     private async _undo() {
         // only advance the cursor after a successful undo so a thrown editOp leaves
         // history in a consistent state for subsequent undo/redo.
         this._undoRedoBusy = true;
         try {
+            await this.beforeApply();
             const editOp = this.history[this.cursor - 1];
             await editOp.undo();
             this.cursor--;
@@ -108,6 +128,7 @@ class EditHistory {
         // history in a consistent state for subsequent undo/redo.
         this._undoRedoBusy = true;
         try {
+            await this.beforeApply();
             const editOp = this.history[this.cursor];
             if (!suppressOp) {
                 await editOp.do();

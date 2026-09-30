@@ -28,7 +28,7 @@ import { ensureUnifiedWorkBuffer, setUnifiedEffect } from './unified-material';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
-import { suggestLodLevel } from '../lod/lod';
+import { suggestLodLevel, proxyRowToSourceRow } from '../lod/lod';
 import { Element, ElementType } from '../scene/element';
 import { vertexShader, fragmentShader, gsplatCenter, gsplatModifyVS } from '../shaders/splat-shader';
 import { vertexShaderWGSL, fragmentShaderWGSL, gsplatCenterWGSL, gsplatModifyWGSL, gsplatCornerWGSL } from '../shaders/splat-shader-wgsl';
@@ -243,6 +243,15 @@ class Splat extends Element {
     importReduction: { from: number; to: number; tier: string; device: string; reason: string } | null = null;
     _lodBaseAsset: Asset | null = null;
     _lodLastSwitchAt = 0;
+    /**
+     * 正在进行的 `applyLod`（M3-4）。
+     *
+     * `applyLod` 内部是 `replaceData` —— 它会**换掉整个 entity**。两条调用路径会并发：
+     * 场景每帧的 `updateLodSwitching`（不 await）和 M3-4 新加的"op 执行前强制回全分辨率"
+     * （必须 await）。两个 `replaceData` 叠在一起 = 互相销毁对方的 entity，
+     * 表现是模型消失或 entity 错乱。所以这里把切换串成一条链：后来的等前一个走完再判。
+     */
+    private _lodSwitching: Promise<void> = Promise.resolve();
     /**
      * 代理层是"按需构建"的（见 `src/lod/editor-lod.ts`）：场景发现相机远到需要代理层时
      * 只发一次 `lod.needs`，用这个标志去重。`setLodAssets()`/`releaseLodAssets()` 会复位。
@@ -599,9 +608,10 @@ class Splat extends Element {
         const instance = this.entity.gsplat.instance;
 
         // added per-splat state channel
-        // bit 1: selected
-        // bit 2: deleted
-        // bit 3: locked
+        // ⚠️ 位值的**唯一定义**在 `src/splat/state-bits.ts`：
+        // selected = 1、locked = 2、deleted = 4。
+        // （这里原先写的是"bit 1 selected / bit 2 deleted / bit 3 locked"，把 deleted 和
+        //  locked 写反了 —— 实测按它写出来的判据会去数 locked，排查时被带偏过一次。）
         if (!splatData.getProp('state')) {
             splatData.getElement('vertex').properties.push({
                 type: 'uchar',
@@ -612,12 +622,19 @@ class Splat extends Element {
         }
 
         // per-splat transform matrix
-        splatData.getElement('vertex').properties.push({
-            type: 'ushort',
-            name: 'transform',
-            storage: new Uint16Array(splatData.numSplats),
-            byteSize: 2
-        });
+        //
+        // ⚠️ M3-4：原来是**无条件 push**，于是每次 bind 都多一份 `Uint16Array(numSplats)`
+        // 和一个同名属性。代理层切换（现在编辑↔浏览往返会频繁触发）就是每次切换泄漏
+        // 2 字节 × 点数 —— 20M 模型上**每次 40 MB**，来回切几次就把堆吃掉了。
+        // 同一份 splatData 的长度不变、内容语义也不变，复用即可。
+        if (!splatData.getProp('transform')) {
+            splatData.getElement('vertex').properties.push({
+                type: 'ushort',
+                name: 'transform',
+                storage: new Uint16Array(splatData.numSplats),
+                byteSize: 2
+            });
+        }
 
         const dims: any = (splatResource as any).textureDimensions;
         const width = Math.max(1, Math.floor(Number(dims?.x) || 0)) || 1;
@@ -932,12 +949,27 @@ class Splat extends Element {
      * Swap the rendered data to proxy level `level` (-1 = full resolution).
      * Keeps the previous asset alive so the next switch back is cheap.
      */
-    async applyLod(level: number) {
+    applyLod(level: number): Promise<void> {
+        // 串行化：等上一个切换走完再判（并发 replaceData 会互相销毁 entity，见 _lodSwitching 注释）。
+        // 调用方既有 `void applyLod(...)` 也有 `await applyLod(...)`，所以这里返回的 promise
+        // 必须真的是"这次切换"的那一个。
+        // （这里刻意不写成 async：串行靠 `then` 链，函数体里没有 await。）
+        const prev = this._lodSwitching;
+        const run: Promise<void> = prev.then(() => this._applyLodInner(level));
+        this._lodSwitching = run.then((): void => undefined, (): void => undefined);
+        return run;
+    }
+
+    private async _applyLodInner(level: number) {
         const n = this.lodAssets.length;
         const next = level >= 0 && level < n ? level : -1;
         if (next === this.lodLevel && this.lodLevel !== -1) return; // idempotent (full base is level -1 but may be re-applied safely)
         const target = next === -1 ? (this._lodBaseAsset ?? this.asset) : this.lodAssets[next].asset;
         if (!target || target === this.asset) return;
+        // M3-4：切进代理层之前，把全分辨率的 state 搬到代理层（见 syncProxyStateFromBase）。
+        // 必须在 `replaceData` **之前**：它内部的 bindAsset 会把 state 列包进 SplatState，
+        // 之后的 updateState 才会把它刷上 GPU。
+        if (next >= 0) this.syncProxyStateFromBase(next);
         // 2026-09-25：切换失败时必须**留下一致的状态 + 冷却**。
         // `replaceData` 中间要 `await updateState()` / `await waitForRender()`，任何一步抛错
         // （实测：引擎自己的异步包围盒计算落在一个已经被 destroy 的 gsplat 组件上，
@@ -960,6 +992,52 @@ class Splat extends Element {
         }
         if (ok) {
             this.scene?.events?.fire('splat.lodChanged', this, next);
+        }
+    }
+
+    /**
+     * M3-4：把全分辨率的 `state` 列按行映射搬到代理层。
+     *
+     * 为什么必须做：`Splat.bindAsset()` 让每份 asset 各有自己的 `state` 列，代理层那份是
+     * **构建时的快照**。用户在全分辨率上删了点之后再进浏览态，代理层那份快照里这些点
+     * 还是"活着" ⇒ **删掉的点复活**。M3-3 时代这只是理论风险（编辑过就永不用代理层），
+     * M3-4 放宽闸门之后它会变成用户可见的回归。
+     *
+     * 行映射来自 `proxyRowToSourceRow()`（与抽样公式逐字一致），因为代理层现在是纯
+     * stride 抽样 —— 这正是 M3-4 把 decimation 通路换掉的原因（合并型抽样拿不到映射）。
+     *
+     * 只搬 `state`（selected/deleted/locked）。`transform` 不搬：它是变换调色板的下标，
+     * 代理层与全分辨率的调色板不是同一份，搬过去会指向错的矩阵。
+     */
+    private syncProxyStateFromBase(level: number) {
+        const baseRes = this._lodBaseAsset?.resource as GSplatResource | undefined;
+        const proxyRes = this.lodAssets[level]?.asset?.resource as GSplatResource | undefined;
+        if (!baseRes || !proxyRes) return;
+        const baseData = baseRes.gsplatData as GSplatData | undefined;
+        const proxyData = proxyRes.gsplatData as GSplatData | undefined;
+        if (!baseData || !proxyData) return;
+
+        let baseState = baseData.getProp('state') as Uint8Array | undefined;
+        let proxyState = proxyData.getProp('state') as Uint8Array | undefined;
+        const N = baseData.numSplats;
+        const M = proxyData.numSplats;
+        if (M <= 0 || N <= 0) return;
+        // 两边都还没有 state 列（例如代理层建好但从未绑定过）：补一个再搬，
+        // 否则 bindAsset 会各建一份全 0 的 —— 那正是"删除复活"的形态。
+        if (!baseState) {
+            baseState = new Uint8Array(N);
+            baseData.getElement('vertex').properties.push({
+                type: 'uchar', name: 'state', storage: baseState, byteSize: 1
+            });
+        }
+        if (!proxyState) {
+            proxyState = new Uint8Array(M);
+            proxyData.getElement('vertex').properties.push({
+                type: 'uchar', name: 'state', storage: proxyState, byteSize: 1
+            });
+        }
+        for (let i = 0; i < M; i++) {
+            proxyState[i] = baseState[proxyRowToSourceRow(i, N, M)];
         }
     }
 

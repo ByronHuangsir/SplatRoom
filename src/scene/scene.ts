@@ -235,6 +235,18 @@ class Scene {
     // 浏览态代理层切换期间还要出的帧数（按需渲染下静止不出帧，切换会卡在 waitForRender）
     private _browseSwitchFrames = 0;
 
+    /**
+     * 主动要求接下来至少 n 帧都出帧（M3-4）。
+     *
+     * `Splat.applyLod` → `replaceData` 里要 `await waitForRender()`；而本应用是按需渲染，
+     * 静止时可以几百毫秒不出一帧 —— 那时切换会**挂在那里等到天荒地老**（M3-3 排查过的
+     * 鸡生蛋问题）。浏览态的切换此前已经在 `updateLodSwitching` 里自己补帧，M3-4 又多了
+     * 一条切换路径（op 执行前强制回全分辨率），所以把这个能力开成公共方法，两条路共用。
+     */
+    requestFrames(n: number) {
+        this._browseSwitchFrames = Math.max(this._browseSwitchFrames, n | 0);
+    }
+
     /** 设备事实缓存（分级用；适配器不会中途变化） */
     private _deviceFacts: DeviceFacts | null = null;
     /** 上一次应用的分级键（`tier|device`），避免每帧重算策略 */

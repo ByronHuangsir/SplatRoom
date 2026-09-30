@@ -67,37 +67,38 @@ export const registerLodEvents = (
     // 所以代理层只用于"**导入后还没动过**"的浏览态；一旦有编辑历史（含选区）就一律回到全分辨率。
     // 代价：编辑过的超大模型在看远时不再降级（慢一点），换来的是不会悄悄改错数据。
     //
-    // ---- M3-3 浏览态例外 ------------------------------------------------------------
-    // 上面那条"代价"正是 M3-3 要解决的问题：用户编辑过模型之后，就再也享受不到
-    // 代理层带来的帧率（实测 20M：全分辨率 22.5 fps，7M 代理 55.7 fps）。
-    // 浏览态 = 只看不编辑（手柄 browse 子模式 / `?browse=1` / 设置面板），UI 全隐藏，
-    // 没有编辑入口，所以在**浏览态**下可以解除 `canUndo()` 这一条。
+    // ---- M3-4：编辑态放宽 ------------------------------------------------------------
+    // 上面那条"代价"由 M3-3 解决了一半（浏览态解除 `canUndo()` 这一条），M3-4 解决剩下
+    // 的那一半 —— **把 M3-3 那道单会话保险也拿掉**，编辑过的模型在浏览态也能稳定用代理层。
     //
-    // 但"换回全分辨率后 undo 会按代理层行号删错点"的风险依然真实（Ctrl+Z 等快捷键
-    // 不依赖 UI），所以留一道**单会话保险**：进入浏览态时快照 undo 栈深度，浏览期间
-    // 只要它变过（任何一次编辑 / 撤销 / 清空历史）就立刻禁用代理，并且**本次浏览不再恢复**
-    // —— 最坏情况是"一次编辑落在代理层上"，而不是"整段浏览都在用错位的数据"。
-    // 行号映射这个根子上的问题由 M3-4 解决。
-    let browseBaseline: number | null = null;
-    let browseInvalidated = false;
-    events.on('browse.changed', (active: boolean) => {
-        if (active) {
-            browseBaseline = editHistory.history.length;
-            browseInvalidated = false;
-        } else {
-            browseBaseline = null;
-            browseInvalidated = false;
-        }
+    // 能拿掉的前提是"行号不再会错"，由两处保证（都不是概率上的侥幸）：
+    //   · **`edit.beforeApply`（下面注册）**：EditHistory 在 do/undo/redo **执行 op 之前**
+    //     先 await 一次"全部回到全分辨率"。op 的行号是在执行那一刻按当前绑定数据数出来的
+    //     （见 `src/core/edit-ops.ts` 的 `StateOp.captureRanges`），所以只要保证执行时绑的是
+    //     全分辨率，行号就一定对得上。Ctrl+Z 这类不依赖 UI 的入口也被这条覆盖。
+    //   · **代理层 state 同步**（`Splat.syncProxyStateFromBase`）：全分辨率上删掉的点，
+    //     进代理层时按行映射搬过去，不会复活。
+    //
+    // 逃生门：`window.__SPLATROOM_LOD_EDIT_RELAX__ = false` 回到 M3-3 行为
+    // （编辑过 ⇒ 浏览态也不用代理层）。
+    const editRelax = () => (globalThis as any).__SPLATROOM_LOD_EDIT_RELAX__ !== false;
+
+    /**
+     * 由 `EditHistory` 在 do/undo/redo 之前 await（见那里的注释）：把所有还挂着代理层的
+     * splat 切回全分辨率。
+     *
+     * 注意要**先补帧再 await**：静止时本应用按需渲染不出帧，而 `replaceData` 要
+     * `waitForRender()`，不补帧就会挂死（M3-3 踩过同一个坑）。
+     */
+    events.function('edit.beforeApply', async () => {
+        const scene = getScene();
+        if (!scene) return;
+        const splats = scene.getElementsByType(ElementType.splat) as Splat[];
+        const pending = splats.filter(s => s.lodLevel !== -1);
+        if (pending.length === 0) return;
+        scene.requestFrames(12);
+        for (const s of pending) await s.applyLod(-1);
     });
-    const browseAllowsProxy = () => {
-        if (browseInvalidated || browseBaseline === null) return false;
-        if (editHistory.history.length !== browseBaseline) {
-            // 浏览期间发生了编辑：本次浏览不再用代理层
-            browseInvalidated = true;
-            return false;
-        }
-        return true;
-    };
 
     events.function('lod.allowProxy', () => {
         if (!autoEnabled) return false;
@@ -107,8 +108,9 @@ export const registerLodEvents = (
         if (scene.camera?.userDragging) return false;
         if (editHistory.isUndoingRedoing()) return false;
         if (editHistory.canUndo()) {
+            // 编辑过：只有浏览态（且未关闭放宽）才允许继续用代理层
             const browse = events.invoke('browse.active') === true;
-            if (!browse || !browseAllowsProxy()) return false;
+            if (!browse || !editRelax()) return false;
         }
         const selection = events.invoke('selection.splats') as unknown[] | undefined;
         if (selection && selection.length > 0) return false;

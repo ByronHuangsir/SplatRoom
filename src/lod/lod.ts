@@ -3,16 +3,13 @@
  *
  * SplatRoom renders every gaussian of a model at once; very large scans
  * (multi-million splats) pay full sort + vertex cost on every camera move.
- * This module builds lower-resolution "proxy" levels with splat-transform's
- * adaptive decimation and swaps the active GSplatData as the camera zooms
- * out (re-using Splat.replaceData).
+ * This module builds lower-resolution "proxy" levels and swaps the active
+ * GSplatData as the camera zooms out (re-using Splat.replaceData).
  *
- * The data layer is pure (no WebGL / Asset), so it can run in a Web Worker
- * and is testable in Node: a Splat's GSplatData columns convert to a
- * splat-transform DataTable, `decimateSourceAdaptive` produces a coarser
- * table, and the result converts back into a GSplatData.
+ * 代理层现在是**纯 stride 抽样**（M3-4，见文件末尾 §为什么不再用 decimation）：
+ * 抽样的每一行都**就是**源数据的某一行，行号可按 `floor(i * N / target)` 现算，
+ * 不需要存映射表 —— 这是"代理层要能反映全分辨率的删除状态"的前提。
  */
-import { Column, DataTable, decimateSourceAdaptive, createChunkDataPool, materializeToDataTable, dataTableToChunkSource } from '@playcanvas/splat-transform';
 import { Asset, GSplatData, GSplatResource } from 'playcanvas';
 
 // ---- GSplatData ⇄ DataTable -------------------------------------------------
@@ -31,57 +28,6 @@ const vertexColumns = (data: GSplatData): { name: string; storage: Float32Array 
         }
     }
     return cols;
-};
-
-/**
- * Convert a PlayCanvas GSplatData into a splat-transform DataTable (canonical
- * column order). Non-float/uchar columns (transform palette etc.) are dropped;
- * the caller recreates them on the way back if needed.
- */
-export const gsplatDataToDataTable = (data: GSplatData): DataTable => {
-    const cols = vertexColumns(data).map(c => new Column(c.name, c.storage));
-    return new DataTable(cols);
-};
-
-/** Convert a splat-transform DataTable back into a PlayCanvas GSplatData. */
-export const dataTableToGsplatData = (table: DataTable, comments: string[] = []): GSplatData => {
-    const props = table.columns.map((c: any) => {
-        const typed = c.data as Float32Array | Uint8Array;
-        const isU8 = typed instanceof Uint8Array;
-        return {
-            type: isU8 ? 'uchar' : 'float',
-            name: c.name,
-            byteSize: isU8 ? 1 : 4,
-            storage: typed
-        };
-    });
-    return new GSplatData([{ name: 'vertex', count: table.numRows, properties: props }], comments);
-};
-
-/**
- * Decimate one GSplatData to an approximate `targetCount` gaussians, keeping
- * the same column set. Pure CPU (splat-transform adaptive decimation); safe to
- * run off the main thread.
- */
-export const decimateGsplatData = async (
-    source: GSplatData,
-    targetCount: number,
-    comments: string[] = []
-): Promise<GSplatData> => {
-    const table = gsplatDataToDataTable(source);
-    const chunk = dataTableToChunkSource(table, source.numSplats);
-    const pool = createChunkDataPool({ chunkSize: Math.max(source.numSplats, 1) });
-    try {
-        // splat-transform types the return as the source itself, but the
-        // adaptive decimator may wrap it as { source, spill } when a spill
-        // target was configured — accept both shapes.
-        const out: any = await decimateSourceAdaptive(chunk, pool, { targetCount });
-        const coarse = out?.source ?? out;
-        const decimated = await materializeToDataTable(coarse, pool);
-        return dataTableToGsplatData(decimated, comments);
-    } finally {
-        pool.destroy();
-    }
 };
 
 /**
@@ -142,7 +88,14 @@ const sampleGsplatData = async (
     const cols = columns ?? vertexColumns(source);
     const N = source.numSplats;
     const target = Math.max(1, Math.min(targetCount, N));
-    if (target >= N) return dataTableToGsplatData(gsplatDataToDataTable(source), comments);
+    // 不减点数时逐列拷一份（不共享源数组，避免代理层与源互相影响）
+    if (target >= N) {
+        return columnsToGsplatData(
+            N,
+            cols.map(c => ({ name: c.name, data: new (c.storage.constructor as any)(c.storage) })),
+            comments
+        );
+    }
     const step = N / target;
 
     // allocate target columns once
@@ -180,11 +133,6 @@ const sampleGsplatData = async (
         comments
     );
 };
-// Above this splat count, LOD levels are built by row sampling (see
-// buildLodLevels) instead of full splat-transform decimation, which would need
-// a deep copy of every column for the worker transfer.
-const LOD_WORKER_MAX = 2_000_000;
-
 /** Distance (camera/model-radius) at which the closest proxy engages. */
 const LOD_NEAR_RATIO = 6.5;
 /** Distance at which the most reduced proxy engages. */
@@ -304,59 +252,16 @@ export const columnsToGsplatData = (
     return new GSplatData([{ name: 'vertex', count, properties: props }], comments);
 };
 
-// ---- Web Worker client: decimate on a background thread ---------------------
-
 interface LodLevelResult {
     count: number;
     data: GSplatData;
 }
 
-let lodWorker: Worker | null = null;
-let lodSeq = 0;
-const lodPending = new Map<number, {
-    resolve:(levels: { count: number; columns: { name: string; data: Float32Array | Uint8Array }[] }[]) => void;
-    reject: (e: any) => void;
-    onProgress?: (f: number) => void;
-}>();
-
-const lodWorkerUrl = (): string => {
-    const base = typeof document !== 'undefined' ? document.baseURI : (self as any).location.href;
-    return new URL('lod-worker.js', base).toString();
-};
-
-const getLodWorker = (): Worker => {
-    if (!lodWorker) {
-        lodWorker = new Worker(lodWorkerUrl(), { type: 'module' });
-        lodWorker.onmessage = (e: MessageEvent) => {
-            const msg = e.data;
-            const p = lodPending.get(msg.id);
-            if (!p) return;
-            if (msg.type === 'lod-progress') {
-                p.onProgress?.(msg.progress);
-                return;
-            }
-            lodPending.delete(msg.id);
-            if (msg.type === 'lod-result') {
-                p.resolve(msg.levels);
-            } else if (msg.type === 'lod-error') {
-                p.reject(new Error(msg.message || 'lod-worker error'));
-            }
-        };
-        lodWorker.onerror = (e: ErrorEvent) => {
-            for (const [id, p] of lodPending) {
-                lodPending.delete(id);
-                p.reject(new Error(e.message || 'lod-worker error'));
-            }
-            lodWorker = null;
-        };
-    }
-    return lodWorker;
-};
-
 /**
- * Decimate `source` into `fractions.length` proxy levels on a Web Worker and
- * wrap each into a GSplatData (not yet GPU assets). Falls back to the
- * synchronous main-thread path when the worker is unavailable.
+ * Build `fractions.length` proxy levels by stride sampling（M3-4 起是**唯一**的构建路径）。
+ *
+ * 走主线程、逐列之间 `setTimeout(0)` 让出一手（见 `sampleGsplatData`），所以进度条
+ * 能真的重绘；也不必为了 worker 传输而深拷贝全部列（20M 上那是几个 GB 的瞬时内存）。
  */
 const buildLodLevels = async (
     source: GSplatData,
@@ -365,74 +270,21 @@ const buildLodLevels = async (
     onProgress?: (f: number) => void
 ): Promise<LodLevelResult[]> => {
     const N = source.numSplats;
-
-    // Very large models: the worker path deep-copies every column for the
-    // transfer first (tens of GB for tens of millions of splats), freezing the
-    // main thread so long the progress bar never paints. Sample instead — no
-    // copy, bounded memory, per-column yields keep the UI alive.
-    if (N > LOD_WORKER_MAX) {
-        // M3-3：先瘦身（只留渲染必需列 + state），再抽样 —— 少走 3/4 的列、省 3/4 的目标内存
-        const srcCols = proxyColumns(vertexColumns(source));
-        const levels: { count: number; columns: { name: string; data: Float32Array | Uint8Array }[] }[] = [];
-        for (let i = 0; i < fractions.length; i++) {
-            const target = Math.max(1, Math.round(fractions[i] * N));
-            const dec = await sampleGsplatData(
-                source,
-                target,
-                comments,
-                f => onProgress?.((i + f) / fractions.length),
-                srcCols
-            );
-            const c = vertexColumns(dec);
-            levels.push({ count: dec.numSplats, columns: c.map(x => ({ name: x.name, data: x.storage })) });
-        }
-        return levels.map(lv => ({
-            count: lv.count,
-            data: columnsToGsplatData(lv.count, lv.columns, comments)
-        }));
+    // M3-3：先瘦身（只留渲染必需列 + state），再抽样 —— 少走 3/4 的列、省 3/4 的目标内存
+    const srcCols = proxyColumns(vertexColumns(source));
+    const out: LodLevelResult[] = [];
+    for (let i = 0; i < fractions.length; i++) {
+        const target = Math.max(1, Math.round(fractions[i] * N));
+        const data = await sampleGsplatData(
+            source,
+            target,
+            comments,
+            f => onProgress?.((i + f) / fractions.length),
+            srcCols
+        );
+        out.push({ count: data.numSplats, data });
     }
-
-    const targets = fractions.map(f => Math.max(1, Math.round(f * N)));
-    // deep copies for transfer (source columns must not be detached)
-    // M3-3：同样先瘦身 —— 传进 worker 的字节少了 3/4，抽稀结果的目标内存也少 3/4
-    const cols = proxyColumns(vertexColumns(source)).map((c) => {
-        const data = c.storage;
-        const copy = new (data.constructor as any)(data) as Float32Array | Uint8Array;
-        return { name: c.name, data: copy };
-    });
-
-    let levels: { count: number; columns: { name: string; data: Float32Array | Uint8Array }[] }[];
-    try {
-        const worker = getLodWorker();
-        levels = await new Promise((resolve, reject) => {
-            const id = ++lodSeq;
-            lodPending.set(id, { resolve, reject, onProgress });
-            try {
-                worker.postMessage(
-                    { id, type: 'build-lod', N, targets, columns: cols, comments },
-                    cols.map(c => c.data.buffer)
-                );
-            } catch (e) {
-                lodPending.delete(id);
-                reject(e);
-            }
-        });
-    } catch {
-        // worker failed — fall back to the synchronous in-thread path
-        levels = [];
-        for (const f of fractions) {
-            const target = Math.max(1, Math.round(f * N));
-            const dec = await decimateGsplatData(source, target, comments);
-            const c = vertexColumns(dec);
-            levels.push({ count: dec.numSplats, columns: c.map(x => ({ name: x.name, data: x.storage })) });
-            onProgress?.((levels.length) / fractions.length);
-        }
-    }
-
-    return levels.map(lv => ({
-        count: lv.count,
-        data: columnsToGsplatData(lv.count, lv.columns, comments)
-    }));
+    return out;
 };
 
 /**
@@ -461,3 +313,40 @@ export const buildLodAssets = async (
     }
     return out;
 };
+
+/**
+ * 代理层第 `i` 行对应全分辨率的第几行。
+ *
+ * 与 `sampleGsplatData` 的 gather 公式**必须逐字一致**（`Math.min(N-1, floor(i * N/target))`）——
+ * 这不是"顺便记下来"，而是 M3-4 的正确性前提：代理层的 `state` 列要靠它从全分辨率搬，
+ * 公式一旦对不上，搬过去的就是**别的点的删除标记**。
+ *
+ * 现算而不存表：20M 的两层映射本来要 36 MB，而这条公式是 O(1)。
+ */
+export const proxyRowToSourceRow = (i: number, sourceCount: number, proxyCount: number): number => {
+    if (proxyCount <= 0 || sourceCount <= 0) return 0;
+    return Math.min(sourceCount - 1, Math.floor(i * (sourceCount / proxyCount)));
+};
+
+// ---- §为什么不再用 decimation（M3-4）----------------------------------------
+//
+// 原先 N ≤ 200 万走 `@playcanvas/splat-transform` 的 `decimateSourceAdaptive`
+// （worker 里跑），N > 200 万才抽样。M3-4 把它整个换成抽样，原因是实测证据：
+//
+//   * `decimateSourceAdaptive` 是**合并型**抽样，不是行过滤。四组实验
+//     （`_tmp/probe-decimate-rowmap.mjs`、`-rowmap2.mjs`、`-morton.mjs`、`-real.mjs`）
+//     结论一致：输出的**每一行都找不到对应的源行** —— 真实 `test-model.ply` 上
+//     2000 → 700 是 **0/700 精确命中**（坐标逐个变过）。
+//   * 于是 `state` 列也不可能被"逐行照搬"（`lod.ts` 原来那句注释是错的）：
+//     实测输出里 `state` 甚至被换成了 `Uint32Array`、值与源行对不上。
+//     ⇒ 90 万~200 万点模型的代理层**一直在复活用户删掉的点**（现存 bug）。
+//   * 更根本的：合并型抽样**拿不到行映射**，而 M3-4 的"代理层要反映全分辨率的删除"
+//     必须有映射。
+//
+// 代价（已量化，`_tmp/probe-proxy-quality.mjs`）：同样抽到 35%，均匀合成模型的
+// 体素覆盖率 97.0% → 81.8%。但那是**病态数据**（每个点都不可省）；真实扫描件上
+// M3-3 实测 20M → 2M（10%）的画面覆盖率只掉 0.6%（55.75% → 55.41%），因为扫描件
+// 高度冗余。换来的是"行号可现算 + state 可信 + 少一条 worker 通路"。
+//
+// 顺带：导入链会把点按 morton 序排好，所以 stride 抽样在空间上是**均匀分层**的，
+// 不是盲目等距。
