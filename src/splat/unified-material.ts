@@ -583,7 +583,11 @@ export function ensureUnifiedWorkBuffer(scene: any, force = false): boolean {
     let forced = 0;
     director.camerasMap.forEach((cameraData: any) => {
         cameraData?.layersMap?.forEach((layerData: any) => {
-            const manager = layerData?.gsplatManager;
+            // `layersMap` 的值在引擎版本间有两种形态：包装对象（`.gsplatManager`）或
+            // 直接就是 manager 本身。原来只认前一种，后一种会静默早退 ——
+            // 强制重建**一次都没真正执行过**（M3-3 排查时实测：director 里能取到 world，
+            // 而这里的 `manager` 是 undefined）。两种都认。
+            const manager = layerData?.gsplatManager ?? layerData;
             const world = manager?.world;
             // 只认 GPU 排序那条路（与材质侧同一判据），别的通路没有 work buffer 这回事
             if (!world || !manager?.renderer?.usesGpuSort) {

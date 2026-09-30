@@ -24,7 +24,7 @@ import { MaterialParamCache } from './material-param-cache';
 import { State, SplatState } from './splat-state';
 import { releaseStreamCpuStorage } from './stream-storage';
 import { TransformPalette } from './transform-palette';
-import { setUnifiedEffect } from './unified-material';
+import { ensureUnifiedWorkBuffer, setUnifiedEffect } from './unified-material';
 import { CURVE_CHANNELS, CURVE_SAMPLES, curveSetFromDoc, curveSetToDoc, curveSetToTables, emptyCurveSet, identityCurveSamples, toCurveSet, type CurvePoint, type CurveSet } from '../core/color-curves';
 import { Serializer } from '../core/serializer';
 import { toneRange } from '../core/tone-range';
@@ -821,12 +821,64 @@ class Splat extends Element {
         this.scene.events.fire('splat.replaced', this);
 
         // tear down the previous frame
+        //
+        // ⚠️ 必须先**显式销毁 gsplat 组件的 placement**，再 destroy entity（M3-3 实测根因）。
+        // 组件的 `onDisable()` 只做 `removeFromLayers()`（把 placement 从 layer 列表里摘掉），
+        // **不会**调用 `placement.destroy()` —— 真正释放的是 `destroyInstance()`
+        // （`framework/components/gsplat/component.js`：`removeFromLayers` + `placement.destroy`
+        // + 置 null）。少了这一步，unified 世界里那份 20M 的 work buffer 分配就一直挂着：
+        //
+        //   20M 切到 2M 代理层之后，把场景里**唯一**的 splat 隐藏，GPU span 仍有 **46.09 ms**
+        //   （只比 50.26 少了 4.2 ms —— 那正好是 2M 代理层自己的成本，见
+        //   `_tmp/diag-browse-residue.cjs`）。也就是说切换之后是 20M 与 2M **一起在渲染**，
+        //   代理层带来的加速被旧数据整个吃掉：稳态帧时 50 ms，比全分辨率的 44.8 ms 还慢。
+        //   静止时切换看不到它（下一帧的 reconcile 会兜住），运动中切换必现 ——
+        //   而"浏览时相机一直在动"恰恰是 LOD 唯一有用的场景。
+        try {
+            const oldComp = oldEntity.gsplat as any;
+            if (oldComp && typeof oldComp.destroyInstance === 'function') {
+                oldComp.destroyInstance();
+            }
+        } catch (e) {
+            console.warn('[Splat.replaceData] old placement teardown failed:', e);
+        }
         oldEntity.destroy();
         oldStateTexture.destroy();
         oldTransformTexture.destroy();
         if (!keepPrevious) {
             oldAsset.registry?.remove(oldAsset);
             oldAsset.unload();
+        }
+
+        // unified（引擎 GPU 排序）通路：数据换过之后必须**强制重建一次 work buffer**。
+        //
+        // 这是 M3-3 实测出来的第二层根因。现象是：20M 切到 2M 代理层之后，帧时不降反升
+        // （44.8 → 50 ms），而且**把场景里唯一的 splat 隐藏、相机完全静止**，GPU span
+        // 仍然稳在 45.6 ms（`_tmp/diag-browse-residue.cjs`）—— 也就是说这份开销跟"画了什么"
+        // 无关。引擎侧的痕迹对得上：`world._framesTillFullUpdate` 每帧都在倒数、
+        // `_bufferCopyUploaded = 1`，即 work buffer 仍按**旧的 20M 容量**在做周期性整块上传，
+        // 每帧 ~46 ms。静止时切换看不到它（下一帧的常规重建会兜住），**运动中切换必现** ——
+        // 而"浏览时相机一直在动"正是 LOD 唯一有用的场景，所以它必须在这里显式修掉。
+        //
+        // `force = true` 是必要的：这个函数默认"每个 world 每个版本只强制一次"，
+        // 而换数据之后版本已变，必须绕过那层幂等才能真正重传。
+        try {
+            ensureUnifiedWorkBuffer(this.scene as any, true);
+        } catch (e) {
+            console.warn('[Splat.replaceData] unified work buffer rebuild failed:', e);
+        }
+        // 标记只是"下一帧需要 full rebuild"，真正重建在引擎 `world.bake()` 里、要几帧才推进完
+        // （render-ready version 要等排序推进）。切换之后**主动要几帧**：实测只等
+        // `waitForRender()` 那一帧时，稳态会停在没有收缩的旧尺寸 work buffer 上 ——
+        // 表现是"切到 2M 反而比 20M 更慢"（50 ms vs 44.8 ms，且把 splat 隐藏后仍有 45.8 ms
+        // 的固定上传开销，见 `_tmp/diag-browse-residue.cjs`）。
+        if (!this.scene.lockedRenderMode) {
+            for (let i = 0; i < 3; i++) {
+                this.scene.forceRender = true;
+                await new Promise<void>((resolve) => {
+                    requestAnimationFrame(() => resolve());
+                });
+            }
         }
 
         this.changedCounter++;

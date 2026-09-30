@@ -142,6 +142,7 @@
   "panel.settings.show-bounding-box-dimensions": "Show Bounding Box Dimensions",
   "panel.settings.show-camera-poses": "Show Camera Poses",
   "panel.settings.show-camera-info": "Show Camera Info",
+  "panel.settings.browse-mode": "Browse mode (60 fps on large models)",
   "panel.settings.reset": "Reset to Defaults",
   "panel.splat-data.position": "Position",
   "panel.splat-data.opacity": "Opacity",

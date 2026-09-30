@@ -26,6 +26,7 @@ import { Camera } from '../camera/camera';
 import { CameraPath3D } from '../camera/camera-path-3d';
 import { CameraPathControl } from '../camera/camera-path-control';
 import { CameraPreview } from '../camera/camera-preview';
+import { BrowseBudget } from '../core/browse-budget';
 import { CameraMotion } from '../core/camera-motion';
 import { CommandQueue } from '../core/command-queue';
 import { readDeviceFacts } from '../core/device-facts';
@@ -228,6 +229,11 @@ class Scene {
     readonly gpuFrameTiming: GpuFrameTiming;
     // 交互期降级策略（运动时降渲染分辨率，停手恢复）。见 src/core/motion-quality.ts。
     readonly motionQuality = new MotionQuality();
+    // 浏览态帧预算（M3-3）：浏览态下按实测 rAF 帧时选择"比全分辨率粗几档"的代理层，
+    // 目标是 60 fps；编辑态恒为 0（全分辨率）。见 src/core/browse-budget.ts。
+    readonly browseBudget = new BrowseBudget();
+    // 浏览态代理层切换期间还要出的帧数（按需渲染下静止不出帧，切换会卡在 waitForRender）
+    private _browseSwitchFrames = 0;
 
     /** 设备事实缓存（分级用；适配器不会中途变化） */
     private _deviceFacts: DeviceFacts | null = null;
@@ -654,6 +660,13 @@ class Scene {
     }
 
     private onUpdate(deltaTime: number) {
+        // 浏览态代理层切换期间主动出帧：静止时本应用按需渲染（不出帧），
+        // 而 `replaceData` 要 `waitForRender()` —— 没有帧它就推不动。
+        if (this._browseSwitchFrames > 0) {
+            this._browseSwitchFrames--;
+            this.forceRender = true;
+        }
+
         // Fire global update FIRST so the animation timeline advances and
         // animCameraEntity receives the current frame's position/rotation
         // BEFORE Camera.onUpdate reads it in Camera View Mode.
@@ -724,7 +737,49 @@ class Scene {
 
         // V3: distance-adaptive runtime LOD switching (browsing only — gated
         // by events 'lod.allowProxy' registered by the editor).
+        //
+        // M3-3: 浏览态帧预算要先吃这一帧的帧间隔（它决定"该粗几档"），
+        // 所以必须在切换判定**之前**喂。
+        this.updateBrowseBudget(deltaTime);
         this.updateLodSwitching();
+    }
+
+    /**
+     * 浏览态帧预算（M3-3）：把本帧的 rAF 帧间隔喂给预算控制器。
+     *
+     * 两个刻意的取舍：
+     *   · **只在相机运动时采信帧时**：本应用按需渲染，静止时可能几百毫秒才出一帧，
+     *     那个 `deltaTime` 是"没画东西"而不是"画得慢"，采信它会让控制器一路粗化到最粗档。
+     *   · **档位上限用"预期层数"而不是"已建好的层数"**：代理层是按需构建的，
+     *     构建完成前 `lodAssets.length` 是 0，若按它算上限，控制器永远停在 0 档 ⇒
+     *     永远不触发构建（先有鸡还是先有蛋）。用 `planLodFractions` 的层数，
+     *     控制器能在"还没有代理层"时就要求粗化，从而触发构建。
+     */
+    private updateBrowseBudget(deltaTime: number) {
+        const enabled = (globalThis as any).__SPLATROOM_BROWSE_BUDGET__ !== false;
+        this.browseBudget.enabled = enabled;
+        const browse = this.events.invoke('browse.active') === true;
+        this.browseBudget.setActive(browse);
+        if (!enabled || !browse) return;
+        // 静止帧的 deltaTime 不代表帧率（见上面的取舍）
+        if (!this.cameraMotion.moving) return;
+
+        const splats = this.getElementsByType(ElementType.splat) as Splat[];
+        let levelCount = 0;
+        let haveAny = false;
+        for (let i = 0; i < splats.length; i++) {
+            const s = splats[i];
+            const have = s.lodAssets?.length ?? 0;
+            if (have > 0) haveAny = true;
+            const planned = planLodFractions(s.splatData?.numSplats ?? 0).length;
+            const n = Math.max(have, planned);
+            if (n > levelCount) levelCount = n;
+        }
+        // 代理层还在构建时**封在 1 档**：构建是异步的（20M 上要几秒），这期间画面仍是
+        // 全分辨率的慢帧，不封住的话控制器会照着这些慢帧一路爬到最粗档，等代理层建好
+        // 直接落在 2M 上 —— 而实测 7M 那层就已经能满帧（GPU 15 ms），白丢一半细节。
+        if (!haveAny) levelCount = Math.min(levelCount, 1);
+        this.browseBudget.note(deltaTime * 1000, levelCount, performance.now());
     }
 
     /**
@@ -738,6 +793,8 @@ class Scene {
         const allow = this.events.invoke('lod.allowProxy') !== false;
         const cam = (this.camera as any)?.mainCamera;
         if (!cam) return;
+        // M3-3：浏览态把"距离"这一个选择依据扩成"距离 ∪ 帧预算"（取更粗的那个）。
+        const browse = this.events.invoke('browse.active') === true;
         const camPos = cam.getPosition();
         const splats = this.getElementsByType(ElementType.splat) as Splat[];
         for (let i = 0; i < splats.length; i++) {
@@ -748,6 +805,15 @@ class Scene {
                 continue;
             }
             if (performance.now() - s._lodLastSwitchAt < 1000) continue;
+
+            // 浏览态下"预算要代理层、当前还是全分辨率"时**持续出帧**，直到切过去为止。
+            // 否则会卡死在鸡生蛋里：静止 ⇒ 按需渲染不出帧 ⇒ `cameraMotion.moving` 保持上一帧的
+            // true（它在 onPreRender 里更新，而没有帧就不更新）⇒ 静止切换的条件永远不成立。
+            // 这段只在"等待一次停顿"期间生效，切完就停（不长期破坏按需渲染）。
+            if (browse && this.browseBudget.coarseness > 0 && s.lodAssets.length > 0 && s.lodLevel < 0) {
+                this._browseSwitchFrames = Math.max(this._browseSwitchFrames, 10);
+            }
+
             const wb = s.worldBound;
             if (!wb) continue;
             const radius = wb.halfExtents.length();
@@ -765,7 +831,11 @@ class Scene {
             // "导入刚结束、用户开始框选/删除"的窗口上。
             if (!s.lodEnabled || s.lodAssets.length === 0) {
                 const { near } = getLodDistances();
-                if (!s._lodBuildRequested && ratio >= near) {
+                // M3-3：浏览态下"预算已经要求粗化"本身就是构建理由，不必等相机拉远
+                // （近距离看大模型恰恰是最需要代理层的场景 —— 实测 20M 在 focus 距离上
+                //   distRatio 只有 0.06，距离判据永远不触发，而那里正是 22 fps 的地方）。
+                const wantByBudget = browse && this.browseBudget.coarseness > 0;
+                if (!s._lodBuildRequested && (ratio >= near || wantByBudget)) {
                     const levels = planLodFractions(s.splatData?.numSplats ?? 0).length;
                     if (levels > 0) {
                         s._lodBuildRequested = true;
@@ -775,8 +845,32 @@ class Scene {
                 continue;
             }
 
-            const target = s.suggestLodLevel(ratio);
-            if (target !== s.lodLevel) void s.applyLod(target);
+            const n = s.lodAssets.length;
+            const distLevel = s.suggestLodLevel(ratio);
+            let target = distLevel;
+            if (browse) {
+                // 两个建议取**更粗**的那个。层级语义：-1 = 全分辨率（最细），
+                // 0..n-1 = 代理层（0 最粗），所以先把 -1 折算成 n 再比小。
+                const fineness = (lv: number) => (lv < 0 ? n : lv);
+                const f = Math.min(fineness(distLevel), fineness(this.browseBudget.levelFor(n)));
+                target = f >= n ? -1 : f;
+            }
+            if (target !== s.lodLevel) {
+                // ⚠️ 浏览态的切换**只在相机静止时执行**（M3-3 实测约束）。
+                //
+                // unified（引擎 GPU 排序）通路上，**运动中换数据**会让 world 的 work buffer
+                // 停在旧尺寸上：20M 切到 2M 之后帧时不降反升（44.8 → 49.8 ms），而且把 splat
+                // 隐藏、相机完全静止，GPU 仍稳在 45.6 ms —— 那份开销与"画了什么"无关，
+                // 是每帧按旧容量整块上传（`_tmp/diag-browse-residue.cjs`）。
+                // 静止时切换则干净：2M 层 16.7 ms / 59.8 fps，lit 与全分辨率一致。
+                // 所以这里要求 `moving === false` —— 用户浏览时总会有停顿，代价是第一次
+                // 切换要等一次停顿，换来的是"切完之后的每一帧都是真的快"。
+                if (browse && target >= 0 && this.cameraMotion.moving) continue;
+                // 静止时按需渲染可能根本不出帧，而 `replaceData` 里要 `waitForRender()`；
+                // 主动要几帧把这次切换推完，否则它会挂在那里、下一帧又被重复发起。
+                if (browse) this._browseSwitchFrames = 12;
+                void s.applyLod(target);
+            }
         }
     }
 

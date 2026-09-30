@@ -85,20 +85,61 @@ export const decimateGsplatData = async (
 };
 
 /**
+ * 代理层只保留**渲染必需**的列（M3-3）。
+ *
+ * 依据（实测，`_tmp/probe-browse-baseline.cjs`，20M / SH3 = 59 列）：
+ * 建两层代理（7M + 2M）要多花 **2963 MB JS 堆**、6.6 s —— 因为抽样把全部 59 列
+ * 都复制了一份，而其中 45 列是 SH3 的 `f_rest`（视角相关颜色）。
+ * 粗层是"远距离 / 运动中"的替身，高阶 SH 在这里既看不出来也不值那个价：
+ * 只留 14 列 float（位置 + 基础色 + 不透明度 + 缩放 + 旋转）+ `state`，
+ * 20M 的两层从 ~2.1 GB 降到 ~0.5 GB（**−83 %**），抽样也要少走 3/4 的列。
+ *
+ * `state` 必须留：`Splat.bindAsset()` 在没有 state 列时会新建一份全 0 的
+ * （splat.ts:605），那样用户删掉的点会在代理层上**复活**（删了又出现）。
+ *
+ * 逃生门：`window.__SPLATROOM_LOD_FULL_COLUMNS__ = true` 回到全列（旧行为）。
+ */
+const PROXY_RENDER_COLUMN_NAMES = new Set([
+    'x', 'y', 'z',
+    'f_dc_0', 'f_dc_1', 'f_dc_2',
+    'opacity',
+    'scale_0', 'scale_1', 'scale_2',
+    'rot_0', 'rot_1', 'rot_2', 'rot_3'
+]);
+const PROXY_EXTRA_COLUMN_NAMES = new Set(['state']);
+/** 缺了这些列就画不出来 —— 遇到这种源头（自定义列名的 PLY）整体回退，宁可多花内存。 */
+const PROXY_REQUIRED = ['x', 'y', 'z', 'f_dc_0', 'opacity', 'scale_0', 'rot_0'];
+
+export const proxyColumns = (
+    cols: { name: string; storage: Float32Array | Uint8Array }[]
+): { name: string; storage: Float32Array | Uint8Array }[] => {
+    if ((globalThis as any).__SPLATROOM_LOD_FULL_COLUMNS__ === true) return cols;
+    const kept = cols.filter(c => PROXY_RENDER_COLUMN_NAMES.has(c.name) || PROXY_EXTRA_COLUMN_NAMES.has(c.name));
+    for (const n of PROXY_REQUIRED) {
+        if (!kept.some(c => c.name === n)) return cols;
+    }
+    return kept;
+};
+
+/**
  * Build a proxy level by uniform row sampling (stride gather). Used for very
  * large models where a full splat-transform decimation is too heavy: the
  * source is never deep-copied (decimation needs a full working copy for its
  * sort/coalesce), so for tens of millions of splats the copy alone would
  * freeze the UI for minutes. Sampling gathers ~`targetCount` rows evenly and
  * yields between column passes so the progress bar stays live.
+ *
+ * `columns` 让调用方先按 `proxyColumns()` 瘦身再抽样（M3-3）：抽 14 列和抽 59 列
+ * 的墙钟时间差 4 倍，而目标内存差 4 倍。
  */
 const sampleGsplatData = async (
     source: GSplatData,
     targetCount: number,
     comments: string[] = [],
-    onProgress?: (fraction: number) => void
+    onProgress?: (fraction: number) => void,
+    columns?: { name: string; storage: Float32Array | Uint8Array }[]
 ): Promise<GSplatData> => {
-    const cols = vertexColumns(source);
+    const cols = columns ?? vertexColumns(source);
     const N = source.numSplats;
     const target = Math.max(1, Math.min(targetCount, N));
     if (target >= N) return dataTableToGsplatData(gsplatDataToDataTable(source), comments);
@@ -330,6 +371,8 @@ const buildLodLevels = async (
     // main thread so long the progress bar never paints. Sample instead — no
     // copy, bounded memory, per-column yields keep the UI alive.
     if (N > LOD_WORKER_MAX) {
+        // M3-3：先瘦身（只留渲染必需列 + state），再抽样 —— 少走 3/4 的列、省 3/4 的目标内存
+        const srcCols = proxyColumns(vertexColumns(source));
         const levels: { count: number; columns: { name: string; data: Float32Array | Uint8Array }[] }[] = [];
         for (let i = 0; i < fractions.length; i++) {
             const target = Math.max(1, Math.round(fractions[i] * N));
@@ -337,7 +380,8 @@ const buildLodLevels = async (
                 source,
                 target,
                 comments,
-                f => onProgress?.((i + f) / fractions.length)
+                f => onProgress?.((i + f) / fractions.length),
+                srcCols
             );
             const c = vertexColumns(dec);
             levels.push({ count: dec.numSplats, columns: c.map(x => ({ name: x.name, data: x.storage })) });
@@ -350,7 +394,8 @@ const buildLodLevels = async (
 
     const targets = fractions.map(f => Math.max(1, Math.round(f * N)));
     // deep copies for transfer (source columns must not be detached)
-    const cols = vertexColumns(source).map((c) => {
+    // M3-3：同样先瘦身 —— 传进 worker 的字节少了 3/4，抽稀结果的目标内存也少 3/4
+    const cols = proxyColumns(vertexColumns(source)).map((c) => {
         const data = c.storage;
         const copy = new (data.constructor as any)(data) as Float32Array | Uint8Array;
         return { name: c.name, data: copy };

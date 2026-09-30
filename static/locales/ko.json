@@ -142,6 +142,7 @@
   "panel.settings.show-bounding-box-dimensions": "치수 표시",
   "panel.settings.show-camera-poses": "카메라 표시",
   "panel.settings.show-camera-info": "카메라 정보 표시",
+  "panel.settings.browse-mode": "탐색 모드(대형 모델에서 60 fps)",
   "panel.settings.reset": "기본값으로 재설정",
   "panel.splat-data.position": "위치",
   "panel.splat-data.opacity": "불투명도",

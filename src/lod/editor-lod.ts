@@ -66,6 +66,39 @@ export const registerLodEvents = (
     //     就会按代理层的行号去改全分辨率的数据 ⇒ **删错点**（这是改用户的数据，不是慢一点的问题）。
     // 所以代理层只用于"**导入后还没动过**"的浏览态；一旦有编辑历史（含选区）就一律回到全分辨率。
     // 代价：编辑过的超大模型在看远时不再降级（慢一点），换来的是不会悄悄改错数据。
+    //
+    // ---- M3-3 浏览态例外 ------------------------------------------------------------
+    // 上面那条"代价"正是 M3-3 要解决的问题：用户编辑过模型之后，就再也享受不到
+    // 代理层带来的帧率（实测 20M：全分辨率 22.5 fps，7M 代理 55.7 fps）。
+    // 浏览态 = 只看不编辑（手柄 browse 子模式 / `?browse=1` / 设置面板），UI 全隐藏，
+    // 没有编辑入口，所以在**浏览态**下可以解除 `canUndo()` 这一条。
+    //
+    // 但"换回全分辨率后 undo 会按代理层行号删错点"的风险依然真实（Ctrl+Z 等快捷键
+    // 不依赖 UI），所以留一道**单会话保险**：进入浏览态时快照 undo 栈深度，浏览期间
+    // 只要它变过（任何一次编辑 / 撤销 / 清空历史）就立刻禁用代理，并且**本次浏览不再恢复**
+    // —— 最坏情况是"一次编辑落在代理层上"，而不是"整段浏览都在用错位的数据"。
+    // 行号映射这个根子上的问题由 M3-4 解决。
+    let browseBaseline: number | null = null;
+    let browseInvalidated = false;
+    events.on('browse.changed', (active: boolean) => {
+        if (active) {
+            browseBaseline = editHistory.history.length;
+            browseInvalidated = false;
+        } else {
+            browseBaseline = null;
+            browseInvalidated = false;
+        }
+    });
+    const browseAllowsProxy = () => {
+        if (browseInvalidated || browseBaseline === null) return false;
+        if (editHistory.history.length !== browseBaseline) {
+            // 浏览期间发生了编辑：本次浏览不再用代理层
+            browseInvalidated = true;
+            return false;
+        }
+        return true;
+    };
+
     events.function('lod.allowProxy', () => {
         if (!autoEnabled) return false;
         const scene = getScene();
@@ -73,7 +106,10 @@ export const registerLodEvents = (
         if (scene.lockedRenderMode) return false;
         if (scene.camera?.userDragging) return false;
         if (editHistory.isUndoingRedoing()) return false;
-        if (editHistory.canUndo()) return false;
+        if (editHistory.canUndo()) {
+            const browse = events.invoke('browse.active') === true;
+            if (!browse || !browseAllowsProxy()) return false;
+        }
         const selection = events.invoke('selection.splats') as unknown[] | undefined;
         if (selection && selection.length > 0) return false;
         return true;

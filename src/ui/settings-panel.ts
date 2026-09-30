@@ -477,6 +477,30 @@ class SettingsPanel extends Container {
             events.invoke('lod.generateForAll');
         });
 
+        // 浏览态（M3-3）：只看不编辑。渲染侧会按实测帧时把大模型换成更粗的代理层，
+        // 20M 实测 21.9 → 56.1 fps；编辑态行为完全不变。
+        // 入口有三处：这里的开关、手柄 browse 子模式、`?browse=1`。
+        const browseRow = new Container({
+            class: 'settings-panel-row'
+        });
+        const browseLabel = new Label({
+            class: 'settings-panel-row-label'
+        });
+        i18n.bindText(browseLabel, 'panel.settings.browse-mode');
+        const browseToggle = new BooleanInput({
+            type: 'toggle',
+            class: 'settings-panel-row-toggle',
+            value: events.invoke('browse.active') === true
+        });
+        browseRow.append(browseLabel);
+        browseRow.append(browseToggle);
+        browseToggle.on('change', (value: boolean) => {
+            events.fire('browse.set', value);
+        });
+        events.on('browse.changed', (value: boolean) => {
+            browseToggle.value = value;
+        });
+
         // graphics backend: WebGL2 or WebGPU. Both render splats (the WebGPU path uses
         // WGSL twins of the custom splat/overlay shaders, see splat-shader-wgsl.ts), so
         // this is a real choice; the device is created on the next start, because the
@@ -601,6 +625,7 @@ class SettingsPanel extends Container {
         this.append(showCameraPosesRow);
         this.append(showCameraInfoRow);
         this.append(lodRow);
+        this.append(browseRow);
         this.append(gpuRow);
         this.append(brushSizeRow);
         this.append(brushThicknessRow);

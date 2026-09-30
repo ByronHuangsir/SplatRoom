@@ -164,10 +164,81 @@ async function launchViaConnect(opts) {
         }
         throw err;
     }
-    return puppeteer.connect({
-        browserURL: `http://127.0.0.1:${port}`,
-        protocolTimeout: opts.protocolTimeout ?? 3600000
-    });
+    return hardenClose(
+        await puppeteer.connect({
+            browserURL: `http://127.0.0.1:${port}`,
+            protocolTimeout: opts.protocolTimeout ?? 3600000
+        }),
+        child.pid
+    );
+}
+
+/**
+ * 给 `browser.close()` 兜底。
+ *
+ * 实测（Edge 154 + connect 模式）：套件已经把结果打印完了，进程却不退出 ——
+ * 有时是卡在 `await browser.close()` 本身，有时是 close() 返回了但进程仍挂着
+ * （后者见 `armExitWatchdog()`）。后果是 `npm run verify:* | tail -n` 永远等不到
+ * EOF、串起来的批量回归卡在第一个套件上——看起来像"套件跑了 16 分钟没结果"，
+ * 实际是**收尾挂住**，测试本身早就 pass 了。
+ *
+ * 所以这里把 close() 换成"与 5 s 超时赛跑 + 按 PID 强杀子树"：
+ *   * 正常关闭 → 走原路径，行为不变；
+ *   * 超时/抛错 → disconnect 后 taskkill /T /F 杀掉**我们自己 spawn 的那个 child**，
+ *     进程一定退出。
+ *
+ * 只杀自己这个 child（含子进程树），**不按进程名无差别杀**。
+ */
+function hardenClose(browser, childPid) {
+    const realClose = browser.close.bind(browser);
+    const killTree = () => {
+        try {
+            execFileSync('taskkill', ['/PID', String(childPid), '/T', '/F'], {
+                stdio: 'ignore', windowsHide: true, timeout: 10000
+            });
+        } catch {
+            // 已经退出了
+        }
+    };
+    browser.close = async (...args) => {
+        try {
+            await Promise.race([
+                realClose(...args),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('browser.close timeout')), 5000))
+            ]);
+        } catch {
+            // 超时或抛错都走下面的兜底
+        }
+        try {
+            await browser.disconnect();
+        } catch {
+            // 已经断开了
+        }
+        killTree();
+        armExitWatchdog();
+    };
+    return browser;
+}
+
+/**
+ * 退出兜底定时器（unref）。
+ *
+ * 真正的根因不是 CDP 连接没关 —— 实测 `require('puppeteer-core')` 一上来就会留下
+ * 3 个 `Socket` 活跃句柄（`process._getActiveHandles()` 可见，裸 `node` 是 0 个），
+ * 而且这些句柄关不掉。后果：**任何** require 了 puppeteer 的套件，只要结尾没有显式
+ * `process.exit()`，事件循环就永远排不空，进程永久挂着。
+ * （`verify-crop-export-state` 一直好好的，只是因为它自己结尾调了 `process.exit()`。）
+ *
+ * 所以这里挂一个 **unref 的** 定时器：
+ *   * 进程本来就能正常退出 → unref 的定时器不会把它拖住，行为不变；
+ *   * 进程被上面那些 Socket 挂住 → 10 s 后强制退出，回归不再永久卡住。
+ *
+ * 10 s 是刻意留的余量：套件的结果输出都是 close() 之后的同步 console.log，
+ * 10 s 足够冲刷完，不会截断输出。
+ */
+function armExitWatchdog() {
+    const watchdog = setTimeout(() => process.exit(process.exitCode ?? 0), 10000);
+    watchdog.unref();
 }
 
 /**
@@ -279,7 +350,11 @@ function cleanupOrphanBrowsers() {
  */
 async function closeBrowser(browser) {
     try {
-        await browser?.close();
+        // 同样加超时赛跑：close() 挂住时不能把调用方一起拖死
+        await Promise.race([
+            browser?.close(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('browser.close timeout')), 6000))
+        ]);
     } catch {
         // 忽略：下面统一清孤儿
     } finally {

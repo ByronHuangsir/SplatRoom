@@ -11,6 +11,7 @@ import { registerAudioEvents } from './audio/audio-manager';
 import { registerCameraPosesEvents } from './camera/camera-poses';
 import { MouseBindings } from './camera/mouse-bindings';
 import { startCompareApp } from './compare/compare-app';
+import { registerBrowseMode } from './core/browse-mode';
 import { CommandQueue } from './core/command-queue';
 import { EditHistory } from './core/edit-history';
 import { Events } from './core/events';
@@ -175,6 +176,9 @@ const main = async () => {
     registerCropBoxEvents(events, getScene);
     registerSurfaceRefineEvents(events, editHistory, getScene);
     registerLodEvents(events, editHistory, getScene);
+    // 浏览态真源（M3-3）：必须在 `registerLodEvents` **之后**注册 —— LOD 闸门订阅了
+    // `browse.changed`，而这个事件只有注册时才 fire 一次初始状态。
+    registerBrowseMode(events);
 
     // 分级策略查询（模型规模 × 设备档位；见 src/core/splat-tier.ts）。
     // 给 UI 显示与探针/套件断言用；策略变化时 scene 会 fire('tier.policyChanged', …)。
@@ -224,6 +228,15 @@ const main = async () => {
         unifiedParam === '1' ? true : unifiedParam === '0' ? false : undefined;
     if (unifiedForced !== false) {
         (globalThis as any).__SPLATROOM_UNIFIED__ = true;
+    }
+
+    // 浏览态（M3-3）逃生门：`?browse=1` 强开、`?browse=0` 强关（覆盖 UI / 手柄）。
+    // 与 unified 同一套纪律：URL 在这里就归一化到全局，下游只认全局一个来源。
+    // 探针用 `?browse=1` 在没有手柄的机器上也能进浏览态；用户侧的入口是手柄 browse
+    // 子模式和设置面板开关。
+    const browseParam = (urlArgs as any)?.browse;
+    if (browseParam === '1' || browseParam === '0') {
+        (globalThis as any).__SPLATROOM_BROWSE__ = browseParam === '1';
     }
 
     const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
