@@ -1,11 +1,11 @@
 // 3.13.0 mechanic: two blocks parked at fixed homes, a push-drag with an accelerating taper,
 // and an automatic return on release. No numbers anywhere.
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
     const page = await browser.newPage();
     await page.setViewport({ width: 1500, height: 900 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 200)));

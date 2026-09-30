@@ -13,13 +13,13 @@
 // usage: node docs/verify/verify-rings-pick.cjs [url] [model]
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const TARGET = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
     const errors = [];
     let out = null;
     try {

@@ -24,7 +24,7 @@
 const puppeteer = require('puppeteer-core');
 const { decodePng } = require('../verify/lib/png.cjs');
 
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';
 const SECONDS = parseFloat(process.argv[4] || '4');
@@ -101,7 +101,7 @@ const PHASE_FN = async ({ ms, rotate }) => {
 };
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']

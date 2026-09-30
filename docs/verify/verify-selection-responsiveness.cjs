@@ -28,13 +28,13 @@
 //   batch); test-model.ply also works.
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'scan.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
     const errors = [];
     let out = null;
     try {

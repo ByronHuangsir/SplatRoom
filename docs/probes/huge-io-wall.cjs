@@ -11,14 +11,14 @@
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', '..', 'node_modules', 'puppeteer-core'));
 
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'huge-134m.ply';
 const MAX_ALLOC_GB = Number(process.argv[4] || 12);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],

@@ -16,12 +16,13 @@ const path = require('path');
 const REPO = path.join(__dirname, '..', '..');
 const { BROWSER_PATH: EDGE, cleanupOrphanBrowsers } = require(path.join(REPO, 'docs', 'verify', 'lib', 'browser.cjs'));
 const puppeteer = require(path.join(REPO, 'node_modules', 'puppeteer-core'));
+const { launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MODEL = process.argv[2] || 'splat_70452.ply';
 
 (async () => {
     cleanupOrphanBrowsers();
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE, headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],
         protocolTimeout: 900000

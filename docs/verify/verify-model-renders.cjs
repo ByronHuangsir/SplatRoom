@@ -6,12 +6,12 @@
 // usage: node docs/verify/verify-model-renders.cjs [url]
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3100/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE, headless: 'new',
         args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
     });

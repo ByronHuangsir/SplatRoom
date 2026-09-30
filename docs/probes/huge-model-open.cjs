@@ -20,7 +20,7 @@
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', '..', 'node_modules', 'puppeteer-core'));
 
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'huge-134m.ply';
 const WAIT = Number(process.argv[4] || 180);
@@ -39,7 +39,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         url: URL, model: MODEL, jsHeapMb: HEAP, waitSec: WAIT, forcedBudget: BUDGET || null,
         mode: NAIVE ? 'naive-arrayBuffer' : `chunked-${CHUNK_MB}MB`, console: [], stages: [], ok: false
     };
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args, protocolTimeout: 0 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args, protocolTimeout: 0 });
     let rendererGone = null;
     browser.on('disconnected', () => { if (!rendererGone) rendererGone = 'browser disconnected'; });
 

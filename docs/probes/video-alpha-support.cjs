@@ -17,12 +17,12 @@
 const path = require('path');
 const puppeteer = require(path.join(__dirname, '..', '..', 'node_modules', 'puppeteer-core'));
 
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const EXTRA_ARGS = String(process.argv[3] || '').split(',').map(s => s.trim()).filter(Boolean);
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist', ...EXTRA_ARGS],

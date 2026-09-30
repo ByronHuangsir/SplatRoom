@@ -11,7 +11,7 @@
 //   model 必须是 dist 下的文件名，默认 test-model.ply；
 //   T1 档先 `copy D:\DeepSeek\SplatRoomV2\_tmp\scan.ply dist\scan.ply`，跑完**记得删掉**（否则会进 asar）。
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 // 无头 Edge 会节流（甚至停掉）rAF，而 app 的导入路径要 await 一帧（replaceData 的 waitForRender），
 // 于是 13M 的导入会永远停在原地、页面 CPU 也几乎为 0。这几个开关是无头/CI 跑法必须加的。
 const NO_THROTTLE = [
@@ -32,7 +32,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const t0 = Date.now();
     const mark = (msg) => console.log(`[probe ${((Date.now() - t0) / 1000).toFixed(0)}s] ${msg}`);
     mark('launching browser');
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: NO_THROTTLE, protocolTimeout: 1800000 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: NO_THROTTLE, protocolTimeout: 1800000 });
     const page = await browser.newPage();
     await page.setViewport({ width: 1400, height: 900 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 200)));

@@ -1,13 +1,13 @@
 // 诊断 ④ 的真正归属：逐个导出类型量分配（用"假 stream"走流式路径，隔离序列化器自身）。
 // 用法：node export-alloc-per-type.cjs <url> [model]
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'scan.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 300)));

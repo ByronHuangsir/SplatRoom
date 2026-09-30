@@ -1,10 +1,10 @@
 // Which element sits under the pointer across the low block, at the default (zero expansion) state?
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
     const page = await browser.newPage();
     await page.setViewport({ width: 1500, height: 900 });
     await page.goto('http://localhost:3621/?gpu=webgpu', { waitUntil: 'domcontentloaded', timeout: 120000 });

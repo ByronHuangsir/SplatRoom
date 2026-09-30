@@ -32,9 +32,13 @@
  * 有头模式下 puppeteer 用独立的临时 profile，**不会**动用户已开的 Edge。
  */
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const http = require('http');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+const { execFileSync, spawn } = require('child_process');
 
-const REPO = require('path').join(__dirname, '..', '..', '..');
+const REPO = path.join(__dirname, '..', '..', '..');
 
 /** 候选浏览器可执行文件（按顺序取第一个存在的） */
 const CANDIDATES = [
@@ -72,6 +76,101 @@ const LAUNCH_ARGS = [
 ];
 
 /**
+ * 找一个空闲端口。注意：必须给浏览器**显式的非零端口** ——
+ * Edge 154 起 `--remote-debugging-port=0` 会让浏览器立即退出（这正是 launch 失败的根因）。
+ */
+function findFreePort() {
+    return new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.unref();
+        srv.on('error', reject);
+        srv.listen(0, '127.0.0.1', () => {
+            const port = srv.address().port;
+            srv.close(() => resolve(port));
+        });
+    });
+}
+
+/** 轮询 DevTools HTTP 端点直到就绪（或超时）。 */
+function waitForDevtools(port, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve, reject) => {
+        const tryOnce = () => {
+            const req = http.get({ host: '127.0.0.1', port, path: '/json/version', timeout: 2000 }, (res) => {
+                res.resume();
+                if (res.statusCode === 200) {
+                    resolve();
+                } else {
+                    retry();
+                }
+            });
+            req.on('error', retry);
+            req.on('timeout', () => { req.destroy(); retry(); });
+        };
+        const retry = () => {
+            if (Date.now() > deadline) {
+                reject(new Error(`devtools endpoint 127.0.0.1:${port} not ready within ${timeoutMs}ms`));
+            } else {
+                setTimeout(tryOnce, 300);
+            }
+        };
+        tryOnce();
+    });
+}
+
+/**
+ * connect 模式启动（Edge 154 × puppeteer.launch 断裂的绕行，见
+ * `docs/换机器-第二台机器适配记录.md` §9）：
+ *   1. 自己 spawn 浏览器：显式非零调试端口 + 临时 profile（目录名带 `puppeteer_dev_`，
+ *      这样 `cleanupOrphanBrowsers()` 的孤儿判据对它依然生效）；
+ *   2. 等 DevTools 端点就绪；
+ *   3. `puppeteer.connect` 接管。调用方照常 `browser.close()` 即可关掉浏览器。
+ */
+async function launchViaConnect(opts) {
+    const puppeteer = require(path.join(REPO, 'node_modules', 'puppeteer-core'));
+    const port = await findFreePort();
+    const profile = path.join(
+        os.tmpdir(),
+        `puppeteer_dev_connect_profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    );
+    const headless = opts.headless === undefined ? 'new' : opts.headless;
+    const headlessArg = headless === true || headless === 'new' ? '--headless=new' : (headless ? `--headless=${headless}` : null);
+    // 过滤会与 connect 模式冲突的参数（用户目录/调试端口/管道由这里自己接管）
+    const extraArgs = (opts.args ?? []).filter(a =>
+        !a.startsWith('--user-data-dir') &&
+        !a.startsWith('--remote-debugging-port') &&
+        !a.startsWith('--remote-debugging-pipe') &&
+        !a.startsWith('--headless')
+    );
+    const args = [
+        ...(headlessArg ? [headlessArg] : []),
+        ...LAUNCH_ARGS,
+        ...extraArgs,
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${profile}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        'about:blank'
+    ];
+    const child = spawn(opts.executablePath ?? BROWSER_PATH, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    try {
+        await waitForDevtools(port, 30000);
+    } catch (err) {
+        try {
+            process.kill(child.pid, 'SIGKILL');
+        } catch {
+            // 已经退出了
+        }
+        throw err;
+    }
+    return puppeteer.connect({
+        browserURL: `http://127.0.0.1:${port}`,
+        protocolTimeout: opts.protocolTimeout ?? 3600000
+    });
+}
+
+/**
  * 启动浏览器。
  *
  * @param {object} [opts]
@@ -82,18 +181,50 @@ const LAUNCH_ARGS = [
  * @returns {Promise<import('puppeteer-core').Browser>}
  */
 async function launchBrowser(opts = {}) {
-    const puppeteer = require(require('path').join(REPO, 'node_modules', 'puppeteer-core'));
-    const browser = await puppeteer.launch({
-        executablePath: BROWSER_PATH,
-        headless: opts.headless === undefined ? 'new' : opts.headless,
-        args: [...LAUNCH_ARGS, ...(opts.args ?? [])],
-        protocolTimeout: opts.protocolTimeout ?? 3600000
-    });
+    const puppeteer = require(path.join(REPO, 'node_modules', 'puppeteer-core'));
+    let browser;
+    try {
+        browser = await puppeteer.launch({
+            executablePath: BROWSER_PATH,
+            headless: opts.headless === undefined ? 'new' : opts.headless,
+            args: [...LAUNCH_ARGS, ...(opts.args ?? [])],
+            protocolTimeout: opts.protocolTimeout ?? 3600000
+        });
+    } catch (err) {
+        // Edge 154 起 launch 必败（--remote-debugging-port=0 让浏览器立即退出，Code: 0 且
+        // stderr 无 DevTools 行）。不要在这卡死 50+ 个套件：回退 connect 模式。
+        console.warn(`[browser.cjs] puppeteer.launch 失败（${String(err?.message ?? err).split('\n')[0]}）`);
+        console.warn('[browser.cjs] 回退：固定端口手动 spawn + puppeteer.connect');
+        browser = await launchViaConnect(opts);
+    }
     if (opts.width || opts.height) {
         const page = await browser.newPage();
         await page.setViewport({ width: opts.width ?? 1280, height: opts.height ?? 800 });
     }
     return browser;
+}
+
+/**
+ * 给**硬编码 `puppeteer.launch(...)` 的旧套件**用的原位替换：
+ *
+ *     const { launchPatched } = require('./lib/browser.cjs');   // 相对路径按文件位置调整
+ *     const browser = await launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: [...] });
+ *
+ * 行为与 `puppeteer.launch` 完全一致；launch 失败（Edge 154 断裂）时自动回退 connect 模式，
+ * 透传 executablePath / headless / args / protocolTimeout，调用方无感。
+ */
+async function launchPatched(puppeteer, launchOpts = {}) {
+    try {
+        return await puppeteer.launch(launchOpts);
+    } catch (err) {
+        console.warn(`[browser.cjs] puppeteer.launch 失败（${String(err?.message ?? err).split('\n')[0]}），回退 connect 模式`);
+        return launchViaConnect({
+            executablePath: launchOpts.executablePath,
+            headless: launchOpts.headless,
+            args: launchOpts.args,
+            protocolTimeout: launchOpts.protocolTimeout
+        });
+    }
 }
 
 /**
@@ -160,6 +291,7 @@ module.exports = {
     BROWSER_PATH,
     LAUNCH_ARGS,
     launchBrowser,
+    launchPatched,
     cleanupOrphanBrowsers,
     closeBrowser
 };

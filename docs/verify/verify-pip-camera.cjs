@@ -19,7 +19,7 @@ const fs = require('fs');
 const puppeteer = require('puppeteer-core');
 const { decodePng } = require('./lib/png.cjs');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-model.ply';
 const OUT = require('path').join(__dirname, '..', '..', '..', '_tmp');
@@ -74,7 +74,7 @@ const corr = (a, b) => {
 
 (async () => {
     const logs = [];
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']

@@ -23,7 +23,7 @@ const puppeteer = require('puppeteer-core');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = 'floater-biggrid-test.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -31,7 +31,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const gen = JSON.parse(execFileSync(process.execPath, [path.join(__dirname, 'gen-floater-biggrid-splat.cjs'), `dist/${MODEL}`]).toString());
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
     const errors = [];
     let out = null;
     try {

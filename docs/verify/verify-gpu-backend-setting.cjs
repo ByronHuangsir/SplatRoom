@@ -5,7 +5,7 @@
 // usage: node docs/verify/verify-gpu-backend-setting.cjs [url]
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -42,7 +42,7 @@ const readState = (page) => page.evaluate((js) => {
 
 (async () => {
     const logs = [];
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']

@@ -1,9 +1,9 @@
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BAR = '#selection-range-bar';
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'] });
     const page = await browser.newPage();
     await page.setViewport({ width: 1500, height: 900 });
     page.on('pageerror', e => console.log('[pageerror] ' + String(e).slice(0, 300)));

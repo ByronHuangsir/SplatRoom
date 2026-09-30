@@ -1,9 +1,9 @@
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = 'https://b174fc23368348b69c9cc8e6fb68a259.bj10.agentos-app.net/?mode=merge';
 
 (async () => {
-  const browser = await puppeteer.launch({
+  const browser = await _launchPatched(puppeteer, {
     executablePath: EDGE, headless: 'new',
     args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
   });

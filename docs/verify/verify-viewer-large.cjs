@@ -19,13 +19,13 @@
 // usage: node docs/verify/verify-viewer-large.cjs [url] [model]
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const TARGET = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const CANDIDATES = process.argv[3] ? [process.argv[3]] : ['merged-scene.ply', 'scan.ply', 'nosh-test.ply'];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
+    const browser = await _launchPatched(puppeteer, { executablePath: EDGE, headless: 'new', args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'], protocolTimeout: 1800000 });
     const errors = [];
     const warnings = [];
     let out = null;

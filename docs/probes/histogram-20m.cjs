@@ -2,7 +2,7 @@
 // DC-only 夹具测不到 SH 变体 —— 本探针补这一条：打开数据面板，数直方图柱子与非黑列，并盯 console error。
 // 用法：node docs/probes/histogram-20m.cjs <url> [model]
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -10,7 +10,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 (async () => {
     const t0 = Date.now();
     const mark = (m) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`);
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],

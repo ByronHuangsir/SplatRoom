@@ -2,13 +2,13 @@
 // real 931k scan and counts what each step removes — i.e. "does the first slide show a change?".
 // usage: node depth-sweep.cjs [model] [url]
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const MODEL = process.argv[2] || 'big-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE, headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']
     });

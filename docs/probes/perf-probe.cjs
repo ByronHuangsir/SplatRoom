@@ -19,14 +19,14 @@
 //   e.g. node docs/probes/perf-probe.cjs "http://localhost:3621/?gpu=webgpu" test-20m.ply 4
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'test-20m.ply';
 const SECONDS = parseFloat(process.argv[4] || '4');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']

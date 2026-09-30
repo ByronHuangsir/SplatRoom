@@ -1,9 +1,9 @@
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'https://f569b13a56304425a2bfc4913482fb60.app.codebuddy.work';
 
 (async () => {
-  const browser = await puppeteer.launch({
+  const browser = await _launchPatched(puppeteer, {
     executablePath: EDGE,
     headless: 'new',
     args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--disable-dev-shm-usage']

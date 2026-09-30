@@ -5,7 +5,7 @@
 const fs = require('fs');
 const http = require('http');
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const PLY = process.argv[2] || require('path').join(__dirname, '..', '..', 'dist', 'merged-scene.ply');
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const PORT = 3998;
@@ -23,7 +23,7 @@ const startServer = () => new Promise((resolve) => {
 
 (async () => {
     const server = await startServer();
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE, headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],
         protocolTimeout: 1800000

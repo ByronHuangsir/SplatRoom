@@ -3,13 +3,13 @@
 // my integration, so this finds out whether the pick itself works and how the region args behave.
 // usage: node pickpass-probe.cjs [model] [url]
 const puppeteer = require('puppeteer-core');
-const { BROWSER_PATH: EDGE } = require('../verify/lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const MODEL = process.argv[2] || 'test-model.ply';
 const URL = process.argv[3] || 'http://localhost:3621/?gpu=webgpu';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE, headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist'],
         protocolTimeout: 600000

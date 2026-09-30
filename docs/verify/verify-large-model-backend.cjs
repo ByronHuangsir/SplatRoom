@@ -12,7 +12,7 @@
 const puppeteer = require('puppeteer-core');
 const { analysePng } = require('./lib/png.cjs');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const MODEL = process.argv[2] || 'big-model.ply';
 const BACKEND = process.argv[3] || 'webgpu';
 const URL = process.argv[4] || 'http://localhost:3621/';
@@ -21,7 +21,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 (async () => {
     // no swiftshader: WebGPU needs the real adapter, and both backends must run
     // on the same GPU for the comparison to mean anything
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']

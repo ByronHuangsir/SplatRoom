@@ -19,7 +19,7 @@
 const path = require('path');
 const puppeteer = require('puppeteer-core');
 
-const { BROWSER_PATH: EDGE } = require('./lib/browser.cjs');
+const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('./lib/browser.cjs');
 const URL = process.argv[2] || 'http://localhost:3621/?gpu=webgpu';
 const MODEL = process.argv[3] || 'floater-scale-test.ply';
 const GEN = path.join(__dirname, 'gen-floater-scale-test-splat.cjs');
@@ -29,7 +29,7 @@ const gen = JSON.parse(require('child_process').execFileSync(process.execPath, [
 
 (async () => {
     const logs = [];
-    const browser = await puppeteer.launch({
+    const browser = await _launchPatched(puppeteer, {
         executablePath: EDGE,
         headless: 'new',
         args: ['--no-sandbox', '--enable-unsafe-webgpu', '--ignore-gpu-blocklist']
