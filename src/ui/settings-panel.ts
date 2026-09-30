@@ -491,7 +491,8 @@ class SettingsPanel extends Container {
 
         const gpuSelection = new SelectInput({
             class: 'settings-panel-row-select',
-            defaultValue: getGpuBackendPref() ?? 'webgl2',
+            // 与 main.ts 的设备缺省保持一致：3.23.58 起默认 WebGPU（unified 同帧排序）
+            defaultValue: getGpuBackendPref() ?? 'webgpu',
             options: [
                 { v: 'webgl2', t: 'WebGL2' },
                 { v: 'webgpu', t: 'WebGPU' }

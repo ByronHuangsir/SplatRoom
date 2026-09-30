@@ -764,8 +764,9 @@ class Scene {
         }
     }
 
-    // unified（引擎 GPU 排序）实验通路的开关：**只认 `__SPLATROOM_UNIFIED__` 这一个全局**，默认全关。
-    // `main.ts` 启动时会把 `?unified=1` 归一化成它（唯一判定来源），探针也可以在场景构造前直接设。
+    // unified（引擎 GPU 排序）通路的开关：**只认 `__SPLATROOM_UNIFIED__` 这一个全局**。
+    // `main.ts` 启动时把 `?unified=` 归一化成它（唯一判定来源；3.23.58 起默认开启，
+    // 设备非 WebGPU 时 main.ts 会把它关回 false），探针也可以在场景构造前直接设。
     //
     // ⚠️ 必须是**读取时判定**（getter），不能在字段初始化时算一次 —— Scene 在页面加载早期就构造完，
     // 那时 `__SPLATROOM_UNIFIED__` 还没被探针/脚本设上，算一次就永远为 false
@@ -792,7 +793,7 @@ class Scene {
     }
 
     /**
-     * unified（引擎 GPU 排序）实验通路：每帧渲染前确保那条路用的是我们的材质。
+     * unified（引擎 GPU 排序）通路：每帧渲染前确保那条路用的是我们的材质。
      *
      * 为什么必须**每帧**：引擎的 `GSplatManager.update()` 每帧都会拿自己新建的 source material
      * 去覆盖 hybrid renderer 的材质（`copyMaterialSettings`），一次性装会在下一帧被冲掉。
@@ -800,7 +801,7 @@ class Scene {
      * （`app.renderer.gsplatDirector → camerasMap → layersMap → gsplatManager`），
      * 不属于任何一个 splat 元素。
      *
-     * 默认完全关闭（只认 `?unified=1` / `__SPLATROOM_UNIFIED__`），所以主线行为零变化。
+     * 开关关闭时（`?unified=0` / 非 WebGPU 设备）直接早退，主线行为零变化。
      */
     private ensureUnifiedMaterialHook() {
         if (!this._unifiedMaterialEnabled) {

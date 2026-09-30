@@ -8,7 +8,9 @@
  * backend. Precedence at device creation:
  *   1. URL override (?gpu=webgpu / ?gpu=webgl2) — used by the verification harnesses
  *   2. persisted preference (set from the settings panel)
- *   3. default WebGL2
+ *   3. default WebGPU (since 3.23.58 — the unified same-frame GPU sort path is on by
+ *      default and needs WebGPU; browsers without WebGPU fall back to WebGL2 + mainline
+ *      CPU sort, which is the old default experience)
  */
 
 const KEY = 'splatroom.gpuBackend';

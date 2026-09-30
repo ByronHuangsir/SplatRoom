@@ -553,16 +553,14 @@ class Splat extends Element {
             this.entity.setLocalRotation(rotation);
         }
 
-        // **实验开关**（2026-09-23，见 docs/排序错序-结构性解法-引擎GPU排序通路-2026-09-23.md）：
-        // 引擎里有两条 splat 通路 —— per-instance + worker 排序（现状，顺序有滞后），
+        // **通路开关**（2026-09-23 起为实验开关，3.23.58 起转默认，M1-3）：
+        // 引擎里有两条 splat 通路 —— per-instance + worker 排序（旧主线，顺序有滞后），
         // 以及 unified 世界缓冲 + **引擎自带 GPU 基数排序**（顺序与绘制同帧，没有滞后）。
-        // 打开 `?unified=1` 或 `__SPLATROOM_UNIFIED__ = true` 就走后者：
-        // 顺序滞后结构性地消失，但**我们定制的 per-instance 材质接不上**（曲线/裁剪/选区/
-        // 状态贴图都在那边），画面会变成引擎默认材质的样子（实测亮度偏低约 1/3，几何一致）。
-        // 只用来做"同场景两条通路对比"，不是可交付的功能路径。
+        // 3.23.58 起默认走后者（仅 WebGPU 设备）；`?unified=0` 或 `__SPLATROOM_UNIFIED__ = false`
+        // 回前者（逃生门）。
         //
         // 2026-09-25：判定来源**归一化**到 `__SPLATROOM_UNIFIED__` 一个全局 ——
-        // `main.ts` 启动时会把 `?unified=1` 映射成它，探针也可以在场景构造前直接设它。
+        // `main.ts` 启动时会把 `?unified=` 映射成它，探针也可以在场景构造前直接设它。
         // 原先这里同时读 `location.search`、而材质钩子读全局，两处时机不同 ⇒
         // "开关到底生效没有"取决于谁先读到（实测踩到过，见 docs/待办-引擎WebGPU-compute.md §4c）。
         const useUnified = (globalThis as any).__SPLATROOM_UNIFIED__ === true;

@@ -200,49 +200,35 @@ const main = async () => {
     // so the stored preference is honoured. Precedence:
     //   1. URL override (?gpu=webgpu / ?gpu=webgl2) — used by the verification harnesses
     //   2. persisted preference (settings panel)
-    //   3. default WebGL2
+    //   3. default WebGPU (since 3.23.58 — unified 通路转默认的前提；不支持时回落 WebGL2)
     // The device is created with ['webgpu', 'webgl2'] when WebGPU is requested, so a
     // browser without WebGPU still starts on WebGL2 instead of failing.
     const urlArgs = getURLArgs();
     const gpuOverride = (urlArgs as any)?.gpu;
 
-    // unified（引擎 GPU 排序）实验开关：**在这里就把 URL 参数归一化到全局**。
+    // unified（引擎 GPU 同帧排序）通路开关：**在这里就把 URL 参数归一化到全局**。
     //
     // 为什么必须归一化：这个开关原先被两处各自读一次 —— `splat.ts` 的 bindAsset 直接读
     // `location.search`，`scene.ts` 的材质钩子读 `__SPLATROOM_UNIFIED__`。
     // 两处判定来源不同、时机也不同（Scene 在页面加载早期就构造完），结果是
     // "URL 开关到底生效了没有"取决于谁先读到 —— 实测就是这么踩到的
     // （钩子一次都不跑、句柄永远拿不到；见 docs/待办-引擎WebGPU-compute.md §4c）。
-    // 归一化之后下游只认这一个全局，探针也可以在场景构造**之前**把它打开。
-    if ((urlArgs as any)?.unified === '1') {
+    // 归一化之后下游只认这一个全局，探针也可以在场景构造**之前**直接设。
+    //
+    // 3.23.58 起**默认开启**（M1-3：旋转排序错序的结构性根治，功能面六轮迁移已齐）：
+    //   `?unified=1` → 强制开（对照实验用，含 WebGL2 上的老行为）；
+    //   `?unified=0` → 强制关（逃生门，回主线 per-instance + worker CPU 排序）；
+    //   无参数      → 开，但**仅当设备真是 WebGPU 时生效**（设备创建后那段会把它关掉）。
+    const unifiedParam = (urlArgs as any)?.unified;
+    const unifiedForced: boolean | undefined =
+        unifiedParam === '1' ? true : unifiedParam === '0' ? false : undefined;
+    if (unifiedForced !== false) {
         (globalThis as any).__SPLATROOM_UNIFIED__ = true;
-    }
-
-    // 实验通路必须**一眼能看出来是开着的**：这条路的观感已经和主线对齐（调色接过去了），
-    // 光看画面分不出自己测的是哪条 —— 而"以为开了其实没开"会让排查完全跑偏
-    // （实测吃过这个亏）。所以打开时在角落里挂一个不拦截事件的标签。
-    if ((globalThis as any).__SPLATROOM_UNIFIED__ === true) {
-        const badge = document.createElement('div');
-        badge.id = 'splatroom-unified-badge';
-        badge.textContent = 'unified 通路（引擎 GPU 排序）';
-        badge.style.cssText = [
-            'position:fixed', 'left:8px', 'bottom:8px', 'z-index:99999',
-            'padding:4px 8px', 'border-radius:4px',
-            'background:rgba(30,120,220,0.85)', 'color:#fff',
-            'font:12px/1.4 system-ui,sans-serif', 'pointer-events:none',
-            'user-select:none'
-        ].join(';');
-        const attach = () => document.body && document.body.appendChild(badge);
-        if (document.body) {
-            attach();
-        } else {
-            document.addEventListener('DOMContentLoaded', attach, { once: true });
-        }
     }
 
     const gpuBackend = (gpuOverride === 'webgpu' || gpuOverride === 'webgl2') ?
         gpuOverride :
-        (getGpuBackendPref() ?? 'webgl2');
+        (getGpuBackendPref() ?? 'webgpu');
 
     // create the graphics device
     const graphicsDevice = await createGraphicsDevice(editorUI.canvas, {
@@ -257,6 +243,40 @@ const main = async () => {
         // the WebGL2 device.
         ...(gpuBackend === 'webgpu' ? webgpuTranspilerUrls() : {})
     });
+
+    // unified 只在 WebGPU 设备上成立（引擎 GPU 排序走 compute shader）。
+    // 默认开启时设备若不是 WebGPU —— 机器不支持 WebGPU、或用户在设置里选了 WebGL2 ——
+    // 就静默回落主线（行为与旧版一致）；只有 `?unified=1` 显式强开才保留 WebGL2 上的老行为。
+    if (!graphicsDevice.isWebGPU && unifiedForced !== true) {
+        (globalThis as any).__SPLATROOM_UNIFIED__ = false;
+    }
+
+    // 非默认状态必须**一眼能看出来**：转默认之后，"开着 unified"不再值得标记（那是正常路径），
+    // 要标记的是两种对照/逃生状态 —— 显式 `?unified=1` 强开（蓝）、`?unified=0` 逃生（琥珀）。
+    // 光看画面分不出自己在哪条路上，而"以为开了其实没开"会让排查完全跑偏（实测吃过这个亏）。
+    const badgeSpec = unifiedForced === true ?
+        { text: 'unified 通路（引擎 GPU 排序）', bg: 'rgba(30,120,220,0.85)' } :
+        unifiedForced === false ?
+            { text: '主线通路（CPU 排序 · ?unified=0）', bg: 'rgba(200,130,30,0.9)' } :
+            null;
+    if (badgeSpec) {
+        const badge = document.createElement('div');
+        badge.id = 'splatroom-unified-badge';
+        badge.textContent = badgeSpec.text;
+        badge.style.cssText = [
+            'position:fixed', 'left:8px', 'bottom:8px', 'z-index:99999',
+            'padding:4px 8px', 'border-radius:4px',
+            `background:${badgeSpec.bg}`, 'color:#fff',
+            'font:12px/1.4 system-ui,sans-serif', 'pointer-events:none',
+            'user-select:none'
+        ].join(';');
+        const attach = () => document.body && document.body.appendChild(badge);
+        if (document.body) {
+            attach();
+        } else {
+            document.addEventListener('DOMContentLoaded', attach, { once: true });
+        }
+    }
 
     const overrides = [
         urlArgs
