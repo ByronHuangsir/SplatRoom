@@ -46,24 +46,63 @@ export type SplatColorParams = {
  *
  * ⚠️ 中性值（`colorGradeEnabled` 为 false）时必须**逐项回到恒等**：
  * `clrScale = [1,1,1,1]`、`clrOffset = 0`、`saturation = 1`、其余 0、曲线关。
+ *
+ * M2-3：本函数保留给一次性调用方；每帧调用方请用
+ * `fillSplatColorParams(splat, splatColorParamsScratch(splat))`（零分配）。
  */
 export const splatColorParams = (splat: any): SplatColorParams => {
+    return fillSplatColorParams(splat, createSplatColorParams());
+};
+
+/** 建一份新的参数对象（全部中性值）。 */
+export const createSplatColorParams = (): SplatColorParams => ({
+    clrOffset: [0, 0, 0],
+    clrScale: [1, 1, 1, 1],
+    saturation: 1,
+    highlights: 0,
+    shadows: 0,
+    contrast: 0,
+    hslHueA: [0, 0, 0, 0],
+    hslHueB: [0, 0, 0, 0],
+    hslSatA: [0, 0, 0, 0],
+    hslSatB: [0, 0, 0, 0],
+    hslLumA: [0, 0, 0, 0],
+    hslLumB: [0, 0, 0, 0],
+    uCurveEnabled: 0
+});
+
+/**
+ * splat 的**持久**参数 scratch（每帧复用，零分配）。
+ *
+ * 为什么必须 per-splat 而不是全局一份：数组会经 `applySplatColorParams` 交给
+ * `material.setParameter`，引擎存的是**引用**；两个 splat 共用一份 scratch 时
+ * 后写的那个会改到先写那个材质的 uniform。
+ */
+export const splatColorParamsScratch = (splat: any): SplatColorParams => {
+    let out = splat._colorParamsOut as SplatColorParams | undefined;
+    if (!out) {
+        out = createSplatColorParams();
+        splat._colorParamsOut = out;
+    }
+    return out;
+};
+
+/** 把当前参数填进 `out`（原位写，不分配）。 */
+export const fillSplatColorParams = (splat: any, out: SplatColorParams): SplatColorParams => {
     if (!splat?._colorGradeEnabled) {
-        return {
-            clrOffset: [0, 0, 0],
-            clrScale: [1, 1, 1, 1],
-            saturation: 1,
-            highlights: 0,
-            shadows: 0,
-            contrast: 0,
-            hslHueA: [0, 0, 0, 0],
-            hslHueB: [0, 0, 0, 0],
-            hslSatA: [0, 0, 0, 0],
-            hslSatB: [0, 0, 0, 0],
-            hslLumA: [0, 0, 0, 0],
-            hslLumB: [0, 0, 0, 0],
-            uCurveEnabled: 0
-        };
+        out.clrOffset[0] = 0; out.clrOffset[1] = 0; out.clrOffset[2] = 0;
+        out.clrScale[0] = 1; out.clrScale[1] = 1; out.clrScale[2] = 1; out.clrScale[3] = 1;
+        out.saturation = 1;
+        out.highlights = 0;
+        out.shadows = 0;
+        out.contrast = 0;
+        for (let i = 0; i < 4; i++) {
+            out.hslHueA[i] = 0; out.hslHueB[i] = 0;
+            out.hslSatA[i] = 0; out.hslSatB[i] = 0;
+            out.hslLumA[i] = 0; out.hslLumB[i] = 0;
+        }
+        out.uCurveEnabled = 0;
+        return out;
     }
 
     // 黑场/白场 → 有序区间 + 最小间距（**唯一实现**，与导出/直方图/范围选择共用）。
@@ -76,26 +115,22 @@ export const splatColorParams = (splat: any): SplatColorParams => {
     const offset = tone.offsetBase + splat.brightness;
     const scale = tone.scale;
 
-    return {
-        clrOffset: [offset, offset, offset],
-        clrScale: [
-            scale * splat.tintClr.r * (1 + splat.temperature),
-            scale * splat.tintClr.g,
-            scale * splat.tintClr.b * (1 - splat.temperature),
-            splat.transparency
-        ],
-        saturation: splat.saturation,
-        highlights: splat.highlights,
-        shadows: splat.shadows,
-        contrast: splat.contrast,
-        hslHueA: [splat._hslHue[0], splat._hslHue[1], splat._hslHue[2], splat._hslHue[3]],
-        hslHueB: [splat._hslHue[4], splat._hslHue[5], splat._hslHue[6], splat._hslHue[7]],
-        hslSatA: [splat._hslSat[0], splat._hslSat[1], splat._hslSat[2], splat._hslSat[3]],
-        hslSatB: [splat._hslSat[4], splat._hslSat[5], splat._hslSat[6], splat._hslSat[7]],
-        hslLumA: [splat._hslLum[0], splat._hslLum[1], splat._hslLum[2], splat._hslLum[3]],
-        hslLumB: [splat._hslLum[4], splat._hslLum[5], splat._hslLum[6], splat._hslLum[7]],
-        uCurveEnabled: splat._curveTables ? 1 : 0
-    };
+    out.clrOffset[0] = offset; out.clrOffset[1] = offset; out.clrOffset[2] = offset;
+    out.clrScale[0] = scale * splat.tintClr.r * (1 + splat.temperature);
+    out.clrScale[1] = scale * splat.tintClr.g;
+    out.clrScale[2] = scale * splat.tintClr.b * (1 - splat.temperature);
+    out.clrScale[3] = splat.transparency;
+    out.saturation = splat.saturation;
+    out.highlights = splat.highlights;
+    out.shadows = splat.shadows;
+    out.contrast = splat.contrast;
+    for (let i = 0; i < 4; i++) {
+        out.hslHueA[i] = splat._hslHue[i]; out.hslHueB[i] = splat._hslHue[i + 4];
+        out.hslSatA[i] = splat._hslSat[i]; out.hslSatB[i] = splat._hslSat[i + 4];
+        out.hslLumA[i] = splat._hslLum[i]; out.hslLumB[i] = splat._hslLum[i + 4];
+    }
+    out.uCurveEnabled = splat._curveTables ? 1 : 0;
+    return out;
 };
 
 /** 把一份参数写进任意材质（per-instance 与 unified 共用同一套 uniform 名） */
@@ -113,4 +148,24 @@ export const applySplatColorParams = (material: any, p: SplatColorParams) => {
     material.setParameter('hslLumA', p.hslLumA);
     material.setParameter('hslLumB', p.hslLumB);
     material.setParameter('uCurveEnabled', p.uCurveEnabled);
+};
+
+/**
+ * 缓存版 apply（M2-3）：逐项走 MaterialParamCache，值没变就不调 setParameter。
+ * 与 `applySplatColorParams` 的写入集合逐项一致。
+ */
+export const applySplatColorParamsCached = (cache: { setScalar: (m: any, n: string, v: number) => void, setArray: (m: any, n: string, v: ArrayLike<number>) => void }, material: any, p: SplatColorParams) => {
+    cache.setArray(material, 'clrOffset', p.clrOffset);
+    cache.setArray(material, 'clrScale', p.clrScale);
+    cache.setScalar(material, 'saturation', p.saturation);
+    cache.setScalar(material, 'highlights', p.highlights);
+    cache.setScalar(material, 'shadows', p.shadows);
+    cache.setScalar(material, 'contrast', p.contrast);
+    cache.setArray(material, 'hslHueA', p.hslHueA);
+    cache.setArray(material, 'hslHueB', p.hslHueB);
+    cache.setArray(material, 'hslSatA', p.hslSatA);
+    cache.setArray(material, 'hslSatB', p.hslSatB);
+    cache.setArray(material, 'hslLumA', p.hslLumA);
+    cache.setArray(material, 'hslLumB', p.hslLumB);
+    cache.setScalar(material, 'uCurveEnabled', p.uCurveEnabled);
 };

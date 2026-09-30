@@ -18,8 +18,9 @@ import {
     Vec3
 } from 'playcanvas';
 
-import { applySplatColorParams, splatColorParams } from './color-params';
+import { applySplatColorParamsCached, fillSplatColorParams, splatColorParamsScratch } from './color-params';
 import { writeGpuCameraUniforms, GpuCameraSource } from './gpu-camera-uniforms';
+import { MaterialParamCache } from './material-param-cache';
 import { State, SplatState } from './splat-state';
 import { releaseStreamCpuStorage } from './stream-storage';
 import { TransformPalette } from './transform-palette';
@@ -39,7 +40,6 @@ const vecb = new Vec3();
 const invView = new Mat4();
 const invBoxWorld = new Mat4();
 const viewToBoxLocal = new Mat4();
-
 // SplatRoom patch: scratch buffers for per-frame main-view sort fallback.
 const _fallbackCamPos = new Vec3();
 const _fallbackCamDir = new Vec3();
@@ -49,6 +49,14 @@ const _fallbackInvModel = new Mat4();
 // 顺序外推的暂存（派发时写给 worker 的"落地时刻位姿"）
 const _predictPos = new Vec3();
 const _predictDir = new Vec3();
+// M2-3：serialize() 的曲线展平缓冲（每帧复用；serialize 在 scene onUpdate 的单线程循环里跑，不会重入）
+const _serializeCurveFlat: number[] = [];
+// M2-3：onPreRender 参数块的复用字面量/scratch（缓存内部持有自己的持久副本，这些只是源）
+const ZERO4 = [0, 0, 0, 0];
+const ONE4 = [1, 1, 1, 1];
+const _selClr4 = [0, 0, 0, 0];
+const _clr4 = [0, 0, 0, 0];
+const _clr4b = [0, 0, 0, 0];
 
 // P0-2（2026-09-20，用户 2000 万点实测 ⑥）：排序派发/相机闸门的节流参数。
 //
@@ -345,6 +353,10 @@ class Splat extends Element {
     _hslHue = new Float32Array(8);
     _hslSat = new Float32Array(8);
     _hslLum = new Float32Array(8);
+
+    // M2-3：每帧材质参数缓存（值没变就不调 setParameter；数组走缓存持有的持久副本）。
+    // 材质被 replaceData 重建时缓存按对象身份自动失效重写。
+    private readonly _matParamCache = new MaterialParamCache();
 
     measurePoints: Vec3[] = [];
     measureSelection = -1;
@@ -1085,12 +1097,15 @@ class Splat extends Element {
         serializer.pack(this.temperature, this.saturation, this.brightness, this.blackPoint, this.whitePoint, this.transparency);
         serializer.pack(this.highlights, this.shadows, this.contrast);
         serializer.pack(this.colorGradeEnabled ? 1 : 0);
-        serializer.packa(Array.from(this._hslHue));
-        serializer.packa(Array.from(this._hslSat));
-        serializer.packa(Array.from(this._hslLum));
+        // M2-3：packa 直接吃 Float32Array（以前每帧 3 个 Array.from 拷贝）。
+        serializer.packa(this._hslHue);
+        serializer.packa(this._hslSat);
+        serializer.packa(this._hslLum);
         // 曲线：把四个通道的控制点依次展平进 hash（数据面板靠它判断"要不要重算直方图"）。
         // 通道之间用 NaN 分隔，避免 "[[0,1]] + [[0,1]]" 与 "[[0,1],[0,1]]" 撞 hash。
-        const curveFlat: number[] = [];
+        // M2-3：展平缓冲每帧复用（serialize 不会重入——它在 scene onUpdate 的单线程循环里跑）。
+        const curveFlat = _serializeCurveFlat;
+        curveFlat.length = 0;
         for (const ch of CURVE_CHANNELS) {
             for (const p of this._curvePoints[ch] ?? []) {
                 curveFlat.push(p.x, p.y);
@@ -1105,7 +1120,7 @@ class Splat extends Element {
     // picture-in-picture preview writes the same parameters for its own camera and restores
     // them afterwards - see writeGpuCameraUniforms.
     private updateGpuCameraUniforms(instance: GSplatInstance) {
-        writeGpuCameraUniforms(instance, this.scene.camera as unknown as GpuCameraSource);
+        writeGpuCameraUniforms(instance, this.scene.camera as unknown as GpuCameraSource, this._matParamCache);
     }
 
     /**
@@ -1726,8 +1741,13 @@ class Splat extends Element {
 
         // configure rings rendering
         const material = this.entity.gsplat.instance.material;
-        material.setParameter('outlineMode', events.invoke('view.outlineSelection') ? 1 : 0);
-        material.setParameter('ringSize', (selected && cameraOverlay && cameraMode === 'rings') ? 0.04 : 0);
+        // M2-3（P2-1）：这一整段以前每帧 ~40 次 setParameter，其中大量字面量数组
+        // （[r,g,b,a] / [0,0,0,0] / [1,1,1,1] …）每帧重新分配。引擎的 setParameter
+        // 只是往 material.parameters 上挂值（纯赋值），绘制前引擎每帧都会把已有值
+        // 重新推进 scope —— 所以"值没变就不写"语义完全等价，走缓存逐项比较。
+        const pc = this._matParamCache;
+        pc.setScalar(material, 'outlineMode', events.invoke('view.outlineSelection') ? 1 : 0);
+        pc.setScalar(material, 'ringSize', (selected && cameraOverlay && cameraMode === 'rings') ? 0.04 : 0);
 
         // configure colors
         const selectedClr = events.invoke('selectedClr');
@@ -1735,22 +1755,26 @@ class Splat extends Element {
         const lockedClr = events.invoke('lockedClr');
 
         if (!selected) {
-            material.setParameter('selectedClr', [0, 0, 0, 0]);
+            pc.setArray(material, 'selectedClr', ZERO4);
         } else if (events.invoke('view.outlineSelection')) {
-            material.setParameter('selectedClr', [0, 0, 0, 0]);
+            pc.setArray(material, 'selectedClr', ZERO4);
         } else {
-            material.setParameter('selectedClr', [selectedClr.r, selectedClr.g, selectedClr.b, selectedClr.a * this.selectionAlpha]);
+            _selClr4[0] = selectedClr.r; _selClr4[1] = selectedClr.g; _selClr4[2] = selectedClr.b; _selClr4[3] = selectedClr.a * this.selectionAlpha;
+            pc.setArray(material, 'selectedClr', _selClr4);
         }
-        material.setParameter('unselectedClr', [unselectedClr.r, unselectedClr.g, unselectedClr.b, unselectedClr.a]);
-        material.setParameter('lockedClr', [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a]);
+        _clr4[0] = unselectedClr.r; _clr4[1] = unselectedClr.g; _clr4[2] = unselectedClr.b; _clr4[3] = unselectedClr.a;
+        pc.setArray(material, 'unselectedClr', _clr4);
+        _clr4b[0] = lockedClr.r; _clr4b[1] = lockedClr.g; _clr4b[2] = lockedClr.b; _clr4b[3] = lockedClr.a;
+        pc.setArray(material, 'lockedClr', _clr4b);
 
         // 颜色分级参数：**与 unified 通路共用同一份推导**（`src/splat/color-params.ts`）。
         // 为什么要抽出去：`?unified=1` 那条路的参数写在引擎每层的材质上，由 `scene.ts` 的钩子喂；
         // 两边各写一遍"色阶 + 染色 + 色温 + 饱和度 + HSL"必然漂移，这个仓库因此吃过亏。
         // 这里改成调用共享函数，取值与以前逐项一致（`colorGradeEnabled` 为 false 时全部中性）。
-        applySplatColorParams(material, splatColorParams(this));
-        material.setParameter('showDeleted', this._showDeleted ? 1 : 0);
-        material.setParameter('transformPalette', this.transformPalette.texture);
+        // M2-3：fill 进 per-splat 持久 scratch（零分配）+ 缓存版 apply（没变就不写）。
+        applySplatColorParamsCached(pc, material, fillSplatColorParams(this, splatColorParamsScratch(this)));
+        pc.setScalar(material, 'showDeleted', this._showDeleted ? 1 : 0);
+        pc.setValue(material, 'transformPalette', this.transformPalette.texture);
 
         // oriented crop-box clipping (SplatRoom)
         const cropBox = events.invoke('cropBox');
@@ -1759,16 +1783,16 @@ class Splat extends Element {
             invView.copy(cam.viewMatrix).invert();
             invBoxWorld.copy(cropBox.pivot.getWorldTransform()).invert();
             viewToBoxLocal.mul2(invBoxWorld, invView);
-            material.setParameter('uCropBoxEnabled', 1);
-            material.setParameter('uViewToBoxLocal', viewToBoxLocal.data);
-            material.setParameter('uCropBoxPreview', cropBox.preview ? 1 : 0);
-            material.setParameter('uCropBoxSoftEdge', cropBox.softEdge);
+            pc.setScalar(material, 'uCropBoxEnabled', 1);
+            pc.setArray(material, 'uViewToBoxLocal', viewToBoxLocal.data);
+            pc.setScalar(material, 'uCropBoxPreview', cropBox.preview ? 1 : 0);
+            pc.setScalar(material, 'uCropBoxSoftEdge', cropBox.softEdge);
             // shape + geometry uniforms
-            material.setParameter('uCropBoxShape', cropBox.shape === 'box' ? 0 : cropBox.shape === 'cylinder' ? 1 : 2);
-            material.setParameter('uCropBoxRadiusX', cropBox.radiusX);
-            material.setParameter('uCropBoxRadiusY', cropBox.radiusY);
-            material.setParameter('uCropBoxRadiusZ', cropBox.radiusZ);
-            material.setParameter('uCropBoxHeight', cropBox.height);
+            pc.setScalar(material, 'uCropBoxShape', cropBox.shape === 'box' ? 0 : cropBox.shape === 'cylinder' ? 1 : 2);
+            pc.setScalar(material, 'uCropBoxRadiusX', cropBox.radiusX);
+            pc.setScalar(material, 'uCropBoxRadiusY', cropBox.radiusY);
+            pc.setScalar(material, 'uCropBoxRadiusZ', cropBox.radiusZ);
+            pc.setScalar(material, 'uCropBoxHeight', cropBox.height);
             // 閸掑洭娼伴敍鍧坅p plane閿涘绱伴棃銏℃緲鐎硅棄瀹抽敍鍫㈡磪 local 閸楁洑缍呴敍澶婂枀鐎规艾鍨忛棃銏犵敨閸樻艾瀹抽垾鏂衡偓?
             // 0.03 閳?閻╂帒顔?6%閿涘牆顧勭€?閳?婢舵矮閲滅悮顐㈠瀼 splat 閹搭亪娼伴柈鍊熺箻閸忋儱鍨忛棃顫礉鐎靛棗瀹虫姗堢礆閿?
             // capAlpha 閹貉冨煑閸掑洭娼伴悧鍥у帗 alpha 閳ユ柡鈧?0.25 閺勵垳鏁庨悙鐧哥窗鏉╁洣缍?0.08)閸涘牆宕愰柅蹇旀
@@ -1777,21 +1801,21 @@ class Splat extends Element {
             // 濞ｅ嘲鎮庢稉鍝勫隘閸╃喐璐╅崥鍫ｅ閿涘牆鎮庨幋鎰ゴ鐠囨洩绱伴崑蹇撴▕娴?0.02閿涘鈧?
             // 妫版粏澹婃稉宥堫洬閻?閳?閸掑洭娼扮挧鎷岊潶閸掑洭鐝弬顖涙拱閼?+ 閸氬海鐢荤拫鍐缁狅紕鍤庨敍鍦歋L/contrast
             // 缁涘绱氶妴淇pColor 娴犲秳绱堕崗銉ょ稻 shader 娑撳秴鍟€鐠囨眹鈧?
-            material.setParameter('uCropBoxCapWidth', 0.03);
-            material.setParameter('uCropBoxCapAlpha', 0.25);
-            material.setParameter('uCropBoxCapColor', [1, 1, 1, 1]);
+            pc.setScalar(material, 'uCropBoxCapWidth', 0.03);
+            pc.setScalar(material, 'uCropBoxCapAlpha', 0.25);
+            pc.setArray(material, 'uCropBoxCapColor', ONE4);
         } else {
-            material.setParameter('uCropBoxEnabled', 0);
-            material.setParameter('uCropBoxPreview', 0);
-            material.setParameter('uCropBoxSoftEdge', 0.005);
-            material.setParameter('uCropBoxShape', 0);
-            material.setParameter('uCropBoxRadiusX', 0.35);
-            material.setParameter('uCropBoxRadiusY', 0.35);
-            material.setParameter('uCropBoxRadiusZ', 0.35);
-            material.setParameter('uCropBoxHeight', 0.8);
-            material.setParameter('uCropBoxCapWidth', 0);
-            material.setParameter('uCropBoxCapAlpha', 1);
-            material.setParameter('uCropBoxCapColor', [1, 1, 1, 1]);
+            pc.setScalar(material, 'uCropBoxEnabled', 0);
+            pc.setScalar(material, 'uCropBoxPreview', 0);
+            pc.setScalar(material, 'uCropBoxSoftEdge', 0.005);
+            pc.setScalar(material, 'uCropBoxShape', 0);
+            pc.setScalar(material, 'uCropBoxRadiusX', 0.35);
+            pc.setScalar(material, 'uCropBoxRadiusY', 0.35);
+            pc.setScalar(material, 'uCropBoxRadiusZ', 0.35);
+            pc.setScalar(material, 'uCropBoxHeight', 0.8);
+            pc.setScalar(material, 'uCropBoxCapWidth', 0);
+            pc.setScalar(material, 'uCropBoxCapAlpha', 1);
+            pc.setArray(material, 'uCropBoxCapColor', ONE4);
         }
     }
 

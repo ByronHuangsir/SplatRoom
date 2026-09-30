@@ -38,7 +38,8 @@
  */
 import { ShaderChunks, SHADERLANGUAGE_WGSL } from 'playcanvas';
 
-import { applySplatColorParams, type SplatColorParams } from './color-params';
+import { applySplatColorParamsCached, createSplatColorParams, type SplatColorParams } from './color-params';
+import { MaterialParamCache } from './material-param-cache';
 import { bakeUnifiedFragmentShader, bakeUnifiedModifyVS, bakeUnifiedVertexShader, hashSource } from '../shaders/unified-shaders';
 
 /**
@@ -239,6 +240,32 @@ function resolveVertexSource(device: unknown): string | null {
  * 路径：`app.renderer.gsplatDirector → camerasMap → layersMap → gsplatManager → material`
  * （`GSplatLayerData.gsplatManager` 是引擎为每个 layer 建的，见 `playcanvas.mjs:88518`）。
  */
+
+// ===== M2-3（2026-09-30）：每帧开销清理 =====
+// 每块 unified 材质一个参数缓存：值没变就不调 setParameter（引擎的 setParameter
+// 是纯赋值，绘制前每帧会把 parameters 里已有的值重新推进 scope，语义等价）。
+// 引擎若原地重置 parameters（copyMaterialSettings），ensureIntact 的哨兵校验会
+// 发现缓存引用不在材质上 ⇒ 清账全量重写。
+const unifiedParamCaches = new WeakMap<object, MaterialParamCache>();
+const paramCacheFor = (material: any): MaterialParamCache => {
+    let c = unifiedParamCaches.get(material);
+    if (!c) {
+        c = new MaterialParamCache();
+        unifiedParamCaches.set(material, c);
+    }
+    return c;
+};
+// wantName 的三段散列：源码字符串在 bake 记忆化之后**引用稳定**，引用没变就复用上次的
+// wantName（省掉每帧 3 次对几 KB~几十 KB 字符串的 FNV 散列 + 模板拼接）。
+const wantNameMemo = { frag: '', vs: '', modify: '', out: '' };
+// 每帧复用的安装状态对象（探针读它；以前每帧新分配一份）
+const installState: any = { hasVertexSource: false, vertexLen: 0, sourceKind: 'none', currentName: null, wantName: '', alreadyDone: false };
+// 缺省调色参数（中性）：以前每帧在 ensureUnifiedMaterial 里 new 一份字面量
+const NEUTRAL_UNIFIED_COLOR = createSplatColorParams();
+const ZERO3 = [0, 0, 0];
+const ONE3 = [1, 1, 1];
+const ZERO4_UNIFIED = [0, 0, 0, 0];
+const ONE4_UNIFIED = [1, 1, 1, 1];
 function collectUnifiedMaterials(scene: any): any[] {
     const director = scene?.app?.renderer?.gsplatDirector;
     const dbg = (globalThis as any).__SPLATROOM_UNIFIED_MATERIAL_DEBUG__;
@@ -399,17 +426,25 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         const vertexSource = bakedVs ?? rawVs;
         // ⚠️ 缓存键必须含**内容散列**：只用长度会让"等长的改动"（例如烘焙值 0 → 1）
         // 复用同一个 uniqueName，引擎于是命中旧着色器、根本不重编译（实测踩过）。
+        // M2-3：bake 记忆化之后三份源码**引用稳定**，引用没变就复用上次的 wantName，
+        // 省掉每帧 3 次对整份着色器源码的 hashSource。
         const bakedFrag = bakeUnifiedFragmentShader();
-        const wantName = `${UNIFIED_MATERIAL_NAME}-${hashSource(bakedFrag)}-${hashSource(bakedModifyVS)}-${hashSource(vertexSource ?? '')}`;
+        if (wantNameMemo.frag !== bakedFrag || wantNameMemo.vs !== vertexSource || wantNameMemo.modify !== bakedModifyVS) {
+            wantNameMemo.frag = bakedFrag;
+            wantNameMemo.vs = vertexSource ?? '';
+            wantNameMemo.modify = bakedModifyVS;
+            wantNameMemo.out = `${UNIFIED_MATERIAL_NAME}-${hashSource(bakedFrag)}-${hashSource(bakedModifyVS)}-${hashSource(vertexSource ?? '')}`;
+        }
+        const wantName = wantNameMemo.out;
         // 排查用状态（挂在全局，探针读）：看清到底卡在哪一步
-        (globalThis as any).__SPLATROOM_UNIFIED_INSTALL_STATE__ = {
-            hasVertexSource: !!vertexSource,
-            vertexLen: vertexSource ? vertexSource.length : 0,
-            sourceKind: bakedVs ? 'our-baked' : (vs ? 'compiled' : (rawVs ? 'raw-chunk' : 'none')),
-            currentName: material.uniqueName ?? null,
-            wantName,
-            alreadyDone: material.uniqueName === wantName
-        };
+        // M2-3：对象每帧复用（字段与以前逐项一致），不再每帧新分配。
+        installState.hasVertexSource = !!vertexSource;
+        installState.vertexLen = vertexSource ? vertexSource.length : 0;
+        installState.sourceKind = bakedVs ? 'our-baked' : (vs ? 'compiled' : (rawVs ? 'raw-chunk' : 'none'));
+        installState.currentName = material.uniqueName ?? null;
+        installState.wantName = wantName;
+        installState.alreadyDone = material.uniqueName === wantName;
+        (globalThis as any).__SPLATROOM_UNIFIED_INSTALL_STATE__ = installState;
         if (vertexSource && material.uniqueName !== wantName) {
             material.shaderDesc = {
                 uniqueName: wantName,
@@ -430,76 +465,66 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
             };
         }
 
+        // M2-3：这一块以前每帧 ~35 次 setParameter（含多个字面量数组），稳态全是白写。
+        // 走 per-material 参数缓存：值没变就不写；哨兵校验防引擎原地重置 parameters。
+        const pc = paramCacheFor(material);
+        pc.ensureIntact(material, 'clrScale');
+
         const gain = typeof params.probeGain === 'number' ? params.probeGain : 1;
-        material.setParameter('uProbeGain', gain);
+        pc.setScalar(material, 'uProbeGain', gain);
         // 调色参数：与 per-instance **同一份推导**（`src/splat/color-params.ts`），uniform 名也相同。
         // 缺省即中性（clrScale = 1、clrOffset = 0、饱和度 = 1、其余 0、曲线关）⇒ 画面与
         // "只装了我们的着色器、没做任何调色"逐像素一致。
-        const color = params.color ?? {
-            clrOffset: [0, 0, 0] as [number, number, number],
-            clrScale: [1, 1, 1, 1] as [number, number, number, number],
-            saturation: 1,
-            highlights: 0,
-            shadows: 0,
-            contrast: 0,
-            hslHueA: [0, 0, 0, 0],
-            hslHueB: [0, 0, 0, 0],
-            hslSatA: [0, 0, 0, 0],
-            hslSatB: [0, 0, 0, 0],
-            hslLumA: [0, 0, 0, 0],
-            hslLumB: [0, 0, 0, 0],
-            uCurveEnabled: 0
-        };
-        applySplatColorParams(material, color);
+        applySplatColorParamsCached(pc, material, params.color ?? NEUTRAL_UNIFIED_COLOR);
         if (params.curveTexture) {
-            material.setParameter('uCurve', params.curveTexture);
+            pc.setValue(material, 'uCurve', params.curveTexture);
         }
         // 二期：per-splat 状态（选中 / 锁定 / 删除）。缺省全部中性 ——
         // 不绑状态贴图时 `srState` 恒为 0，着色器整段不生效，画面与"只有调色"逐像素一致。
         if (params.stateTexture) {
-            material.setParameter('srStateTex', params.stateTexture);
+            pc.setValue(material, 'srStateTex', params.stateTexture);
         }
-        material.setParameter('srStateW', typeof params.stateWidth === 'number' && params.stateWidth > 0 ? params.stateWidth : 1);
-        material.setParameter('srSelectedClr', params.selectedClr ?? [0, 0, 0, 0]);
-        material.setParameter('srLockedClr', params.lockedClr ?? [1, 1, 1, 1]);
-        material.setParameter('srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
+        pc.setScalar(material, 'srStateW', typeof params.stateWidth === 'number' && params.stateWidth > 0 ? params.stateWidth : 1);
+        pc.setArray(material, 'srSelectedClr', params.selectedClr ?? ZERO4_UNIFIED);
+        pc.setArray(material, 'srLockedClr', params.lockedClr ?? ONE4_UNIFIED);
+        pc.setScalar(material, 'srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
         // 拾取模式：调用方没给就**沿用上一次设的值** —— 否则每帧的钩子会把
         // picker 刚刚设好的 id 模式冲回 0，而 picker 的那一遍绘制就出成正常的画了。
         const pickMode = typeof params.pickMode === 'number' ? params.pickMode : currentPickMode;
         currentPickMode = pickMode;
-        material.setParameter('srPickMode', pickMode);
+        pc.setScalar(material, 'srPickMode', pickMode);
         // 二期：裁剪盒（缺省关闭 = 中性，着色器整段跳过）
         const crop = params.crop;
-        material.setParameter('srCropEnabled', crop && crop.enabled > 0.5 ? 1 : 0);
+        pc.setScalar(material, 'srCropEnabled', crop && crop.enabled > 0.5 ? 1 : 0);
         if (crop && crop.enabled > 0.5) {
             if (crop.matrix) {
-                material.setParameter('srClipToBoxLocal', crop.matrix);
+                pc.setArray(material, 'srClipToBoxLocal', crop.matrix);
             }
-            material.setParameter('srCropPreview', crop.preview ?? 0);
-            material.setParameter('srCropSoftEdge', crop.softEdge ?? 0.005);
-            material.setParameter('srCropShape', crop.shape ?? 0);
-            material.setParameter('srCropRadiusX', crop.radiusX ?? 0.35);
-            material.setParameter('srCropRadiusY', crop.radiusY ?? 0.35);
-            material.setParameter('srCropRadiusZ', crop.radiusZ ?? 0.35);
-            material.setParameter('srCropHeight', crop.height ?? 0.8);
-            material.setParameter('srCropCapWidth', crop.capWidth ?? 0);
-            material.setParameter('srCropCapAlpha', crop.capAlpha ?? 1);
-            material.setParameter('srCropMix', crop.cornerMix ?? 1);
+            pc.setScalar(material, 'srCropPreview', crop.preview ?? 0);
+            pc.setScalar(material, 'srCropSoftEdge', crop.softEdge ?? 0.005);
+            pc.setScalar(material, 'srCropShape', crop.shape ?? 0);
+            pc.setScalar(material, 'srCropRadiusX', crop.radiusX ?? 0.35);
+            pc.setScalar(material, 'srCropRadiusY', crop.radiusY ?? 0.35);
+            pc.setScalar(material, 'srCropRadiusZ', crop.radiusZ ?? 0.35);
+            pc.setScalar(material, 'srCropHeight', crop.height ?? 0.8);
+            pc.setScalar(material, 'srCropCapWidth', crop.capWidth ?? 0);
+            pc.setScalar(material, 'srCropCapAlpha', crop.capAlpha ?? 1);
+            pc.setScalar(material, 'srCropMix', crop.cornerMix ?? 1);
         }
         // 二期：粒子特效（缺省 = 中性：progress 0 / mode 0 / fade 1 ⇒ 位置与颜色都不变）
         const effect = params.effect ?? {};
-        material.setParameter('srScatterProgress', effect.progress ?? 0);
-        material.setParameter('srScatterRadius', effect.radius ?? 1);
-        material.setParameter('srScatterCenter', effect.center ?? [0, 0, 0]);
-        material.setParameter('srEffectMode', effect.mode ?? 0);
-        material.setParameter('srEffectTime', effect.time ?? 0);
-        material.setParameter('srEffectColor', effect.color ?? [1, 1, 1]);
-        material.setParameter('srEffectFade', effect.fade ?? 1);
+        pc.setScalar(material, 'srScatterProgress', effect.progress ?? 0);
+        pc.setScalar(material, 'srScatterRadius', effect.radius ?? 1);
+        pc.setArray(material, 'srScatterCenter', effect.center ?? ZERO3);
+        pc.setScalar(material, 'srEffectMode', effect.mode ?? 0);
+        pc.setScalar(material, 'srEffectTime', effect.time ?? 0);
+        pc.setArray(material, 'srEffectColor', effect.color ?? ONE3);
+        pc.setScalar(material, 'srEffectFade', effect.fade ?? 1);
         if (effect.clipToWorld) {
-            material.setParameter('srClipToWorld', effect.clipToWorld);
+            pc.setArray(material, 'srClipToWorld', effect.clipToWorld);
         }
         if (effect.viewProj) {
-            material.setParameter('srViewProj', effect.viewProj);
+            pc.setArray(material, 'srViewProj', effect.viewProj);
         }
         touched++;
     }

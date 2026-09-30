@@ -36,7 +36,7 @@ import { deviceClass, runtimePolicy, splatTier, type DeviceFacts, type RuntimePo
 import { DataProcessor } from '../data-processor/index';
 import { getLodDistances, planLodFractions } from '../lod/lod';
 import { PCApp } from '../pc-app';
-import { splatColorParams } from '../splat/color-params';
+import { fillSplatColorParams, splatColorParamsScratch } from '../splat/color-params';
 import { GroupRenderer } from '../splat/group-renderer';
 import { Splat } from '../splat/splat';
 import { GroupManager } from '../splat/splat-group';
@@ -51,6 +51,11 @@ const invProj = new Mat4();
 // 特效用：view-projection 与它的逆（世界位移 → clip 位移 / clip → 世界中心）
 const viewProj = new Mat4();
 const invViewProj = new Mat4();
+// M2-3：unified 钩子的选中/锁定色 scratch（缓存侧持有自己的持久副本，这些只是源）
+const _unifiedSelected4 = [0, 0, 0, 0];
+const _unifiedLocked4 = [0, 0, 0, 0];
+// M2-3：onUpdate 的"变化类型集合"复用（每帧 clear 而不是 new Set）
+const _changedTypesScratch = new Set<ElementType>();
 
 // sort meshInstances by the aabb corner furthest from the camera
 const corner = new Vec3();
@@ -671,7 +676,13 @@ class Scene {
         const result = state.compare(this.sceneState[1 - i]);
 
         // generate the set of all element types that changed
-        const all = new Set([...result.added, ...result.removed, ...result.moved, ...result.changed]);
+        // M2-3：复用同一个 Set（以前每帧 4 个临时数组展开 + 1 个新 Set）
+        const all = _changedTypesScratch;
+        all.clear();
+        for (const t of result.added) all.add(t);
+        for (const t of result.removed) all.add(t);
+        for (const t of result.moved) all.add(t);
+        for (const t of result.changed) all.add(t);
 
         // 粒子特效激活时强制每帧渲染（持续动画，不参与 state diff，
         // 否则按需渲染架构下粒子永远不更新）。
@@ -828,9 +839,14 @@ class Scene {
         const lockedClr = this.events.invoke('lockedClr') as { r: number, g: number, b: number, a: number };
         const isSelectedElement = !!s && this.events.invoke('selection') === s;
         const outlineSelection = this.events.invoke('view.outlineSelection') === true;
-        const tintSelected = (!isSelectedElement || outlineSelection) ?
-            [0, 0, 0, 0] :
-            [selectedClr.r, selectedClr.g, selectedClr.b, selectedClr.a * (s?.selectionAlpha ?? 1)];
+        // M2-3：复用模块级 scratch（缓存侧会拷到自己的持久副本，这里只是源）。
+        const tintSelected = _unifiedSelected4;
+        if (!isSelectedElement || outlineSelection) {
+            tintSelected[0] = 0; tintSelected[1] = 0; tintSelected[2] = 0; tintSelected[3] = 0;
+        } else {
+            tintSelected[0] = selectedClr.r; tintSelected[1] = selectedClr.g; tintSelected[2] = selectedClr.b;
+            tintSelected[3] = selectedClr.a * (s?.selectionAlpha ?? 1);
+        }
         // 二期：裁剪盒。取值口径**逐条对齐** `Splat.onPreRender` 里给 per-instance 材质的那几行
         // （同一个 `events.invoke('cropBox')`、同样的 shape 枚举与半径字段），
         // 只是这里多给一个合成矩阵：`inverse(盒世界) × inverse(视图) × inverse(投影)`
@@ -865,21 +881,26 @@ class Scene {
         }
         // 二期：粒子特效。特效值由 `Splat.setScatterProgress` 通过 `setUnifiedEffect` 写进模块状态，
         // 这里每帧补上两个**随相机变化**的矩阵（特效顶点要用它们把世界位移换算成 clip 位移）。
-        let effectParams: any = getUnifiedEffect();
+        // M2-3：直接挂在模块状态对象上（每帧重写这两个字段），不再每帧 spread 一份新对象；
+        // `setUnifiedEffect` 重赋对象时这两个字段丢失，下一帧这里又会补上，语义不变。
+        const effectParams: any = getUnifiedEffect();
         const effCam = this.camera?.camera as any;
         if (effCam) {
             viewProj.copy(effCam.projectionMatrix);
             viewProj.mul(effCam.viewMatrix);
             invViewProj.copy(viewProj).invert();
-            effectParams = { ...effectParams, viewProj: viewProj.data, clipToWorld: invViewProj.data };
+            effectParams.viewProj = viewProj.data;
+            effectParams.clipToWorld = invViewProj.data;
         }
+        _unifiedLocked4[0] = lockedClr.r; _unifiedLocked4[1] = lockedClr.g; _unifiedLocked4[2] = lockedClr.b; _unifiedLocked4[3] = lockedClr.a;
         const ok = ensureUnifiedMaterial(this, s ? {
-            color: splatColorParams(s),
+            // M2-3：fill 进 per-splat 持久 scratch（零分配），缓存侧逐分量比较。
+            color: fillSplatColorParams(s, splatColorParamsScratch(s)),
             curveTexture: s.curveTexture,
             stateTexture: s.stateTexture,
             stateWidth: s.stateTexture?.width ?? 1,
             selectedClr: tintSelected,
-            lockedClr: [lockedClr.r, lockedClr.g, lockedClr.b, lockedClr.a],
+            lockedClr: _unifiedLocked4,
             showDeleted: s.showDeleted ? 1 : 0,
             crop: cropParams,
             effect: effectParams

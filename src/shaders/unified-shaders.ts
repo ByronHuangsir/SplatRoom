@@ -522,15 +522,32 @@ fn modifySplatColor(center: vec3f, color: ptr<function, vec4f>) {
  *   - saturation: 0 ⇒ 直接验证"我们的调色有没有作用于画面"
  *   - red: 1        ⇒ 不可误认的阳性对照（画面应变红）
  */
+// ===== M2-3（2026-09-30）：烘焙结果记忆化 =====
+// ensureUnifiedMaterial 每帧都调这三个 bake 函数。以前它们无条件做整串 .replace()
+// —— 每次都在堆上重建一份几 KB~几十 KB 的着色器源码，只为下一秒被拿去 hash/比较。
+// 烘焙键（全局 __SPLATROOM_UNIFIED_BAKE__ 的各字段）在帧与帧之间几乎从不变动，
+// 所以按"键值组合"记忆化：键没变 ⇒ 直接返回上一次那一份字符串（引用相等，
+// 下游的 wantName 缓存还能靠引用比较再省掉 hashSource）。
+const bakeMemo = {
+    modify: { key: '', out: '' },
+    frag: { key: '', out: '' },
+    vs: { key: '', out: '' }
+};
+
 function bakeUnifiedModifyVS(): string {
     const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
     const enabled = !!bake;
     const sat = bake && typeof bake.saturation === 'number' ? bake.saturation : 1;
     const red = bake && typeof bake.red === 'number' ? bake.red : 0;
-    return unifiedModifyVS
-    .replace('__SR_BAKE_ENABLED__', enabled ? 'true' : 'false')
-    .replace('__SR_BAKE_SATURATION__', sat.toFixed(6))
-    .replace('__SR_BAKE_RED__', red.toFixed(6));
+    const key = `${enabled}|${sat}|${red}`;
+    if (bakeMemo.modify.key !== key) {
+        bakeMemo.modify.key = key;
+        bakeMemo.modify.out = unifiedModifyVS
+        .replace('__SR_BAKE_ENABLED__', enabled ? 'true' : 'false')
+        .replace('__SR_BAKE_SATURATION__', sat.toFixed(6))
+        .replace('__SR_BAKE_RED__', red.toFixed(6));
+    }
+    return bakeMemo.modify.out;
 }
 
 /**
@@ -545,10 +562,15 @@ export function bakeUnifiedFragmentShader(): string {
     const fragRed = bake && typeof bake.fragRed === 'number' ? bake.fragRed : 0;
     const fragOpaque = bake && typeof bake.fragOpaque === 'number' ? bake.fragOpaque : 0;
     const cropProbe = bake && typeof bake.cropBoxProbe === 'number' ? bake.cropBoxProbe : 0;
-    return unifiedFragmentShader
-    .replace('__SR_FRAG_RED__', fragRed.toFixed(6))
-    .replace('__SR_FRAG_OPAQUE__', fragOpaque.toFixed(6))
-    .replace('__SR_CROP_PROBE__', cropProbe.toFixed(6));
+    const key = `${fragRed}|${fragOpaque}|${cropProbe}`;
+    if (bakeMemo.frag.key !== key) {
+        bakeMemo.frag.key = key;
+        bakeMemo.frag.out = unifiedFragmentShader
+        .replace('__SR_FRAG_RED__', fragRed.toFixed(6))
+        .replace('__SR_FRAG_OPAQUE__', fragOpaque.toFixed(6))
+        .replace('__SR_CROP_PROBE__', cropProbe.toFixed(6));
+    }
+    return bakeMemo.frag.out;
 }
 
 /**
@@ -559,7 +581,12 @@ export function bakeUnifiedFragmentShader(): string {
 export function bakeUnifiedVertexShader(): string {
     const bake = (globalThis as any).__SPLATROOM_UNIFIED_BAKE__ ?? null;
     const cover = bake && typeof bake.vsCover === 'number' ? bake.vsCover : 0;
-    return unifiedVertexShader.replace('__SR_VS_COVER__', cover.toFixed(6));
+    const key = `${cover}`;
+    if (bakeMemo.vs.key !== key) {
+        bakeMemo.vs.key = key;
+        bakeMemo.vs.out = unifiedVertexShader.replace('__SR_VS_COVER__', cover.toFixed(6));
+    }
+    return bakeMemo.vs.out;
 }
 
 export { unifiedVertexShader, unifiedModifyVS, bakeUnifiedModifyVS, unifiedFragmentShader };
