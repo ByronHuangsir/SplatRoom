@@ -17,7 +17,6 @@ import {
     materializeToDataTable,
     createChunkDataPool,
     selectLod,
-    sortMortonOrder,
     Options,
     WebPCodec,
     WorkerQueue
@@ -26,6 +25,8 @@ import {
 import { computeSplatAabb } from '../core/splat-aabb';
 import { importBudget, type DeviceFacts } from '../core/splat-tier';
 import { BlobReadFileSystem } from '../io/read/file-systems';
+import { permuteColumnsInPlace, sortMortonColumnsFast } from '../io/read/morton-fast';
+import { tryMaterializePlyDirect } from '../io/read/ply-direct';
 import { makeStridedSource } from '../io/read/strided-source';
 import { detectGiantGreyFromColumns } from '../splat/splat-sanitize';
 
@@ -78,6 +79,16 @@ const requestLod = (id: number, lodCounts: readonly number[]): Promise<number | 
 
 const handleLoad = async (msg: any) => {
     const { id, filename, inputFormat, skipReorder, blob, deviceFacts, useBudget, budgetOverride } = msg;
+    // M3-2：分阶段计时（探针/进度条共用）。phase 消息在**每个阶段结束时**发一条；
+    // 汇总也随 result 带回，主线程探针读 `window.__IMPORT_PHASES__`。
+    const phases: Record<string, number> = {};
+    let phaseT0 = performance.now();
+    const markPhase = (name: string) => {
+        const now = performance.now();
+        phases[name] = (phases[name] ?? 0) + (now - phaseT0);
+        phaseT0 = now;
+        (self as any).postMessage({ id, type: 'phase', phase: name, ms: phases[name] });
+    };
     try {
         const memFs = new BlobReadFileSystem();
         memFs.set(filename, blob);
@@ -89,6 +100,7 @@ const handleLoad = async (msg: any) => {
             params: [],
             fileSystem: memFs
         });
+        markPhase('readFile');
 
         const source = sources[0];
         let lod: number | null = null;
@@ -148,21 +160,64 @@ const handleLoad = async (msg: any) => {
                 }
             }
 
-            const dataTable = await materializeToDataTable(single, pool);
+            // M3-2：朴素 float PLY（未抽稀、单 LOD）走**单遍**物化（记录→命名列直写，
+            // 顺手算 morton 顶层范围，逐块报进度）；其余格式/抽稀/多 LOD 一律回退库路径。
+            const postProgress = (phase: string, fraction: number) => {
+                (self as any).postMessage({ id, type: 'progress', phase, fraction });
+            };
+            let dataTable: any = null;
+            if (!reduction && source.meta.numLods === 1 && inputFormat === 'ply') {
+                let lastPost = 0;
+                dataTable = await tryMaterializePlyDirect(blob, (fraction: number) => {
+                    const now = performance.now();
+                    if (now - lastPost >= 100 || fraction >= 1) {
+                        lastPost = now;
+                        postProgress('materialize', fraction);
+                    }
+                });
+            }
+            if (!dataTable) {
+                dataTable = await materializeToDataTable(single, pool);
+            }
+            markPhase('materialize');
             if (!dataTable) {
                 (self as any).postMessage({ id, type: 'cancelled' });
                 return;
             }
 
             // morton 重排：判据与主线程 `loadGSplatData()` 完全一致
+            // M3-2：排序/重排用 morton-fast（与库语义逐字节一致的基数排序版，两路径共用）
             const isCompressedPly = filename.toLowerCase().endsWith('.compressed.ply');
             if (inputFormat !== 'sog' && !isCompressedPly && !skipReorder) {
+                // ⚠️ 这里只按名取 x/y/z 的**临时**引用，不能缓存成 map ——
+                // 紧随其后的 permute 会 `column.data = dst` 并把旧缓冲交回池子复用，
+                // 缓存下来的旧引用会被后续列的置换结果覆写（实测：统计/包围盒读到错列）。
+                // 统计用的 colByName 必须在 permute **之后**重建（本函数下方）。
+                const colData = (name: string) => (dataTable.columns.find((c: any) => c.name === name)?.data ?? null);
                 const indices = new Uint32Array(dataTable.numRows);
                 for (let i = 0; i < indices.length; i++) {
                     indices[i] = i;
                 }
-                sortMortonOrder(dataTable, indices);
-                dataTable.permuteRowsInPlace(indices);
+                sortMortonColumnsFast(
+                    colData('x'), colData('y'), colData('z'),
+                    indices, dataTable.extent ?? null
+                );
+                markPhase('morton');
+                let lastPermutePost = 0;
+                permuteColumnsInPlace(dataTable.columns, indices, (fraction: number) => {
+                    const now = performance.now();
+                    if (now - lastPermutePost >= 100 || fraction >= 1) {
+                        lastPermutePost = now;
+                        postProgress('permute', fraction);
+                    }
+                });
+                markPhase('permute');
+            }
+
+            // 列索引（统计 / 包围盒用）—— 必须在 permute 之后构建（见上方警告）
+            const colByName = new Map<string, Float32Array>();
+            for (const c of dataTable.columns) {
+                colByName.set(c.name, c.data as Float32Array);
             }
 
             // Transfer each column buffer directly. splat-transform's
@@ -188,10 +243,6 @@ const handleLoad = async (msg: any) => {
             // 巨型灰高斯检测（第十九/二十轮）：这份统计要扫全部行（1.35 亿那档抽稀后 6000 万行），
             // 原来跑在主线程、占掉约 1.2 s。worker 手上就是同一批列，顺手统计一遍，
             // 主线程就**完全不用**再逐行扫了（只有用户真选"移除/缩小"时才在主线程动数据）。
-            const colByName = new Map<string, Float32Array>();
-            for (const c of dataTable.columns) {
-                colByName.set(c.name, c.data as Float32Array);
-            }
             let giantSplat: any = null;
             try {
                 giantSplat = detectGiantGreyFromColumns({
@@ -209,6 +260,7 @@ const handleLoad = async (msg: any) => {
             } catch {
                 giantSplat = null;   // 检测失败不影响导入：主线程会走回退扫描
             }
+            markPhase('giantSplat');
 
             // 包围盒（第二十二轮）：引擎构造 `GSplatResource` 时会无条件全表扫一遍算它
             // （6000 万行实测 2.2 s，占主线程），而 worker 手上就是同一批列 —— 在这儿顺手算，
@@ -226,9 +278,10 @@ const handleLoad = async (msg: any) => {
             } catch {
                 aabb = null;   // 算不出来就让引擎自己算（行为退化，不影响正确性）
             }
+            markPhase('aabb');
 
             (self as any).postMessage(
-                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction, giantSplat, aabb },
+                { id, type: 'result', numRows: dataTable.numRows, transform: dataTable.transform, columns, reduction, giantSplat, aabb, phases },
                 transfer
             );
         } finally {
@@ -238,7 +291,7 @@ const handleLoad = async (msg: any) => {
             }
         }
     } catch (err: any) {
-        (self as any).postMessage({ id, type: 'error', message: err?.message ?? String(err) });
+        (self as any).postMessage({ id, type: 'error', message: err?.message ?? String(err), stack: String(err?.stack ?? '').slice(0, 500) });
     }
 };
 

@@ -47,6 +47,12 @@ type Pending = {
     onProgress?: (fraction: number) => void;
     /** 导入预算判定回调（worker 在抽稀前上报，与主线程路径同一个形状） */
     onBudget?: (budget: any) => void;
+    /** M3-2：分阶段计时上报（worker 每个阶段结束发一条） */
+    onPhase?: (phase: string, ms: number) => void;
+    /** M3-2：全程进度上报（phase: 'materialize' | 'permute'，fraction 0..1） */
+    onLoadProgress?: (phase: string, fraction: number) => void;
+    /** M3-2：请求发出的时刻（算 worker 端到端墙钟用） */
+    t0?: number;
     filename: string;
     fileSystem: any;
     skipReorder?: boolean;
@@ -158,6 +164,8 @@ const readFileBytes = async (fileSystem: any, filename: string): Promise<ArrayBu
 const handleWorkerMessage = async (e: MessageEvent) => {
     const msg = e.data;
     const p = pending.get(msg.id);
+    // M3-2 探针钩子：最后一条 worker 消息（诊断 20M 导入卡在哪用）
+    (window as any).__LW_LAST_MSG__ = { type: msg.type, phase: msg.phase, fraction: msg.fraction, t: Math.round(performance.now()), message: msg.message, stack: msg.stack };
     if (!p) return;
 
     if (msg.type === 'needLod') {
@@ -189,6 +197,8 @@ const handleWorkerMessage = async (e: MessageEvent) => {
     if (msg.type === 'result') {
         pending.delete(msg.id);
         clearWatchdog(msg.id);
+        // M3-2：worker 端到端墙钟（含 4.7GB transferable 的消息队列时间）与主线程重建时间
+        const tResult = performance.now();
         // 两个探针可读的全局：走了几次 worker、worker 原样传回来的 transform
         // （套件用后者证明"普通对象 → 还原成 Quat"这一步真的发生了）
         (window as any).__LW_WORKER_RESULTS__ = ((window as any).__LW_WORKER_RESULTS__ || 0) + 1;
@@ -204,6 +214,12 @@ const handleWorkerMessage = async (e: MessageEvent) => {
             transform
         };
         const gsplatData = dataTableToGSplatData(dataTable as any);
+        // M3-2 探针钩子：worker 各阶段 + 主线程段
+        (window as any).__IMPORT_PHASES__ = {
+            ...(msg.phases ?? {}),
+            workerWall: p.t0 !== undefined ? tResult - p.t0 : undefined,
+            mainReconstruct: performance.now() - tResult
+        };
         p.resolve({
             gsplatData,
             transform,
@@ -211,6 +227,11 @@ const handleWorkerMessage = async (e: MessageEvent) => {
             giantSplat: msg.giantSplat ?? null,
             aabb: msg.aabb ?? null
         });
+        return;
+    }
+
+    if (msg.type === 'phase') {
+        p.onPhase?.(msg.phase, msg.ms);
         return;
     }
 
@@ -222,7 +243,12 @@ const handleWorkerMessage = async (e: MessageEvent) => {
     }
 
     if (msg.type === 'progress') {
-        p.onProgress?.(msg.fraction);
+        // M3-2：带 phase 的是物化/重排的全程进度；不带的是抽稀进度（旧通道）
+        if (msg.phase) {
+            p.onLoadProgress?.(msg.phase, msg.fraction);
+        } else {
+            p.onProgress?.(msg.fraction);
+        }
         return;
     }
 
@@ -272,7 +298,7 @@ export const loadGSplatDataAsync = async (
     const id = ++msgId;
 
     const result = new Promise<LoadResult | null>((resolve, reject) => {
-        pending.set(id, { resolve, reject, pickLod, filename, fileSystem, skipReorder, onProgress: options?.onDecimateProgress, onBudget: options?.onBudget });
+        pending.set(id, { resolve, reject, pickLod, filename, fileSystem, skipReorder, onProgress: options?.onDecimateProgress, onBudget: options?.onBudget, onPhase: options?.onPhase, onLoadProgress: options?.onLoadProgress, t0: performance.now() });
         try {
             // `Blob` 是结构化克隆的（引用传递，不复制字节）；transfer 列表为空。
             // 手动预算覆盖在主线程读页面全局，随消息带进 worker（worker 读不到页面全局）。

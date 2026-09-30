@@ -5,7 +5,6 @@
 import {
     getInputFormat,
     readFile,
-    sortMortonOrder,
     createChunkDataPool,
     materializeToDataTable,
     selectLod,
@@ -20,6 +19,7 @@ import {
 } from '@playcanvas/splat-transform';
 import { GSplatData } from 'playcanvas';
 
+import { permuteColumnsInPlace, sortMortonColumnsFast } from './morton-fast';
 import { makeStridedSource } from './strided-source';
 import { importBudget, type DeviceFacts, type ImportBudget } from '../../core/splat-tier';
 
@@ -44,6 +44,10 @@ type LoadOptions = {
     onBudget?: (budget: ImportBudget) => void;
     /** 抽稀进度（0..1）；只在真的抽稀时调用 */
     onDecimateProgress?: (fraction: number) => void;
+    /** M3-2：worker 分阶段计时上报（主线程路径不触发） */
+    onPhase?: (phase: string, ms: number) => void;
+    /** M3-2：worker 全程进度上报（phase: 'materialize' | 'permute'，fraction 0..1） */
+    onLoadProgress?: (phase: string, fraction: number) => void;
     /** 强制不抽稀（探针/回归对照：`window.__SPLATROOM_IMPORT_FULL__ = true`） */
     ignoreBudget?: boolean;
 };
@@ -262,14 +266,22 @@ const loadGSplatData = async (
     // - SOG format (already in morton order)
     // - Compressed PLY (already in morton order from write-compressed-ply)
     // - When skipReorder is true (ssproj files are already ordered, animation frames need speed)
+    //
+    // M3-2：排序/重排与导入 worker 共用 morton-fast（与库 `sortMortonOrder` +
+    // `permuteRowsInPlace` 语义逐字节一致的基数排序版，两条导入路径产物保持一致）。
     const isCompressedPly = lowerFilename.endsWith('.compressed.ply');
     if (inputFormat !== 'sog' && !isCompressedPly && !skipReorder) {
         const indices = new Uint32Array(dataTable.numRows);
         for (let i = 0; i < indices.length; i++) {
             indices[i] = i;
         }
-        sortMortonOrder(dataTable, indices);
-        dataTable.permuteRowsInPlace(indices);
+        sortMortonColumnsFast(
+            dataTable.getColumnByName('x').data as Float32Array,
+            dataTable.getColumnByName('y').data as Float32Array,
+            dataTable.getColumnByName('z').data as Float32Array,
+            indices
+        );
+        permuteColumnsInPlace(dataTable.columns, indices);
     }
 
     // Convert to GSplatData

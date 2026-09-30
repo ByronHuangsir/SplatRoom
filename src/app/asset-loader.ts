@@ -158,6 +158,29 @@ class AssetLoader {
             // 导入预算（2026-09-22）：模型远超本机能力时（例：1.35 亿点 / 7.02 GiB 的 PLY），
             // 在物化之前按等距抽样把行数降到设备预算，否则主线程会花几分钟把 7 GiB 列全部分配出来
             // —— 用户看到的就是"打不开"。预算之内一个点都不动。
+            //
+            // M3-2：worker 导入全程进度。worker 在物化（逐块）与 morton 重排（逐列）时
+            // 上报 fraction，这里把不定量 spinner 换成带阶段文字的进度条；阶段权重：
+            // 物化 0–60%（实测占 worker 时间 ~40%）、morton 排序 60–65%（无 fraction，只换文字）、
+            // 列重排 65–90%、统计/包围盒 90–92%。主线程"传给显卡"是另一段（下面已有的
+            // import-gpu-prepare 进度条），两段衔接。
+            let workerProgressShown = false;
+            const showWorkerProgress = () => {
+                if (!workerProgressShown && !animationFrame) {
+                    this.events.fire('stopSpinner');
+                    this.events.fire('progressStart', i18n.t('popup.import-progress'), false);
+                    workerProgressShown = true;
+                    progressShown = true;
+                }
+            };
+            const phaseText = (phase: string) => i18n.t(`popup.import-phase-${phase}`);
+            const phaseWeight: Record<string, [number, number]> = {
+                materialize: [0, 60],
+                morton: [60, 65],
+                permute: [65, 90],
+                giantSplat: [90, 91],
+                aabb: [91, 92]
+            };
             const fullImport = (globalThis as any).__SPLATROOM_IMPORT_FULL__ === true; // 逃生开关（探针对照用）
             const loadOptions = {
                 deviceFacts: fullImport ? undefined : readDeviceFacts(this.app.graphicsDevice),
@@ -174,6 +197,22 @@ class AssetLoader {
                 },
                 onDecimateProgress: (fraction: number) => {
                     this.events.fire('progressUpdate', { progress: Math.round(fraction * 100) });
+                },
+                onLoadProgress: (phase: string, fraction: number) => {
+                    showWorkerProgress();
+                    const [lo, hi] = phaseWeight[phase] ?? [0, 92];
+                    this.events.fire('progressUpdate', {
+                        text: phaseText(phase),
+                        progress: Math.round(lo + (hi - lo) * fraction)
+                    });
+                },
+                onPhase: (phase: string) => {
+                    // 无 fraction 的阶段（morton 排序、统计）也换一下文字，进度停在段首；
+                    // readFile 等未配权重的阶段不打扰 UI
+                    if (workerProgressShown && phaseWeight[phase] && phase !== 'materialize' && phase !== 'permute') {
+                        const [lo] = phaseWeight[phase];
+                        this.events.fire('progressUpdate', { text: phaseText(phase), progress: lo });
+                    }
                 }
             };
 
@@ -251,7 +290,11 @@ class AssetLoader {
                 await this.paintBeforeBlocking();
             }
 
+            const tAsset = performance.now();
             const asset = this.createGSplatAsset(result.gsplatData, filename, result.aabb ?? null);
+            // M3-2 探针钩子：主线程引擎资源构建耗时（worker 阶段在 __IMPORT_PHASES__ 里）
+            const importPhases = (globalThis as any).__IMPORT_PHASES__ ?? ((globalThis as any).__IMPORT_PHASES__ = {});
+            importPhases.createAsset = performance.now() - tAsset;
 
             const splat = new Splat(asset, transform.rotation);
             if (reduced) {
