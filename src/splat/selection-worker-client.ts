@@ -42,6 +42,10 @@ type SlotRecord = {
     srcY: Float32Array;
     srcZ: Float32Array;
     bytes: number;
+    /** 深度拾取用的 opacity：已同步的列对象身份 + 当时的 activated 标志（null = 还没同步过） */
+    srcOpacity: Float32Array | null;
+    opacityActivated: boolean;
+    opacityBytes: number;
 };
 
 type Pending = {
@@ -228,7 +232,7 @@ const doPrepareSlot = async (splat: Splat): Promise<number | null> => {
     // 数据换了就**复用同一个槽号**（worker 侧整条记录被覆盖，旧数组随即可回收），不新增槽
     const slot = existing ? existing.id : nextSlot++;
     if (existing) {
-        slotBytes -= existing.bytes;
+        slotBytes -= existing.bytes + existing.opacityBytes;
         slots.delete(splat);
     }
     if (slotBytes + bytes > SLOT_BUDGET_BYTES) {
@@ -252,7 +256,7 @@ const doPrepareSlot = async (splat: Splat): Promise<number | null> => {
     } catch (err) {
         return null;
     }
-    slots.set(splat, { id: slot, numSplats, srcX: x, srcY: y, srcZ: z, bytes });
+    slots.set(splat, { id: slot, numSplats, srcX: x, srcY: y, srcZ: z, bytes, srcOpacity: null, opacityActivated: false, opacityBytes: 0 });
     slotBytes += bytes;
     return slot;
 };
@@ -316,4 +320,158 @@ export const workerSelect = async (
     } catch (err) {
         return null;
     }
+};
+
+// ---------------------------------------------------------------------------
+// unified（引擎 GPU 排序）通路的拾取：把 `cpu-pick.ts` 的 O(n) 循环搬进本 worker。
+// 与上面两条共用一个 worker、同一套槽位与预算；**失败一律返回 null**，调用方
+// （scene/picker.ts）随即退回主线程的原实现 —— 语义不会有第二种结果。
+// ---------------------------------------------------------------------------
+
+/** 拾取请求里与几何无关的公共部分（矩阵只传数值，结构化克隆 16 个 float） */
+export type WorkerPickCommon = {
+    showDeleted: boolean;
+    projection: ArrayLike<number>;
+    view: ArrayLike<number>;
+    worldTransform: ArrayLike<number>;
+    width: number;
+    height: number;
+    near?: number;
+    far?: number;
+};
+
+/**
+ * 深度拾取（'depths' 模式）需要的 opacity 列：惰性同步一次（分块 + 让出宏任务，与 x/y/z 同款）。
+ * 身份判定用「列对象身份 + 当时的 activated 标志」——激活会把列的值原地改写（对象不变），
+ * 所以 activated 变了也算脏。失败返回 false（调用方走主线程回退）。
+ */
+export const preparePickOpacity = async (splat: Splat): Promise<boolean> => {
+    if (!flagOn()) {
+        return false;
+    }
+    const slot = await prepareSlot(splat);
+    if (slot == null) {
+        return false;
+    }
+    const data = splat.splatData as any;
+    const numSplats = data?.numSplats ?? 0;
+    const opacity = data?.getProp?.('opacity') as Float32Array | null;
+    const rec = slots.get(splat);
+    if (!numSplats || !opacity || !rec) {
+        return false;
+    }
+    const activated = !!data.activated;
+    if (rec.srcOpacity === opacity && rec.opacityActivated === activated) {
+        return true;
+    }
+    const bytes = numSplats * 4;
+    if (slotBytes + bytes > SLOT_BUDGET_BYTES) {
+        return false;
+    }
+
+    const co = new Float32Array(numSplats);
+    for (let o = 0; o < numSplats; o += SYNC_CHUNK) {
+        const e = Math.min(o + SYNC_CHUNK, numSplats);
+        co.set(opacity.subarray(o, e), o);
+        await yieldMacrotask();
+    }
+
+    try {
+        const r = await request({ type: 'pick-opacity', slot, gen: ++syncGen, numSplats, opacity: co, activated }, [co.buffer]);
+        if (r.error) {
+            return false;
+        }
+    } catch (err) {
+        return false;
+    }
+
+    // await 期间记录可能已被换掉（模型数据更换）：只认领还是原来那条的记录
+    const rec2 = slots.get(splat);
+    if (rec2 !== rec) {
+        return false;
+    }
+    if (rec.srcOpacity) {
+        slotBytes -= rec.opacityBytes;
+    }
+    rec.srcOpacity = opacity;
+    rec.opacityActivated = activated;
+    rec.opacityBytes = bytes;
+    slotBytes += bytes;
+    return true;
+};
+
+/** 发一次拾取请求：state 拷进池化缓冲转移过去，worker 算完原样转移回来。失败返回 null。 */
+const pickRequest = async (splat: Splat, payload: Record<string, unknown>, state: Uint8Array): Promise<any | null> => {
+    if (!flagOn()) {
+        return null;
+    }
+    const slot = await prepareSlot(splat);
+    if (slot == null) {
+        return null;
+    }
+    const buf = takeBuffer(state.length);
+    buf.set(state);
+    try {
+        const r = await request({ type: 'pick', slot, ...payload, state: buf }, [buf.buffer]);
+        if (r.state) {
+            giveBuffer(r.state);
+        }
+        if (r.error) {
+            return null;
+        }
+        return r;
+    } catch (err) {
+        return null;
+    }
+};
+
+/** 矩形拾取（`readIds` 的矩形/环模式）。返回 ids（行主序，0xFFFFFFFF = 背景）或 null（回退）。 */
+export const workerPickRect = async (
+    splat: Splat,
+    common: WorkerPickCommon,
+    state: Uint8Array,
+    px0: number,
+    py0: number,
+    pw: number,
+    ph: number
+): Promise<{ ids: Uint32Array, tested: number } | null> => {
+    const r = await pickRequest(splat, { mode: 'rect', ...common, px0, py0, pw, ph }, state);
+    return r ? { ids: r.ids, tested: r.tested ?? 0 } : null;
+};
+
+/** 单点拾取（`readId`："半径内最近的候选里取最前"）。返回 id/depth 或 null（回退）。 */
+export const workerPickNearest = async (
+    splat: Splat,
+    common: WorkerPickCommon,
+    state: Uint8Array,
+    px: number,
+    py: number,
+    radius: number
+): Promise<{ id: number, depth: number } | null> => {
+    const r = await pickRequest(splat, { mode: 'nearest', ...common, px, py, radius }, state);
+    return r ? { id: r.id, depth: r.depth } : null;
+};
+
+/**
+ * 深度拾取（`readDepths`）：worker 里先做并集包围盒一趟（带 opacity 记账），落空的采样点
+ * 逐个退回 nearest（与主线程原实现同款）。返回按 validIdx 顺序的归一化深度（NaN = 没有表面）
+ * 或 null（回退）。opacity 由 `preparePickOpacity` 惰性同步。
+ */
+export const workerPickDepths = async (
+    splat: Splat,
+    common: WorkerPickCommon,
+    state: Uint8Array,
+    pointsX: Int32Array,
+    pointsY: Int32Array,
+    validIdx: Int32Array,
+    px0: number,
+    py0: number,
+    pw: number,
+    ph: number
+): Promise<Float32Array | null> => {
+    if (!await preparePickOpacity(splat)) {
+        return null;
+    }
+    const r = await pickRequest(splat, { mode: 'depths', ...common, pointsX, pointsY, validIdx, px0, py0, pw, ph }, state);
+    return r ? r.depths : null;
 };

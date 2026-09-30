@@ -14,6 +14,7 @@ import {
 import { ElementType } from './element';
 import { Scene } from './scene';
 import { cpuPickNearest, cpuPickRect } from '../splat/cpu-pick';
+import { workerPickDepths, workerPickNearest, workerPickRect, type WorkerPickCommon } from '../splat/selection-worker-client';
 import { Splat } from '../splat/splat';
 
 const idClearColor = new Color(1, 1, 1, 1);
@@ -197,8 +198,12 @@ class Picker {
     /**
      * unified 通路的拾取：CPU 版"每像素最前表面"（实现与理由见 `src/splat/cpu-pick.ts`）。
      * 坐标口径与 GPU 那条路完全一致：入参是归一化 (0-1)、y 向下，返回行主序 id（背景 = 0xFFFFFFFF）。
+     *
+     * O(n) 循环优先在 **selection worker** 里跑（与框选共用常驻 x/y/z 槽位，20M 点上把这 ~1s
+     * 从主线程拿走）；worker 不可用 / 超预算 / 出错时**原样退回主线程实现**——两边跑的是
+     * 同一份 `cpu-pick.ts`，结果逐位相同。
      */
-    private readIdsCpu(x: number, y: number, width: number, height: number): number[] {
+    private async readIdsCpu(x: number, y: number, width: number, height: number): Promise<number[]> {
         const splat = this.cpuPickSplat;
         const data = splat?.splatData as any;
         if (!data) {
@@ -214,12 +219,8 @@ class Picker {
         const ph = Math.max(1, Math.min(th - py, Math.ceil((y + height) * th) - py));
 
         const camera = this.scene.camera;
-        const common = {
-            numSplats: data.numSplats as number,
-            x: data.getProp('x') as Float32Array,
-            y: data.getProp('y') as Float32Array,
-            z: data.getProp('z') as Float32Array,
-            state: data.getProp('state') as Uint8Array,
+        const state = data.getProp('state') as Uint8Array | null;
+        const common: WorkerPickCommon = {
             showDeleted: !!splat.showDeleted,
             projection: camera.camera.projectionMatrix.data,
             view: camera.camera.viewMatrix.data,
@@ -229,14 +230,43 @@ class Picker {
         };
 
         const t0 = performance.now();
-        let ids: Uint32Array;
+        let ids: Uint32Array | null = null;
         if (pw <= 2 && ph <= 2) {
             // 单像素（`readId`）：走"半径内最近的候选里取最前"那条 —— 只按中心点写像素的话，
             // 点画面正中经常落在两个中心之间 ⇒ 返回背景（见 cpu-pick.ts 的说明）。
-            const pick = cpuPickNearest({ ...common, px: px + 0.5, py: py + 0.5, radius: 6 });
-            ids = new Uint32Array([pick.id >= 0 ? pick.id : 0xFFFFFFFF]);
-        } else {
-            ids = cpuPickRect({ ...common, px0: px, py0: py, pw, ph }).ids;
+            if (state) {
+                const r = await workerPickNearest(splat, common, state, px + 0.5, py + 0.5, 6);
+                if (r) {
+                    ids = new Uint32Array([r.id >= 0 ? r.id : 0xFFFFFFFF]);
+                }
+            }
+        } else if (state) {
+            const r = await workerPickRect(splat, common, state, px, py, pw, ph);
+            if (r) {
+                ids = r.ids;
+            }
+        }
+        if (!ids) {
+            // 回退：worker 不可用/失败 —— 与原主线程实现完全一致
+            const fallback = {
+                numSplats: data.numSplats as number,
+                x: data.getProp('x') as Float32Array,
+                y: data.getProp('y') as Float32Array,
+                z: data.getProp('z') as Float32Array,
+                state,
+                showDeleted: !!splat.showDeleted,
+                projection: camera.camera.projectionMatrix.data,
+                view: camera.camera.viewMatrix.data,
+                worldTransform: splat.entity.getWorldTransform().data,
+                width: tw,
+                height: th
+            };
+            if (pw <= 2 && ph <= 2) {
+                const pick = cpuPickNearest({ ...fallback, px: px + 0.5, py: py + 0.5, radius: 6 });
+                ids = new Uint32Array([pick.id >= 0 ? pick.id : 0xFFFFFFFF]);
+            } else {
+                ids = cpuPickRect({ ...fallback, px0: px, py0: py, pw, ph }).ids;
+            }
         }
         this.lastCpuPickMs = performance.now() - t0;
         return Array.from(ids);
@@ -248,8 +278,10 @@ class Picker {
      * 语义与 GPU 那条对齐（`decodeDepth`：R = Σ depth·α、A = 透射率，结果 = R / (1 - A)；
      * 归一化是 `(linear - near) / (far - near)`，见 `uSplatCameraParams`）。做法与读 id 一样：
      * 只算**这些点并集包围盒**那一小块（GPU 那条也是并集读取），然后按点取样。
+     *
+     * O(n) 循环同样优先在 selection worker 里跑（opacity 列惰性同步一次）；失败退回主线程原实现。
      */
-    private readDepthsCpu(points: { x: number, y: number }[]): (number | null)[] {
+    private async readDepthsCpu(points: { x: number, y: number }[]): Promise<(number | null)[]> {
         const splat = this.cpuPickSplat;
         const data = splat?.splatData as any;
         const { width: tw, height: th } = this.scene.targetSize;
@@ -287,13 +319,37 @@ class Picker {
         const pw = Math.max(1, maxX - minX + 1);
         const ph = Math.max(1, maxY - minY + 1);
         const camera = this.scene.camera;
+        const state = data.getProp('state') as Uint8Array | null;
         const t0 = performance.now();
+
+        if (state) {
+            const depths = await workerPickDepths(splat, {
+                showDeleted: !!splat.showDeleted,
+                projection: camera.camera.projectionMatrix.data,
+                view: camera.camera.viewMatrix.data,
+                worldTransform: splat.entity.getWorldTransform().data,
+                near: (camera as any).near,
+                far: (camera as any).far,
+                width: tw,
+                height: th
+            }, state, pxs, pys, Int32Array.from(valid), px0, py0, pw, ph);
+            if (depths) {
+                this.lastCpuPickMs = performance.now() - t0;
+                for (let k = 0; k < valid.length; k++) {
+                    const v = depths[k];
+                    result[valid[k]] = Number.isFinite(v) ? v : null;
+                }
+                return result;
+            }
+        }
+
+        // 回退：worker 不可用/失败 —— 与原主线程实现完全一致
         const out = cpuPickRect({
             numSplats: data.numSplats as number,
             x: data.getProp('x') as Float32Array,
             y: data.getProp('y') as Float32Array,
             z: data.getProp('z') as Float32Array,
-            state: data.getProp('state') as Uint8Array,
+            state,
             showDeleted: !!splat.showDeleted,
             projection: camera.camera.projectionMatrix.data,
             view: camera.camera.viewMatrix.data,
@@ -318,7 +374,7 @@ class Picker {
             x: data.getProp('x') as Float32Array,
             y: data.getProp('y') as Float32Array,
             z: data.getProp('z') as Float32Array,
-            state: data.getProp('state') as Uint8Array,
+            state,
             showDeleted: !!splat.showDeleted,
             projection: camera.camera.projectionMatrix.data,
             view: camera.camera.viewMatrix.data,
