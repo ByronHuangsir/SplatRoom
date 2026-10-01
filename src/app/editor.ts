@@ -2278,7 +2278,10 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // outline selection
 
-    let outlineSelection = false;
+    // 默认开启：选中高亮是"选择可见"的前提。此前默认 false 会导致
+    // 框选/球刷在数据层生效（状态栏计数正确）但画面上毫无反馈，
+    // 用户感知为"选择工具无法选中"。
+    let outlineSelection = true;
 
     const setOutlineSelection = (value: boolean) => {
         if (value !== outlineSelection) {
