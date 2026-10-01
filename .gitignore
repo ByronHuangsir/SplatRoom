@@ -15,6 +15,7 @@ node_modules
 nul
 release
 release-backups
+release-build*
 _outputs
 scripts/__pycache__
 *.pyc

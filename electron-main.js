@@ -415,6 +415,17 @@ async function createWindow() {
         if (process.argv.includes('--unified')) return '1';
         return null;
     })();
+    // 浏览态开关：`--browse=1`（或 `--browse`）→ `?browse=1`。
+    //
+    // 与上面同一套写法。打包版里浏览态还有设置面板那个入口，但命令行这条能直接
+    // 配合大模型做"打开就是浏览态"的帧率实测（M3-3 的 56.1 fps 就是这么量的），
+    // 也便于和 `--unified=1` 叠起来跑双通路对照。
+    const browseArg = (() => {
+        const eq = process.argv.findIndex((a) => a.startsWith('--browse='));
+        if (eq >= 0) return process.argv[eq].slice(9);
+        if (process.argv.includes('--browse')) return '1';
+        return null;
+    })();
     const withGpu = (url) => {
         let out = url;
         const add = (kv) => {
@@ -422,6 +433,7 @@ async function createWindow() {
         };
         if (gpuArg) add('gpu=' + encodeURIComponent(gpuArg));
         if (unifiedArg) add('unified=' + encodeURIComponent(unifiedArg));
+        if (browseArg) add('browse=' + encodeURIComponent(browseArg));
         return out;
     };
     if (isDev) {
