@@ -1693,9 +1693,14 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     });
 
     events.on('select.unhide', () => {
+        // filter 不能用 `!op.ranges.empty`：StateOp 的 ranges 是**执行那一刻**才由
+        // captureRanges() 数出来的（见 StateOp 构造注释——op 是排队执行的，构造与执行
+        // 之间可能插进别的 op），构造时恒为空 ⇒ 曾经这个 filter 把每个 UnhideAllOp
+        // 都滤掉，"全部显示"永远不执行（2026-10-01 实测 numLocked 置位后 unhide 不回 0）。
+        // 用 numLocked 判"这个 splat 有没有可恢复的行"，语义等价且构造期可得。
         const ops = (scene.getElementsByType(ElementType.splat) as Splat[])
-        .map(splat => new UnhideAllOp(splat))
-        .filter(op => !op.ranges.empty);
+        .filter(splat => splat.state.numLocked > 0)
+        .map(splat => new UnhideAllOp(splat));
 
         if (ops.length > 0) {
             events.fire('edit.add', ops.length === 1 ? ops[0] : new MultiOp(ops));
