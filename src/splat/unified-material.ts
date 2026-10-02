@@ -70,6 +70,20 @@ export type UnifiedMaterialParams = {
     /** 1 = 显示"已删除"的高斯（淡红 + 降透明度），0 = 整点隐藏 */
     showDeleted?: number;
     /**
+     * 「轮廓选区」开关（= `events.invoke('view.outlineSelection')`）。
+     *
+     * 为什么必须显式喂进来：RT1（选区覆盖）的两个消费者语义是**互斥**的，与 per-instance
+     * 片元逐字对齐（`splat-shader.ts:695-708` / `splat-shader-wgsl.ts:723-737`）：
+     *   开着 ⇒ RT0 不染色（调用方把 `selectedClr` 传中性），RT1 写**选中点的高斯 alpha**
+     *           —— 描边后处理（`src/scene/outline.ts`）据此膨胀出轮廓；
+     *   关着 ⇒ 选中点 RT0 降到 80%，剩下 20% 写 RT1 —— 衬底（`src/scene/underlay.ts`）
+     *           加法合成回去。
+     * 缺了它，这条通路只能二选一写死；**实测 3.23.65 之前是恒写 0**
+     * （`unified-shaders.ts` 的 `output.color1 = vec4f(0,0,0,0)`）⇒ 开着轮廓时
+     * 两条高亮腿同时断 = 框选后画面零反馈（用户报障的根因）。
+     */
+    outlineMode?: number;
+    /**
      * 拾取模式：0 = 正常出图，1 = **id 拾取**（片元把 splat 行号写成颜色，供
      * `Picker.prepareId` + `readIds` 读回）。缺省沿用当前值（见 `setUnifiedPickMode`），
      * 所以每帧的 `ensureUnifiedMaterialHook()` 不会把 picker 刚设好的模式冲掉。
@@ -487,6 +501,7 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         pc.setScalar(material, 'srStateW', typeof params.stateWidth === 'number' && params.stateWidth > 0 ? params.stateWidth : 1);
         pc.setArray(material, 'srSelectedClr', params.selectedClr ?? ZERO4_UNIFIED);
         pc.setArray(material, 'srLockedClr', params.lockedClr ?? ONE4_UNIFIED);
+        pc.setScalar(material, 'srOutlineMode', params.outlineMode ?? 0);
         pc.setScalar(material, 'srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
         // 拾取模式：调用方没给就**沿用上一次设的值** —— 否则每帧的钩子会把
         // picker 刚刚设好的 id 模式冲回 0，而 picker 的那一遍绘制就出成正常的画了。

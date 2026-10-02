@@ -71,8 +71,11 @@ const settle = async (page) => {
         const backend = await page.evaluate(() => (window.scene.graphicsDevice.isWebGPU ? 'webgpu' : 'webgl2'));
 
         // select all: with the outline pass off the underlay adds RT1's 20% tint on top of RT0
+        // 2026-10-02：**必须显式把轮廓关掉再测衬底**。以前这里依赖"出厂默认 outlineSelection=false"，
+        // 而 3.23.65 把默认改成 true 后，这一段测的就变成描边路径了（语义完全不同）。
         await page.evaluate(async () => {
             window.scene.events.fire('select.none');
+            window.scene.events.fire('view.setOutlineSelection', false);
             await new Promise(r => setTimeout(r, 600));
         });
         await settle(page);
@@ -87,8 +90,12 @@ const settle = async (page) => {
         await settle(page);
         const selected = await stats(page);
 
-        // turn the outline pass on (it reads RT1's alpha as a coverage mask)
+        // turn the outline pass on (it reads RT1's alpha as a coverage mask).
+        // 先回到 false 再切 true：开关是"值变了才生效"的（editor.ts 的 setOutlineSelection 有
+        // `value !== outlineSelection` 守卫），直接 fire(true) 在默认已为 true 时是空操作。
         await page.evaluate(async () => {
+            window.scene.events.fire('view.setOutlineSelection', false);
+            await new Promise(r => setTimeout(r, 800));
             window.scene.events.fire('view.setOutlineSelection', true);
             await new Promise(r => setTimeout(r, 1200));
         });

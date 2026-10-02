@@ -688,6 +688,10 @@ varying @interpolate(flat) srSplatIndex: u32;
     uniform srEffectFade: f32;
 #endif
 uniform srPickMode: f32;
+// 「轮廓选区」开关（0/1）。见 src/splat/unified-material.ts 的 outlineMode 说明：
+// RT1（选区覆盖）的两个消费者语义互斥 —— 描边（outline.ts）要"选中点的高斯 alpha"，
+// 衬底（underlay.ts）要"选中点被扣下的那 20% 颜色"。所以片元必须知道当前是哪一种。
+uniform srOutlineMode: f32;
 
 // 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
 fn srNormExp(x: half) -> half {
@@ -1000,9 +1004,23 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             a = a * 0.4;
         }
         output.color = vec4f(c * a, a);
-        // RT1：选区覆盖。一期先写零（选区着色属于二期），但**这一行是这次修复的核心**：
-        // 没有它，RT1 就没有对应的片元输出，管线校验直接失败。
-        output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+        // ===== RT1：选区覆盖（描边 / 衬底后处理的输入）=====
+        // 语义与主线片元**逐字对齐**（splat-shader.ts:695-708、splat-shader-wgsl.ts:723-737）：
+        //   轮廓开 ⇒ RT0 保持原色、RT1 = 选中点的高斯 alpha（描边后处理据此膨胀出轮廓）；
+        //   轮廓关 ⇒ 选中点 RT0 降到 80%，被扣下的 20% 写进 RT1，由衬底加法合成回去。
+        // 为什么这一段以前是恒写 0（"一期先写零，选区着色属于二期"）会致命：
+        // 调用方在轮廓开着时**故意**把 srSelectedClr 传中性 0（scene.ts:950-951），
+        // 于是 RT1 空 ⇒ 描边无源、染色又被清零 ⇒ 框选后画面零反馈（用户报障的根因）。
+        // ⚠️ WGSL 没有三元运算符：必须用 select(f, t, cond)。
+        let srSelectedBit: bool = (srState & 1u) != 0u;
+        if (uniform.srOutlineMode > 0.5) {
+            output.color1 = vec4f(0.0, 0.0, 0.0, select(0.0, f32(srNormExp(A)), srSelectedBit));
+        } else if (srSelectedBit) {
+            output.color = vec4f(c * a * 0.8, a);
+            output.color1 = vec4f(c * a * 0.2, a);
+        } else {
+            output.color1 = vec4f(0.0, 0.0, 0.0, 0.0);
+        }
     #endif
     return output;
 }

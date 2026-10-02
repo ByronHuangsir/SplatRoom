@@ -1008,6 +1008,9 @@ class Scene {
             selectedClr: tintSelected,
             lockedClr: _unifiedLocked4,
             showDeleted: s.showDeleted ? 1 : 0,
+            // 轮廓选区开关：RT1 的两个消费者语义互斥（描边 vs 衬底），片元必须知道是哪一种。
+            // 缺这一项 = RT1 恒空 ⇒ 轮廓开着时两条高亮腿同时断（见 unified-material.ts 的说明）。
+            outlineMode: outlineSelection ? 1 : 0,
             crop: cropParams,
             effect: effectParams
         } : {});
