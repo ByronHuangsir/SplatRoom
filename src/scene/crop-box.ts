@@ -90,7 +90,15 @@ class CropBox extends Element {
     // clipping state
     _enabled = true;        // apply fragment discard
     _visible = true;        // show wireframe
-    _preview = false;       // show outside fragments faintly instead of discarding
+    /**
+     * 盒外淡显（面板上的「显示外部（预览）」）。
+     *
+     * 2026-10-02 用户实测反馈：默认 `false`（盒外直接 discard）时，一打开裁切盒就只剩盒内那点内容，
+     * "我无法知道我裁切到什么位置了" —— 屏幕失去参照价值。改成默认 `true`：盒外以 3.5% alpha 淡显，
+     * 整个模型仍在视野里，盒子切在哪一目了然。**只影响显示**，真正的裁剪/导出走的是盒内判据
+     * （`countSplatsInside` / `applyCropToExport`），与这个开关无关，所以不改变任何导出结果。
+     */
+    _preview = true;        // show outside fragments faintly instead of discarding
     _softEdge = 0.005;      // soft edge feather width (0 = laser sharp, 0.05 = soft)
 
     // clip shape: box | cylinder | sphere. cylinder is aligned to the pivot
