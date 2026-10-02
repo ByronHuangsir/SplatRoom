@@ -121,6 +121,8 @@ git update-ref -d refs/heads/from-bundle
 
 ```powershell
 cd D:\DeepSeek\SplatRoomV2\SplatRoomV3-0
+# 0) ⚠️ 先确认引擎补丁在位（3.23.72 起必须；见下面「引擎补丁」一段）
+npm run patched          # = node scripts/apply-patches.js（幂等，锚点找不到会 [FAIL] 并退出码 1）
 # 1) dist 里只能留 test-model.ply（其它 .ply 会进 asar：曾经把 210MB 模型打进去 → exe 309MB；
 #    硬链接的大夹具会让 electron-builder 直接报 file size can not be larger than 4.2GB）
 Get-ChildItem dist\*.ply | Where-Object { $_.Name -ne 'test-model.ply' } | ForEach-Object { Move-Item $_.FullName "D:\DeepSeek\SplatRoomV2\_tmp\ply-backup\$($_.Name)" -Force }
@@ -134,6 +136,17 @@ npx electron-builder --win portable --config.npmRebuild=false
 Start-Process release\SplatRoom-3.23.8.exe; Start-Sleep 22; (Get-Process SplatRoom -ErrorAction SilentlyContinue | Measure-Object).Count
 Get-Process SplatRoom -ErrorAction SilentlyContinue | Stop-Process -Force
 ```
+
+**引擎补丁（3.23.72 起，交付物正确性的前提）**：`scripts/apply-patches.js` 的 **Patch 3** 往
+`node_modules/playcanvas/build/playcanvas/src/...`（**源码树**，不是预打包的 `build/playcanvas.mjs`）
+里写一行 `projCache[base + 8u] = projected.splatId;` 并把 `CACHE_STRIDE` 从 8 改成 9。
+少了它，unified 通路的选中高亮会**错位 + 闪烁**（引擎给顶点着色器的 `sortedIndices` 是**排序槽位**，
+不是源行号）。`npm install` 的 postinstall 会自动应用；**但只 `npm run build` 不会** ⇒
+新机器/清空 node_modules 之后打包前必须手跑 `npm run patched`。
+复核：`node _tmp/check-asar-32372.cjs`（会检查打包产物里同时存在着色器的读与引擎的写）。
+
+**坑（PowerShell）**：改 `package.json` 时不要用 `Set-Content -Encoding utf8`（会写 BOM），
+electron-builder 解析会直接报 `Unexpected token ''`；用 node 写或 `-Encoding utf8NoBOM`。
 
 **注意（2026-09-20 实测修正）**：第 2 步流传下来的那条命令找的是
 `const pmApproaches = [await packager.getPackageManager(), node_module_collector_1.PM.TRAVERSAL];`，

@@ -70,9 +70,21 @@ varying gaussianColor: half4;
 
 // ===== 二期：**per-splat 状态（选中 / 锁定 / 删除）进这条通路** =====
 // 为什么能这么做：状态贴图是 R8、行主序（Splat.stateTexture，与 per-instance 材质共用同一张），
-// 而这里的 cacheIdx = sortedIndices[order] **就是该 splat 在数据里的行号** —— 引擎的
-// projCache 本来就用「行号 × CACHE_STRIDE」寻址（见下面 let base = cacheIdx * CACHE_STRIDE），
-// 所以不需要任何新资源、也不需要改引擎的 bind group，只要把行号带进着色器。
+// 而那正是**按源行号**索引的 —— 所以这里必须拿到行号。见下面 srRow。
+//
+// ⚠️⚠️ 2026-10-02 血泪教训（**这条以前写错了，写错过整整一个版本**）：
+//    cacheIdx = sortedIndices[order] **不是行号，是排序槽位**！
+//    投影器用 localDst = atomicAdd(&wgCount, 1u) 每帧重新分配写槽（playcanvas.mjs:85832），
+//    再按槽位落盘 sortKeys[dst] / projCache[dst * CACHE_STRIDE]；sortedIndices 装的就是
+//    这个槽位（gpuSorter.sortIndirect(projector.sortKeys, ...) 只排键、不带 id）。
+//    ⇒ 拿槽位查按行号索引的状态贴图 = **每帧给每个高斯贴一个随机状态**。
+//    实测症状（4M 真实扫描件、相机静止、框选左半边）：新增的高亮黄像素铺满全屏、质心 x=0.59
+//    （在选区右边）、只有 27.5% 落在选区内；逐帧像素翻转 50%。用户的描述是
+//    "选中的地方不亮、别的地方闪" —— 同一个 bug。逐 splat 拾取（片元把 srSplatIndex 编成颜色）
+//    也一起拾错。
+//    修法：引擎补丁 3（scripts/apply-patches.js）让投影器把 projected.splatId（**真源行号**）
+//    写进缓存备用字 word 8（CACHE_STRIDE 8 -> 9），这里读 projCache[base + 8u] 当行号。
+//    改了这里就必须有补丁 3，缺了会读到垃圾（选中全乱）。
 //
 // ⚠️ 命名：不要复用引擎/我们 chunk 里已有的名字（splatState / selectedClr / lockedClr /
 // showDeleted / saturation / uProbeGain …）—— 同一个 WGSL 模块里重复声明会编译失败
@@ -85,7 +97,7 @@ uniform srLockedClr: vec4f;
 uniform srShowDeleted: f32;
 // 状态字节原样带到片元（删除但仍在显示时的淡红染色要用 bit2）
 varying @interpolate(flat) srState: u32;
-// 该 splat 在数据里的行号（= cacheIdx）—— 拾取要用它当 id，见下面 srPickMode 的说明。
+// 该 splat 的**源行号**（= projCache[base + 8u]，补丁 3 写入）—— 拾取要用它当 id，见下面 srPickMode。
 varying @interpolate(flat) srSplatIndex: u32;
 // ===== 二期：裁剪盒（per-pixel）=====
 // 主线是在片元里用 vScreenOffset/vViewCenter + 高斯椭圆**重建视空间位置**再判盒内外的；
@@ -220,15 +232,18 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     //   锁定位 2：整色 × lockedClr；选中位 1：往 selectedClr 混（用它的 alpha 当权重）。
     // 位置也一致：这两条染色在**调色链之前**（顶点侧），淡红在片元侧调色链之后。
     let srStateWidth: u32 = u32(max(uniform.srStateW, 1.0));
+    // **真源行号**（补丁 3 由投影器写入 word 8）。绝对不要用 cacheIdx：那是每帧重分配的排序槽位，
+    // 拿它查状态贴图会得到"随机状态"（详见文件头那段血泪教训）。
+    let srRow: u32 = projCache[base + 8u];
     let srStateValue: u32 = u32(
         textureLoad(
             srStateTex,
-            vec2i(i32(cacheIdx % srStateWidth), i32(cacheIdx / srStateWidth)),
+            vec2i(i32(srRow % srStateWidth), i32(srRow / srStateWidth)),
             0
         ).r * 255.0 + 0.5
     ) & 7u;
     output.srState = srStateValue;
-    output.srSplatIndex = cacheIdx;
+    output.srSplatIndex = srRow;
     // 删除点：隐藏时整点丢弃。**拾取模式也一样**（与 per-instance 的 PICK_PASS 分支同义：
     // "删掉且不显示"的点不该被拾取到），所以这一条不再放在 PICK_PASS 守卫里。
     if ((srStateValue & 4u) != 0u && uniform.srShowDeleted < 0.5) {
