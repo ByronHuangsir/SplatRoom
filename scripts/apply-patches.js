@@ -164,9 +164,12 @@ const srMarker = 'SplatRoom patch 5';
 //    下一步加固方向：复用条件再加"上一次排序用的就是**同一个 worldState 对象**"（身份比较）
 //    + 检测到可见点数/间接参数变化时强制重排，然后再跑那三个套件；绿了才把默认值改回来。
 //    打开方式：`set SPLATROOM_PATCH5=1` 后再跑 node scripts/apply-patches.js。
-const patch5Enabled = process.env.SPLATROOM_PATCH5 === '1';
-if (!patch5Enabled) {
-    console.log('[SKIP] Patch 5: disabled by default (fixes ② but breaks 3 suites; set SPLATROOM_PATCH5=1 to try)');
+const patch5EnabledRaw = process.env.SPLATROOM_PATCH5 === '1';
+if (!patch5EnabledRaw) {
+    console.log('[SKIP] Patch 5: disabled by default (superseded by patch 7; set SPLATROOM_PATCH5=1 only for A/B)');
+} else if (fs.existsSync(hybridPath) && fs.readFileSync(hybridPath, 'utf8').includes('SplatRoom patch 7')) {
+    // patch 7 已经改了同样的两处锚点，再打 patch 5 会失配 ⇒ 直接跳过
+    console.log('[SKIP] Patch 5: superseded by patch 7 (anchors overlap)');
 } else if (fs.existsSync(hybridPath) && fs.existsSync(managerPath)) {
     let hy = fs.readFileSync(hybridPath, 'utf8');
     let mg = fs.readFileSync(managerPath, 'utf8');
@@ -301,6 +304,140 @@ if (tieBits > 0 && fs.existsSync(projChunk)) {
     }
 } else {
     console.log('[SKIP] Patch 6: disabled (SPLATROOM_TIE_BITS=0)');
+}
+
+// Patch 7（**性能补丁**，2026-10-02 深夜第四轮）：相机与世界都没变时，跳过最贵的"投影 + 排序"两步
+//
+// 背景：② 定案时实测渲染器**每帧**都会重排 + 重投影（静止时 49.75 次/秒，而 manager 说 sortNeeded=false）。
+//       在 20M 模型上这就是"画笔圆圈不跟手"的主因：光标事件延迟 p50 **49.1ms**、120/120 次超 33ms、
+//       rAF 间隔 71.5ms（≈14fps）。
+// 与 patch 5 的区别（patch 5 的教训）：**间接绘制的槽位是每帧顺序分配的**（`getIndirectDrawSlot` 的
+//       `_indirectDrawNextIndex` 每帧清零），跳过分配会让我们的槽位被同一帧里别的 pass 覆盖 ⇒ 模型不画。
+//       所以这里**保留**每帧的槽位获取与 `writeIndirectArgs`，只跳过 `projector.dispatch()`（投影 compute）
+//       与 `gpuSorter.sortIndirect()`（基数排序）—— 两者都是 O(可见点数) 的重活，且结果在"什么都没变"时
+//       与上一帧逐位相同。
+// 复用条件（严格）：manager 说不需要排序 + 上一次排序确实做过 + lastState 就是当前版本 +
+//       视口/alphaClip/立体/版本/激活点数/相机位姿（逐位）全部没变。任何一项变化都照旧走完整路径。
+const perfMarker = 'SplatRoom patch 7';
+const reuseMarker = 'SplatRoom patch 7 (reuse)';
+
+// ⚠️ 默认**关闭**（`SPLATROOM_PATCH7=1` 才打）：效果是真的（20M 模型光标事件延迟 p50
+//    49.1ms → **15.6ms**、120/120 次超 33ms → **1/120**、rAF 间隔 71.5ms → 16.6ms），
+//    但会让 verify-selection-overlay / verify-edit-grade-crop / verify-effects 各 3 失败
+//    （症状：导入后模型**完全不画**，只剩背景 mean 8）。
+//    原因（本轮查清，也是 patch 5 同样失败的原因）：**绘制参数是被"排序"那一步写进间接缓冲的** ——
+//    `projector.writeIndirectArgs()` 只写排序用的 dispatch 参数，真正给绘制用的
+//    `DrawIndexedIndirectArgs`（instanceCount/vertexCount…）由 sortIndirect 那条链路写；而
+//    `getIndirectDrawSlot()` 每帧重新分配槽位 ⇒ 跳过排序，本帧的新槽位就永远没有参数 ⇒ 不画。
+//    要落地必须再加一个"只写绘制参数"的小 compute pass（或把参数缓存到 CPU 侧重写），属下一轮工作。
+const patch7Enabled = process.env.SPLATROOM_PATCH7 === '1';
+
+if (!patch7Enabled) {
+    console.log('[SKIP] Patch 7: disabled by default (needs an args-only pass; set SPLATROOM_PATCH7=1 for A/B)');
+} else if (fs.existsSync(hybridPath) && fs.existsSync(managerPath)) {
+    let hy = fs.readFileSync(hybridPath, 'utf8');
+    let mg = fs.readFileSync(managerPath, 'utf8');
+    if (hy.includes(perfMarker)) {
+        console.log('[OK] Patch 7 already applied: skip projector + sort when nothing changed');
+    } else {
+        // 7a: 签名 + 复用判定（放在 prepareRenderView 里，缓存也在这里更新）
+        const sigFrom = '\tprepareRenderView(world, worldState, params) {';
+        const sigTo = '\tprepareRenderView(world, worldState, params, sortNeeded = true) {';
+        const callFrom = [
+            '\t\tconst sortedIndices = this.sortAndProjectForCamera(',
+            '\t\t\tworld,',
+            '\t\t\tworldState,',
+            '\t\t\tcameraNode,',
+            '\t\t\tviewportWidth,',
+            '\t\t\tviewportHeight,',
+            '\t\t\tMath.max(ALPHA_VISIBILITY_THRESHOLD, params.alphaClipForward),',
+            '\t\t\tfalse,',
+            '\t\t\tisStereo,',
+            '\t\t\tparams',
+            '\t\t);',
+            '\t\tif (!sortedIndices) return false;'
+        ].join('\n');
+        const callTo = [
+            '\t\t// ' + reuseMarker + ': 只有真的变了才重投影 + 重排序（见 scripts/apply-patches.js 的说明）。',
+            '\t\tconst srPos = cameraNode.getPosition();',
+            '\t\tconst srFwd = cameraNode.forward;',
+            '\t\tconst srSortKey = viewportWidth + "x" + viewportHeight + "|" + params.alphaClipForward + "|" +',
+            '\t\t\t(isStereo ? 1 : 0) + "|" + worldState.version + "|" + worldState.totalActiveSplats + "|" +',
+            '\t\t\tsrPos.x + "," + srPos.y + "," + srPos.z + "|" + srFwd.x + "," + srFwd.y + "," + srFwd.z;',
+            '\t\tconst srReuse = !sortNeeded && !!this._srSortedIndices && !!worldState.sortedBefore &&',
+            '\t\t\tworldState.version === world.currentVersion && this._srSortKey === srSortKey;',
+            '\t\tconst sortedIndices = this.sortAndProjectForCamera(',
+            '\t\t\tworld,',
+            '\t\t\tworldState,',
+            '\t\t\tcameraNode,',
+            '\t\t\tviewportWidth,',
+            '\t\t\tviewportHeight,',
+            '\t\t\tMath.max(ALPHA_VISIBILITY_THRESHOLD, params.alphaClipForward),',
+            '\t\t\tfalse,',
+            '\t\t\tisStereo,',
+            '\t\t\tparams,',
+            '\t\t\tsrReuse',
+            '\t\t);',
+            '\t\tif (!sortedIndices) return false;',
+            '\t\tthis._srSortedIndices = sortedIndices;',
+            '\t\tthis._srSortKey = srSortKey;'
+        ].join('\n');
+        // 7b: sortAndProjectForCamera 多一个参数 + 在重活之前短路
+        const fnFrom = '\tsortAndProjectForCamera(world, worldState, cameraNode, viewportWidth, viewportHeight, alphaClip, pickMode, isStereo, params) {';
+        const fnTo = '\tsortAndProjectForCamera(world, worldState, cameraNode, viewportWidth, viewportHeight, alphaClip, pickMode, isStereo, params, srReuse = false) {';
+        const skipFrom = [
+            '\t\tif (pickMode) {',
+            '\t\t\tthis.device.submit();',
+            '\t\t}',
+            '\t\treturn gpuSorter.sortIndirect('
+        ].join('\n');
+        const skipTo = [
+            '\t\tif (srReuse) {',
+            '\t\t\t// ' + perfMarker + ': 投影与排序的结果与上一帧逐位相同 ⇒ 跳过这两步 O(n) 重活。',
+            '\t\t\t// 绘制参数不需要在这里补写：上面那次 projector.writeIndirectArgs(...) 每帧都会跑',
+            '\t\t\t// （它读的是 compaction 刚写好的 numSplatsBuffer + sortIndirectInfo），所以本帧的',
+            '\t\t\t// indirectDrawSlot 一定拿到了正确的参数 —— 这正是 patch 5 缺的那一步。',
+            '\t\t\treturn this._srSortedIndices;',
+            '\t\t}',
+            '\t\tif (pickMode) {',
+            '\t\t\tthis.device.submit();',
+            '\t\t}',
+            '\t\treturn gpuSorter.sortIndirect('
+        ].join('\n');
+        const cnt = (s, n) => s.split(n).length - 1;
+        // 7b-2: 投影 compute 本身也要跳过 —— 它在 writeIndirectArgs **之前**执行，
+        // 只在后面短路的话，每帧最贵的那部分（对全部可见高斯的投影）照样在跑。
+        const dispatchFrom = '\t\tprojector.dispatch({';
+        const dispatchTo = '\t\tif (!srReuse) projector.dispatch({';
+        const problems = [];
+        if (cnt(hy, sigFrom) !== 1) problems.push('sig=' + cnt(hy, sigFrom));
+        if (cnt(hy, callFrom) !== 1) problems.push('call=' + cnt(hy, callFrom));
+        if (cnt(hy, fnFrom) !== 1) problems.push('fn=' + cnt(hy, fnFrom));
+        if (cnt(hy, skipFrom) !== 1) problems.push('skip=' + cnt(hy, skipFrom));
+        if (cnt(hy, dispatchFrom) !== 1) problems.push('dispatch=' + cnt(hy, dispatchFrom));
+        if (problems.length) {
+            console.log('[FAIL] Patch 7: renderer anchors not unique (' + problems.join(' ') + ') - skipping');
+            process.exitCode = 1;
+        } else {
+            hy = hy.replace(sigFrom, sigTo).replace(callFrom, callTo).replace(fnFrom, fnTo)
+                .replace(dispatchFrom, dispatchTo).replace(skipFrom, skipTo);
+            fs.writeFileSync(hybridPath, hy);
+            console.log('[APPLIED] Patch 7a: prepareRenderView computes the reuse key and caches the order');
+            console.log('[APPLIED] Patch 7b: projector.dispatch + radix sort are skipped on reuse');
+        }
+        // 7c: manager 把 sortNeeded 透过去
+        const mgFrom = '\t\t\t\tthis.renderer.prepareRenderView(this.world, lastState, this._fillRenderViewParams());';
+        const mgTo = '\t\t\t\tthis.renderer.prepareRenderView(this.world, lastState, this._fillRenderViewParams(), this.sortNeeded);';
+        if (cnt(mg, mgFrom) === 1) {
+            fs.writeFileSync(managerPath, mg.replace(mgFrom, mgTo));
+            console.log('[APPLIED] Patch 7c: manager passes sortNeeded into prepareRenderView');
+        } else if (mg.includes('prepareRenderView(this.world, lastState, this._fillRenderViewParams(), this.sortNeeded)')) {
+            console.log('[OK] Patch 7c already applied');
+        } else {
+            console.log('[FAIL] Patch 7c: manager anchor not found - the per-frame work stays');
+            process.exitCode = 1;
+        }
+    }
 }
 
 console.log('[SplatRoom] Patches complete.');
