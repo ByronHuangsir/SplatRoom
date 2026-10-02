@@ -229,6 +229,32 @@ class Scene {
     readonly gpuFrameTiming: GpuFrameTiming;
     // 交互期降级策略（运动时降渲染分辨率，停手恢复）。见 src/core/motion-quality.ts。
     readonly motionQuality = new MotionQuality();
+
+    /**
+     * 指针是否正按在画布上（工具交互中：涂抹 / 框选 / 拖手柄）。
+     * 用途见 `motionQuality.update(...)` 那处调用：相机不动时的工具交互也要允许降级，
+     * 否则大模型上画笔圆圈跟不上手（实测 20M：事件延迟 p50 48.9ms、rAF 71.6ms）。
+     */
+    private _pointerActive = false;
+    private _pointerListenersBound = false;
+
+    /** 挂一次全局指针监听（懒绑定，第一次 update 时执行）。 */
+    private bindPointerActivity() {
+        if (this._pointerListenersBound) return;
+        if (typeof window === 'undefined') return;
+        this._pointerListenersBound = true;
+        // ⚠️ 挂 **window + 捕获阶段**，不要挂画布：事件目标可能是画布之上的容器/覆盖层
+        // （实测挂在画布上时 pointerdown 收不到，降级条件一直为 false）。
+        window.addEventListener('pointerdown', () => {
+            this._pointerActive = true;
+        }, { capture: true, passive: true });
+        const release = () => {
+            this._pointerActive = false;
+        };
+        window.addEventListener('pointerup', release, { capture: true, passive: true });
+        window.addEventListener('pointercancel', release, { capture: true, passive: true });
+        window.addEventListener('blur', release, { passive: true });
+    }
     // 浏览态帧预算（M3-3）：浏览态下按实测 rAF 帧时选择"比全分辨率粗几档"的代理层，
     // 目标是 60 fps；编辑态恒为 0（全分辨率）。见 src/core/browse-budget.ts。
     readonly browseBudget = new BrowseBudget();
@@ -1375,12 +1401,23 @@ class Scene {
             qualityEnabled && (globalThis as any).__SPLATROOM_MOTION_CONTRIBUTION__ !== false;
 
         this.gpuFrameTiming.noteFrame(this.cameraMotion.moving);
+        this.bindPointerActivity();
 
         // 分级策略：模型规模/设备档位变了才重设阶梯与门槛（见 src/core/splat-tier.ts）
         this.applyTierPolicy();
 
         const qualityChanged = this.motionQuality.update(
-            this.cameraMotion.moving,
+            // ⚠️ 工具交互（在画布上按住指针：涂抹/框选/拖拽手柄）**也要**算"在交互"。
+            // 为什么（2026-10-02 实测，`_tmp/probe-paint-lag.cjs`）：降级条件原本是 `... && moving`
+            // （见 core/motion-quality.ts:257），只有**相机在动**才降级。而画笔/选框恰恰是
+            // **相机不动**时操作的 ⇒ 20M 模型上实测：鼠标按住涂抹时逐帧 rAF **71.6ms（≈14fps）**、
+            // pointermove 事件延迟 p50 **48.9ms（61/61 次超 33ms）**，画笔圆圈肉眼可见地跟不上手；
+            // 同期的 `motionQuality.autoEngaged` 已经是 **true**（系统知道慢），只差这一个条件。
+            // 安全性：自动降级仍受 `autoEngaged` 把关（小模型/够快的机器不会进这条），
+            // 所以这里只是把"已经武装好的降级"在工具交互期间放行。
+            // 逃生门：`window.__SPLATROOM_POINTER_QUALITY__ = false` 可关掉这条附加条件。
+            (this.cameraMotion.moving ||
+                ((globalThis as any).__SPLATROOM_POINTER_QUALITY__ !== false && this._pointerActive)),
             this.splatCount(),
             this.gpuFrameTiming.supported,
             // 用"最近若干静止帧的峰值"而不是最后一帧：本应用按需渲染，空闲时可能只出几帧空转帧
