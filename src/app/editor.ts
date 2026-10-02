@@ -43,6 +43,42 @@ const RINGS_SURFACE_PCT = 0.05;
 // ---- crop box events (SplatRoom) ------------------------------------------
 let _cropBox: CropBox | null = null;
 
+/**
+ * 把相机取景到"刚好框住裁剪盒"（用户 2026-10-02 建议②的"缩放动作"）。
+ *
+ * 为什么需要：`initializeFromSplats` 给出的是**包住整个模型**的盒，而模型尺度常常远大于当前视野
+ * （用户那份扫描件 ~8600 单位宽）。沿用旧行为时，用户必须把相机拉远才看得见盒子的边 —— 而拉远之后
+ * 引擎会按"最小像素尺寸"（默认 2 px）成片剔除高斯，模型反而看不见了（现场实测画出的高斯数
+ * 754,834 → 7,701，24 倍塌陷）。所以初始化后判断一次：**盒子不在视野里就把相机取景到框住它**。
+ *
+ * 只做"该做时才做"：盒子的包围球在当前视野内放得下、且相机不在盒内时，**不动相机**（幂等）。
+ * 逃生门：`window.__SPLATROOM_CROP_ZOOM__ = false` 关闭这个自动缩放。
+ */
+const fitCameraToCropBox = (scene: Scene, box: CropBox) => {
+    if ((globalThis as any).__SPLATROOM_CROP_ZOOM__ === false) {
+        return;
+    }
+    const cc = scene.camera?.camera as any;
+    if (!cc?.entity) {
+        return;
+    }
+    const center = box.center.clone();
+    const radius = box.extent.length();            // extent 是半长 ⇒ 这是半对角线
+    if (!Number.isFinite(radius) || radius <= 0) {
+        return;
+    }
+    const camPos = cc.entity.getPosition();
+    const dist = camPos.distance(center);
+    const fovY = Math.tan((cc.fov * Math.PI / 180) * 0.5);
+    const halfH = fovY * Math.max(dist, 1e-3);
+    const halfW = halfH * (cc.aspectRatio || 1);
+    const fits = radius <= Math.min(halfH, halfW) * 0.8;
+    const inside = dist < radius * 1.2;            // 相机在盒内（"太靠近中心"）
+    if (!fits || inside) {
+        scene.camera.focus({ focalPoint: center, radius: radius * 1.15, speed: 0 });
+    }
+};
+
 const registerCropBoxEvents = (events: Events, getScene: () => Scene | null) => {
     events.function('cropBox', () => _cropBox);
     events.function('cropBox.getState', () => (_cropBox ? _cropBox.toConfig() : null));
@@ -55,6 +91,9 @@ const registerCropBoxEvents = (events: Events, getScene: () => Scene | null) => 
         }
         const ok = _cropBox.initializeFromSplats(splats);
         if (!ok) _cropBox.setState(new Vec3(0, 0, 0), new Vec3(1, 1, 1), new Quat());
+        // 建议②：初始盒要在当前视角内看得见（必要时做一次取景缩放），否则用户得先拉远 —— 一拉远
+        // 模型就被最小像素剔除抹掉了。见上面 fitCameraToCropBox 的说明。
+        fitCameraToCropBox(scene, _cropBox);
         events.fire('cropBox.changed');
     });
     events.on('cropBox.setVisible', (v: boolean) => {

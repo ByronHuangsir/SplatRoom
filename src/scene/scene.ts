@@ -1102,6 +1102,48 @@ class Scene {
     // 静止值 = 引擎默认（MIN_CONTRIBUTION_BASE = 3）：v2 **不改变静止画面**，运动期只往上加，
     // 停手后精确回到基线。和 applyRenderScale 一样，导出/360/快照（lockedRenderMode）期间不碰：
     // 导出动画相机一直在动，若此时抬高剔除，导出视频会丢淡 splat。
+    /**
+     * 静止观察档的"最小像素尺寸剔除"阈值（引擎默认 2 px，见 playcanvas gsplat-params.js:44）。
+     * 交互期（相机在动 / 降级框架已接管）一律用引擎默认值 —— 放宽只服务"停下来看"这个场景。
+     */
+    private static readonly MIN_PIXEL_SIZE_ENGINE_DEFAULT = 2;
+    private static readonly MIN_PIXEL_SIZE_OBSERVE = 1;
+    private _appliedMinPixelSize = NaN;
+
+    /** 当前该施加的阈值（含逃生门）。 */
+    private observeMinPixelSize(): number {
+        const override = (globalThis as any).__SPLATROOM_MIN_PIXEL_SIZE__;
+        if (override === false) {
+            return Scene.MIN_PIXEL_SIZE_ENGINE_DEFAULT;
+        }
+        const observe = typeof override === 'number' && Number.isFinite(override) && override >= 0 ?
+            override : Scene.MIN_PIXEL_SIZE_OBSERVE;
+        return (this.cameraMotion.moving || this.motionQuality.engaged || this.lockedRenderMode) ?
+            Scene.MIN_PIXEL_SIZE_ENGINE_DEFAULT : observe;
+    }
+
+    /**
+     * 施加最小像素尺寸剔除阈值（与 `applyMinContribution` 同一套记账约定：
+     * 只在 unified 生效、锁定期跳过并记账、幂等早退）。
+     */
+    private applyMinPixelSize(value: number) {
+        if (!this._unifiedMaterialEnabled) {
+            return;
+        }
+        if (this.lockedRenderMode) {
+            this._appliedMinPixelSize = Scene.MIN_PIXEL_SIZE_ENGINE_DEFAULT;
+            return;
+        }
+        if (Math.abs(value - this._appliedMinPixelSize) < 1e-6) {
+            return;
+        }
+        this._appliedMinPixelSize = value;
+        const gsplat = (this.app.scene as any)?.gsplat;
+        if (gsplat) {
+            gsplat.minPixelSize = value;
+        }
+    }
+
     private applyMinContribution(value: number) {
         if (!this._unifiedMaterialEnabled) {
             return;
@@ -1346,6 +1388,15 @@ class Scene {
         // 贡献剔除：与分辨率不同，它的步进频率高（50 ms），不能只在 qualityChanged 时施加 ——
         // 每帧幂等地对一次当前值即可（未变化时早退，代价是浮点比较）
         this.applyMinContribution(this.motionQuality.minContribution);
+
+        // 静止观察档：放宽"最小像素尺寸剔除"（引擎默认 2 px）。为什么需要（2026-10-02 现场实测）：
+        // 用户那份 2000 万点模型尺度 ~8600 单位，为了看到裁剪盒必须把相机拉远；而拉远后绝大多数
+        // 高斯的投影尺寸跌到 2 px 以下被引擎成片剔除 —— 现场实测画出的高斯数
+        // 754,834 → 153,682 → 93,018 → 44,926 → 17,686 → **7,701**（24 倍塌陷），模型因此"看不见了"，
+        // 拉近才回来。静止时放宽这个阈值不花交互帧的代价（要求交互时仍是引擎默认）。
+        // 逃生门：`window.__SPLATROOM_MIN_PIXEL_SIZE__ = <number>` 覆盖静止档；
+        //         置为 `false` 完全关闭这条放宽（回到引擎默认，行为与之前一致）。
+        this.applyMinPixelSize(this.observeMinPixelSize());
 
         // 停手后的收尾：给每个 splat 补一帧"干净排序"，让静止画面用的是最终位姿的顺序。
         // 为什么要显式做：`_sortSettleAt` 那套启发式只在"被闸门挡下的帧"里才会武装，
