@@ -23,6 +23,7 @@ import { prepareSlot, prewarmSplats, workerAnalyze, workerSelect } from '../spla
 import { Splat } from '../splat/splat';
 import { writeSplatFile } from '../splat/splat-serialize';
 import { State, SelectionOp } from '../splat/splat-state';
+import { resetUnifiedEffect } from '../splat/unified-material';
 import { i18n } from '../ui/localization';
 
 const removeExtension = (filename: string) => {
@@ -91,6 +92,9 @@ const registerCropBoxEvents = (events: Events, getScene: () => Scene | null) => 
         if (_cropBox) {
             if (scene) scene.remove(_cropBox); _cropBox = null;
         }
+        // 同一个理由：清空场景时把特效状态复位，避免它跨会话残留
+        // （见 `scene.elementAdded` 里那段说明与 `_tmp/probe-effect-fade.cjs` 的实测）。
+        if (scene) resetUnifiedEffect(scene);
     });
 };
 
@@ -285,6 +289,17 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     // Skip if there were already other splats in the scene (undo/redo, merge).
     events.on('scene.elementAdded', (element: Element) => {
         if (element.type === ElementType.splat) {
+            // 特效状态复位（2026-10-02 实测的"模型一直发暗/几乎看不见"根因）：
+            // `currentEffect.fade` 是模块级单例、全仓没有别的复位点，一旦上一次粒子特效停在
+            // 淡出末尾（fade = 0），**之后载入的每个模型都会一直乘 0 的 alpha**，UI 里救不回来。
+            // 实测（`_tmp/probe-effect-fade.cjs`）：基线 litPct 94.64% → 特效停在末尾 33.76%
+            // → **再导入一个模型仍 33.76%**（fade 恒为 0）→ 手动复位 94.88%。
+            // ⚠️ 必须放在**每一次**新增 splat 上（不能只在首个模型那条分支里）：第二次导入时
+            // 场景里已经有元素，`splatCount <= 1` 不成立，复位就被跳过了（第一版就踩了这个）。
+            // 主线侧同一份状态落在材质的 `uEffectFade` 上，`setScatterProgress(0)` 两边都写。
+            (element as Splat).setScatterProgress?.(0);
+            resetUnifiedEffect(scene);
+
             const splatCount = scene.getElementsByType(ElementType.splat).length;
             if (splatCount <= 1) {
                 scene.camera.focus();

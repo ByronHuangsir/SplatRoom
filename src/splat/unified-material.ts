@@ -171,6 +171,31 @@ export function getUnifiedEffect() {
     return currentEffect;
 }
 
+/**
+ * 把特效状态复位成中性（`fade = 1`、`mode = 0`、`progress = 0`）并写进 unified 材质。
+ *
+ * 为什么必须有这个复位点（2026-10-02 实测，`_tmp/probe-effect-fade.cjs`）：
+ * `currentEffect` 是**模块级单例**，只有 `setUnifiedEffect` 写它（唯一调用者是
+ * `Splat.setScatterProgress`），而 scene 钩子**每帧**把它写回材质、片元里
+ * `a = a * clamp(srEffectFade, 0, 1)`。于是**一次特效停在淡出末尾（fade = 0）之后，
+ * 此后打开的每一个模型都会一直是暗的/几乎不可见，且 UI 里没有任何办法恢复**。
+ * 实测：基线 litPct 94.64% → 特效停在末尾 33.76% → **再导入新模型仍然 33.76%**
+ * （fade 一直为 0）→ 手动复位后 94.88%。
+ * 复位时机：清空场景（`scene.clear`）与载入第一个 splat 时（见 `app/editor.ts`）。
+ */
+export function resetUnifiedEffect(scene: any): boolean {
+    currentEffect = {
+        mode: 0,
+        time: 0,
+        progress: 0,
+        radius: 1,
+        center: [0, 0, 0],
+        color: [1, 1, 1],
+        fade: 1
+    };
+    return setUnifiedEffect(scene, {});
+}
+
 /** 更新特效状态并写进 unified 材质（`Splat.setScatterProgress` 调用）。 */
 export function setUnifiedEffect(scene: any, patch: Partial<typeof currentEffect>): boolean {
     currentEffect = { ...currentEffect, ...patch };
