@@ -1,9 +1,9 @@
 {
   "name": "splatroom",
-  "version": "3.23.74",
-  "author": "闁硅棄瀚總鏍暜閸儳鐭婼ir <1924705842@qq.com>",
+  "version": "3.23.75",
+  "author": "摄影师黄Sir <1924705842@qq.com>",
   "homepage": "https://github.com/photographer-huangsir/splatroom",
-  "description": "3D Gaussian Splat Editor - 閻犲鍟虫竟濠冪▔鎼粹剝鍊甸柡鍫㈠枎娴兼劖鎷呭鍕偊",
+  "description": "3D Gaussian Splat Editor - 调色与后期工作流",
   "keywords": [
     "playcanvas",
     "ply",

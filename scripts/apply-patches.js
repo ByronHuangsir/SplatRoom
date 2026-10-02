@@ -196,16 +196,20 @@ if (!patch5Enabled) {
             '\t\t// 引擎每帧都会调用这里，而 sortAndProjectForCamera 会重新分配原子槽位；槽位次序一变，',
             '\t\t// 并列键（实测可见点的 7.13%）的名次就跟着变 —— 薄壁模型前后壁因此逐帧互换。',
             '\t\t// 复用条件必须**极窄**（第一版只比 version/count，结果导入后某些帧该排未排 ⇒ 间接绘制',
-            '\t\t// 参数一直是空的、模型半透明/不出现，三个套件立刻变红）：',
-            '\t\t//   (a) manager 说不需要排序，(b) 上一次排序确实做过，(c) 世界版本/激活点数没变，',
-            '\t\t//   (d) 相机位姿**逐位相同** —— 位姿一变就照旧排序，所以不会漏掉任何合法的重排。',
+            '\t\t// 参数一直是空的、模型半透明/不出现，三个套件立刻变红；第二版补了"相机位姿逐位相同"，',
+            '\t\t// 仍然红 ⇒ 真正的漏洞是：prepareRenderView 拿到的 lastState 比 world.currentVersion',
+            '\t\t// **慢一帧**，导入模型的过渡帧里旧 key 仍然匹配，于是复用了"空世界"算出来的次序。',
+            '\t\t// 因此复用要求：(a) manager 说不需要排序，(b) 上一次排序确实做过，',
+            '\t\t//   (c) **lastState 就是当前版本**（过渡帧一律重排），(d) 版本/点数/视口没变，',
+            '\t\t//   (e) 相机位姿逐位相同 —— 位姿一变就照旧排序，不会漏掉任何合法重排。',
             '\t\tconst srPos = cameraNode.getPosition();',
             '\t\tconst srFwd = cameraNode.forward;',
             '\t\tconst srSortKey = viewportWidth + "x" + viewportHeight + "|" + params.alphaClipForward + "|" +',
             '\t\t\t(isStereo ? 1 : 0) + "|" + worldState.version + "|" + worldState.totalActiveSplats + "|" +',
             '\t\t\tsrPos.x + "," + srPos.y + "," + srPos.z + "|" + srFwd.x + "," + srFwd.y + "," + srFwd.z;',
+            '\t\tconst srSettled = worldState.version === world.currentVersion;',
             '\t\tlet sortedIndices;',
-            '\t\tif (!sortNeeded && this._srSortedIndices && worldState.sortedBefore && this._srSortKey === srSortKey) {',
+            '\t\tif (!sortNeeded && srSettled && this._srSortedIndices && worldState.sortedBefore && this._srSortKey === srSortKey) {',
             '\t\t\tsortedIndices = this._srSortedIndices;',
             '\t\t} else {',
             '\t\t\tsortedIndices = this.sortAndProjectForCamera(',
@@ -248,6 +252,55 @@ if (!patch5Enabled) {
     }
 } else {
     console.log('[SKIP] Patch 5: engine files not found');
+}
+
+// Patch 6（**正确性补丁**，2026-10-02 深夜第三轮）：给排序键追加**确定性的并列决胜位**
+//
+// 症状：薄壁模型（Spirula 陶钵）**相机一动不动**时看进钵内的区域逐帧闪烁（实测 el=+35
+//       3.0~4.3%/帧、maxΔ 126~238），而那些区域在 SuperSplat 里被前面的壁挡住看不见。
+// 根因（已定案，证据见 _tmp/probe-resort-census.cjs / probe-tie-census.cjs）：
+//   · 渲染器每帧都会重排 + 重投影（实测静止时 49.75 次/秒，而 manager 自己说 sortNeeded=false）；
+//   · 每次重排用 atomicAdd **重新分配槽位**，而可见点里 **7.13% 的排序键并列**；
+//   · GPU 基数排序是稳定排序 ⇒ 并列项保持"输入次序"=槽位次序 ⇒ 薄壁前后壁逐帧互换。
+// 修法：键整体左移 SR_TIE_BITS 位后再或上源行号低位。**相对次序完全不变**（不会打乱 bin 的先后），
+//       只是把并列拆成确定次序 —— 于是"每帧重排"不再改变画面。
+// 代价：键上限变成 2^SR_TIE_BITS 倍，必须仍能塞进排序器的位宽。
+// ⚠️ 并列只被拆开 2^SR_TIE_BITS 分之一：4 位 ⇒ 约 93.75% 的并列被确定化（残余待实测）。
+// 备选路线（已试过、否决）：patch 5 跳过冗余重排虽然把闪烁打到 0，但**间接绘制的槽位是每帧顺序分配的**，
+// 跳过排序会让我们的槽位被同一帧里别的 pass 覆盖 ⇒ 模型直接不画（三个套件全红）。见 patch 5 的注释。
+// 默认 8 位（实测：8 位 + 自保护后，Spirula 看进钵内的逐帧变化 3.0~4.3% → **0%**，且四个套件全绿；
+// 4 位只能拆掉 93.75% 的并列，残余 0.16~0.85%/帧）。可用 SPLATROOM_TIE_BITS 覆盖。
+const tieBits = parseInt(process.env.SPLATROOM_TIE_BITS || '8', 10);
+const tieMarker = 'SplatRoom patch 6';
+const projChunk = path.join(pcRoot, 'scene', 'shader-lib', 'wgsl', 'chunks', 'gsplat', 'compute-gsplat-projector.js');
+
+if (tieBits > 0 && fs.existsSync(projChunk)) {
+    const body = fs.readFileSync(projChunk, 'utf8');
+    const keyLine = '\t\tsortKey = u32(binWeights[bin].base + binWeights[bin].divider * binFrac);';
+    if (body.includes(tieMarker)) {
+        console.log('[OK] Patch 6 already applied: deterministic tie-break in the sort key');
+    } else if (body.split(keyLine).length - 1 !== 1) {
+        console.log('[FAIL] Patch 6: sortKey anchor not found - ties stay nondeterministic');
+        process.exitCode = 1;
+    } else {
+        const replacement = [
+            keyLine,
+            '\t\t// ' + tieMarker + ': 追加确定性的并列决胜位（源行号低位）。',
+            '\t\t// 键的相对次序不变（整体左移 ' + tieBits + ' 位后再或上低位），只是把并列拆开：',
+            '\t\t// 否则稳定排序会保留"每帧由 atomicAdd 重新分配的槽位次序"，薄壁前后壁逐帧互换。',
+            '\t\t// ⚠️ 自保护：超大模型（键可能超过 2^24）左移会溢出 u32 ⇒ 那种情况**退回不位移**',
+            '\t\t//（并列仍在、闪烁仍在，但绝不会出现错误排序/画面崩坏）。',
+            '\t\t// 实测：776k 高斯时键最大约 1.16e7（< 2^24）⇒ 位移生效；',
+            '\t\t//       20M 夹具上 numBits 更大（键可达 2^25 量级）⇒ 自动退回。',
+            '\t\tlet srKey0: u32 = u32(binWeights[bin].base + binWeights[bin].divider * binFrac);',
+            '\t\tlet srShifted: u32 = (srKey0 << ' + tieBits + 'u) | (projected.splatId & ' + ((1 << tieBits) - 1) + 'u);',
+            '\t\tsortKey = select(srShifted, srKey0, srKey0 > ' + (0xFFFFFFFF >>> tieBits) + 'u);'
+        ].join('\n');
+        fs.writeFileSync(projChunk, body.replace(keyLine, replacement));
+        console.log('[APPLIED] Patch 6: sort key << ' + tieBits + ' + (splatId & ' + ((1 << tieBits) - 1) + ')');
+    }
+} else {
+    console.log('[SKIP] Patch 6: disabled (SPLATROOM_TIE_BITS=0)');
 }
 
 console.log('[SplatRoom] Patches complete.');
