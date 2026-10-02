@@ -361,11 +361,24 @@ if (!patch7Enabled) {
             '\t\t// ' + reuseMarker + ': 只有真的变了才重投影 + 重排序（见 scripts/apply-patches.js 的说明）。',
             '\t\tconst srPos = cameraNode.getPosition();',
             '\t\tconst srFwd = cameraNode.forward;',
+            '\t\tconst srCam = cameraNode.camera;',
             '\t\tconst srSortKey = viewportWidth + "x" + viewportHeight + "|" + params.alphaClipForward + "|" +',
             '\t\t\t(isStereo ? 1 : 0) + "|" + worldState.version + "|" + worldState.totalActiveSplats + "|" +',
-            '\t\t\tsrPos.x + "," + srPos.y + "," + srPos.z + "|" + srFwd.x + "," + srFwd.y + "," + srFwd.z;',
+            '\t\t\tsrPos.x + "," + srPos.y + "," + srPos.z + "|" + srFwd.x + "," + srFwd.y + "," + srFwd.z + "|" +',
+            '\t\t\t// ⚠️ 投影相关的一切也必须进 key：fov / near / far / 投影矩阵 / 剔除阈值。',
+            '\t\t\t// 只比位姿的话，导入时应用改了 fov（相机没动）就会复用旧投影 ⇒ 模型画到别处',
+            '\t\t\t// （实测：套件看的那块区域从 99.3% 彩色掉到 3.7%，而全屏 lit 仍有 28~32%）。',
+            '\t\t\tsrCam.fov + "," + srCam.nearClip + "," + srCam.farClip + "|" +',
+            '\t\t\t// ⚠️ **不要**把 projectionMatrix 的 16 个元素放进 key：实测它有末位抖动，',
+            '\t\t\t// 会让复用几乎每帧都失效（20M 的光标延迟 15.7ms 又退回 45ms）。',
+            '\t\t\t// fov/near/far 这三个标量已足够覆盖"导入时改 fov"那类变化。',
+            '\t\t\tparams.minPixelSize + "," + params.minContribution + "," + (params.radialSorting ? 1 : 0);',
             '\t\tconst srReuse = !sortNeeded && !!this._srSortedIndices && !!worldState.sortedBefore &&',
-            '\t\t\tworldState.version === world.currentVersion && this._srSortKey === srSortKey;',
+            '\t\t\tworldState.version === world.currentVersion && this._srSortKey === srSortKey &&',
+            '\t\t\t// ⚠️ 还要认**缓冲对象身份**：导入/格式变化/容量变化时 world.workBuffer 与',
+            '\t\t\t// projector.projCache 会被重建，缓存的次序缓冲属于旧对象 ⇒ 用它绘制就是空的。',
+            '\t\t\t// （补丁 7 第一版就是因为缺这一条，导入后模型完全不画、三个套件红。）',
+            '\t\t\tthis._srBuffer === world.workBuffer && this._srProjCache === this.projector.projCache;',
             '\t\tconst sortedIndices = this.sortAndProjectForCamera(',
             '\t\t\tworld,',
             '\t\t\tworldState,',
@@ -380,7 +393,9 @@ if (!patch7Enabled) {
             '\t\t);',
             '\t\tif (!sortedIndices) return false;',
             '\t\tthis._srSortedIndices = sortedIndices;',
-            '\t\tthis._srSortKey = srSortKey;'
+            '\t\tthis._srSortKey = srSortKey;',
+            '\t\tthis._srBuffer = world.workBuffer;',
+            '\t\tthis._srProjCache = this.projector.projCache;'
         ].join('\n');
         // 7b: sortAndProjectForCamera 多一个参数 + 在重活之前短路
         const fnFrom = '\tsortAndProjectForCamera(world, worldState, cameraNode, viewportWidth, viewportHeight, alphaClip, pickMode, isStereo, params) {';
