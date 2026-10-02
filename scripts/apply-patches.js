@@ -420,6 +420,31 @@ if (!patch7Enabled) {
             '\t\treturn gpuSorter.sortIndirect('
         ].join('\n');
         const cnt = (s, n) => s.split(n).length - 1;
+        // 7d: **深复用** —— 连 compaction（O(可见点数)，20M 上是每帧的大头）也跳过。
+        //     实测：只跳 projector.dispatch + sortIndirect 时，20M 的光标延迟仍 ~47ms，
+        //     而诊断探针显示复用**确实在命中**（projector.dispatch 调用数 = 0）⇒ 剩余开销在
+        //     uploadIntervals + dispatchCompact（对 2×10^7 个条目做压缩）里。
+        //     复用帧里 numSplatsBuffer / sortElementCountBuffer 保持上一帧的值即可（场景没变），
+        //     所以绘制参数依旧正确；槽位仍每帧重新获取（这是 patch 5 的教训）。
+        const deepFrom = '\t\tthis._ensureGpuPipeline();';
+        const deepTo = [
+            '\t\tthis._ensureGpuPipeline();',
+            '\t\tif (srReuse && this.intervalCompaction && this._srSortedIndices) {',
+            '\t\t\t// ' + perfMarker + ' (deep): 跳过 uploadIntervals / frustum culling / dispatchCompact /',
+            '\t\t\t// projector.dispatch / sortIndirect —— 只保留每帧必须的槽位获取与绘制参数写入。',
+            '\t\t\tthis.allocateAndWriteIntervalIndirectArgs(worldState.totalIntervals);',
+            '\t\t\tconst srIc = this.intervalCompaction;',
+            '\t\t\tconst srInfo = gpuSorter.prepareIndirect();',
+            '\t\t\tprojector.writeIndirectArgs(',
+            '\t\t\t\tthis.indirectDrawSlot,',
+            '\t\t\t\tthis.indirectDispatchSlot + 1,',
+            '\t\t\t\tsrIc.numSplatsBuffer,',
+            '\t\t\t\tsrIc.sortElementCountBuffer,',
+            '\t\t\t\tsrInfo',
+            '\t\t\t);',
+            '\t\t\treturn this._srSortedIndices;',
+            '\t\t}'
+        ].join('\n');
         // 7b-2: 投影 compute 本身也要跳过 —— 它在 writeIndirectArgs **之前**执行，
         // 只在后面短路的话，每帧最贵的那部分（对全部可见高斯的投影）照样在跑。
         const dispatchFrom = '\t\tprojector.dispatch({';
@@ -430,12 +455,13 @@ if (!patch7Enabled) {
         if (cnt(hy, fnFrom) !== 1) problems.push('fn=' + cnt(hy, fnFrom));
         if (cnt(hy, skipFrom) !== 1) problems.push('skip=' + cnt(hy, skipFrom));
         if (cnt(hy, dispatchFrom) !== 1) problems.push('dispatch=' + cnt(hy, dispatchFrom));
+        if (cnt(hy, deepFrom) !== 1) problems.push('deep=' + cnt(hy, deepFrom));
         if (problems.length) {
             console.log('[FAIL] Patch 7: renderer anchors not unique (' + problems.join(' ') + ') - skipping');
             process.exitCode = 1;
         } else {
             hy = hy.replace(sigFrom, sigTo).replace(callFrom, callTo).replace(fnFrom, fnTo)
-                .replace(dispatchFrom, dispatchTo).replace(skipFrom, skipTo);
+                .replace(deepFrom, deepTo).replace(dispatchFrom, dispatchTo).replace(skipFrom, skipTo);
             fs.writeFileSync(hybridPath, hy);
             console.log('[APPLIED] Patch 7a: prepareRenderView computes the reuse key and caches the order');
             console.log('[APPLIED] Patch 7b: projector.dispatch + radix sort are skipped on reuse');
