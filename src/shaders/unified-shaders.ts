@@ -365,7 +365,19 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         let alphaClipValue = half(uniform.alphaClipForward);
     #endif
     let clip = min(half(1.0), sqrt(max(half(0.0), log(alpha / alphaClipValue))) * half(0.5));
-    let cornerClipped = cornerUV * f32(clip);
+    var cornerClipped = cornerUV * f32(clip);
+    // ===== 中心点模式（「显示/隐藏 Splat」开关 + Splat 模式 = 中心）=====
+    // 由来（2026-10-02 实测）：unified 通路没有 per-instance 实例（entity.gsplat.instance 为 null，
+    // onPreRender 里直接 "skipped: instance=false"），于是主线那条独立的中心点覆盖层
+    // （splat-overlay.ts，要 instance.sorter / resource 的几张数据纹理）在这里**挂不上**：
+    // 实测 attachedSplat=true 但 orderReady=false、drawPoints=0、entity.enabled=false
+    // ⇒ 点那个按钮画面变化 ≤0.15%，等于死开关。
+    // 就地实现：把每个高斯压成**固定像素大小**的圆点（片元再涂成平坦颜色，见 srCentersSize 分支），
+    // 拾取期不压（拾取要真实覆盖范围）。
+    if (uniform.srCentersSize > 0.0 && uniform.srPickMode < 0.5) {
+        let srAxis: f32 = max(max(length(v1), length(v2)), 1e-4);
+        cornerClipped = cornerUV * clamp(uniform.srCentersSize * 0.5 / srAxis, 0.0, 1.0);
+    }
     // 特效改的是投影位置（见上面 srEffProj 的说明），四边形的缩放按它的 w 来
     let c = vec2f(srEffProj.w) * uniform.viewport_size.zw;
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
@@ -707,6 +719,17 @@ uniform srPickMode: f32;
 // RT1（选区覆盖）的两个消费者语义互斥 —— 描边（outline.ts）要"选中点的高斯 alpha"，
 // 衬底（underlay.ts）要"选中点被扣下的那 20% 颜色"。所以片元必须知道当前是哪一种。
 uniform srOutlineMode: f32;
+// ===== 环模式 / 中心点模式（「Splat 模式」与「显示/隐藏 Splat」两个开关的 **unified 实现**）=====
+// 为什么必须在这里做（2026-10-02 实测）：unified 通路**没有 per-instance 实例**
+// （entity.gsplat.instance 为 null），于是主线那两套实现全都挂不上：
+//   · 环：splat.ts:1873-1880 把 ringSize 设在 per-instance 材质上 ⇒ 那个材质在 unified 里根本不存在；
+//   · 中心点：splat-overlay.ts 的中心点覆盖层要 instance.sorter / resource 的几张数据纹理
+//     ⇒ 实测 attachedSplat=true 但 orderReady=false、drawPoints=0、entity.enabled=false。
+// 结果这四个组合（mode × overlay）在 unified 下画面差 ≤0.34%（等于死开关），而主线是 21~29%。
+// 语义与主线逐字对齐：ringSize>0 时内圈压到 0.05、外圈固定 0.6（splat-shader-wgsl.ts:715-722）。
+// ⚠️ 本文件是模板字符串：注释里**绝不能出现反引号**（本轮又踩了一次，npm run check 的 audit 能拦住）。
+uniform srRingSize: f32;
+uniform srCentersSize: f32;
 
 // 与引擎 normExp 等价（自己定义，避免与自动带入的 chunk 重名）
 fn srNormExp(x: half) -> half {
@@ -868,7 +891,13 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     if (A > half(1.0)) {
         discard;
     }
-    let alpha: half = srNormExp(A) * gaussianColor.a;
+    let srCentres: bool = uniform.srCentersSize > 0.0;
+    var alpha: half = srNormExp(A) * gaussianColor.a;
+    if (srCentres) {
+        // 中心点模式：平坦颜色（覆盖层那种"点"的观感）。主线的覆盖层对再淡的高斯也会画一个点，
+        // 所以下面 alphaClip 的丢弃在中心点模式下要让路。
+        alpha = max(gaussianColor.a, half(0.85));
+    }
 
     #ifdef PICK_PASS
         if (alpha < half(uniform.alphaClip)) {
@@ -895,7 +924,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             #endif
         }
     #else
-        if (alpha < half(uniform.alphaClipForward)) {
+        if (!srCentres && alpha < half(uniform.alphaClipForward)) {
             discard;
         }
         // ===== 拾取模式：把行号写成颜色（id = r | g<<8 | b<<16 | a<<24，与 picker.readIds 一致）=====
@@ -1021,6 +1050,16 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         if ((srState & 4u) != 0u) {
             c = mix(c, vec3f(1.0, 0.25, 0.25), 0.6);
             a = a * 0.4;
+        }
+        // ===== 环模式（与主线 splat-shader-wgsl.ts:715-722 逐字同义）=====
+        // 内圈压暗、外圈固定 0.6 ⇒ 看上去每个高斯成了一枚"环"。主线把这段放在 crop/effect 之后，
+        // 这里也放在最后（否则裁剪淡出会把环一起压掉，两条通路观感就不一致了）。
+        if (uniform.srRingSize > 0.0) {
+            if (A < half(1.0) - half(uniform.srRingSize)) {
+                a = max(0.05, a);
+            } else {
+                a = 0.6;
+            }
         }
         output.color = vec4f(c * a, a);
         // ===== RT1：选区覆盖（描边 / 衬底后处理的输入）=====

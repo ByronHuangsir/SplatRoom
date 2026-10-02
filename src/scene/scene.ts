@@ -1011,6 +1011,13 @@ class Scene {
             // 轮廓选区开关：RT1 的两个消费者语义互斥（描边 vs 衬底），片元必须知道是哪一种。
             // 缺这一项 = RT1 恒空 ⇒ 轮廓开着时两条高亮腿同时断（见 unified-material.ts 的说明）。
             outlineMode: outlineSelection ? 1 : 0,
+            // 环模式 / 中心点模式（unified 侧由我们自己的着色器实现，原因见 unified-shaders.ts 里那段）：
+            // 条件与主线 splat.ts:1859-1880 逐字一致 —— 环要"当前元素是选中元素 + 覆盖层开着 + 模式是 rings"。
+            ringSize: (isSelectedElement && this.camera.renderOverlays &&
+                this.events.invoke('camera.overlay') && this.events.invoke('camera.mode') === 'rings') ? 0.04 : 0,
+            // 中心点模式 = 「显示/隐藏 Splat」开关打开且模式是中心；点直径取 Splat 尺寸（与主线覆盖层同一个值）。
+            centersSize: (this.events.invoke('camera.overlay') && this.events.invoke('camera.mode') === 'centers') ?
+                (this.events.invoke('camera.splatSize') as number) : 0,
             crop: cropParams,
             effect: effectParams
         } : {});

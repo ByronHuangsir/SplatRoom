@@ -83,6 +83,10 @@ export type UnifiedMaterialParams = {
      * 两条高亮腿同时断 = 框选后画面零反馈（用户报障的根因）。
      */
     outlineMode?: number;
+    /** 环模式的环宽（0 = 关）。取值与主线 `splat.ts:1880` 一致（0.04）。 */
+    ringSize?: number;
+    /** 中心点模式的点直径（像素，0 = 关）。对应「显示/隐藏 Splat」开关。 */
+    centersSize?: number;
     /**
      * 拾取模式：0 = 正常出图，1 = **id 拾取**（片元把 splat 行号写成颜色，供
      * `Picker.prepareId` + `readIds` 读回）。缺省沿用当前值（见 `setUnifiedPickMode`），
@@ -527,6 +531,8 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
         pc.setArray(material, 'srSelectedClr', params.selectedClr ?? ZERO4_UNIFIED);
         pc.setArray(material, 'srLockedClr', params.lockedClr ?? ONE4_UNIFIED);
         pc.setScalar(material, 'srOutlineMode', params.outlineMode ?? 0);
+        pc.setScalar(material, 'srRingSize', params.ringSize ?? 0);
+        pc.setScalar(material, 'srCentersSize', params.centersSize ?? 0);
         pc.setScalar(material, 'srShowDeleted', typeof params.showDeleted === 'number' ? params.showDeleted : 0);
         // 拾取模式：调用方没给就**沿用上一次设的值** —— 否则每帧的钩子会把
         // picker 刚刚设好的 id 模式冲回 0，而 picker 的那一遍绘制就出成正常的画了。
