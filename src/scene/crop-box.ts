@@ -41,6 +41,15 @@ const worldMatTmp = new Mat4();
 const bound = new BoundingBox();
 const unitBound = new BoundingBox(new Vec3(0, 0, 0), new Vec3(0.5, 0.5, 0.5));
 const wireColor = new Color(1.0, 0.78, 0.0, 1.0); // amber
+/**
+ * 线框是否参与深度测试。**必须是 false**（2026-10-02 用户实测）：
+ * 盒子经常沉在模型内部（用户把盒子缩小/拉大时更是如此），带深度测试时 12 条边会被高斯挡得
+ * 一个像素都看不见 —— 用户只能靠"把相机拉远到边露出模型轮廓"来找盒子，而这又让模型在画面里
+ * 变成一小团（用户原话："这个显示完全没有参考价值，我无法知道我裁切到什么位置了"）。
+ * 关掉深度测试后，盒子始终可见（X 光式），任何距离/任何盒子大小下都知道自己裁在哪。
+ * 注意：这只影响**线框**的可见性；模型本体的裁切判据完全不变。
+ */
+const wireDepthTest = false;
 
 // default padding added to the auto-fit box so it starts LARGER than the
 // object's bounding box (the user shrinks it down). 0.2 = +20% on each axis
@@ -188,7 +197,7 @@ class CropBox extends Element {
                     wt.transformPoint(unitCorners[i], worldCorners[i]);
                 }
                 for (const [a, b] of cubeEdges) {
-                    this.scene.app.drawLine(worldCorners[a], worldCorners[b], wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(worldCorners[a], worldCorners[b], wireColor, wireDepthTest, this.scene.worldLayer);
                 }
             } else if (this._shape === 'cylinder') {
                 // top + bottom circles (local XZ plane, radius _radius) + 4 meridians.
@@ -207,11 +216,11 @@ class CropBox extends Element {
                     a.set(Math.cos(t0) * rx, h, Math.sin(t0) * rz);
                     b.set(Math.cos(t1) * rx, h, Math.sin(t1) * rz);
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                     // bottom ellipse
                     a.y = -h; b.y = -h;
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                 }
                 // 4 meridians at 90° steps
                 for (let i = 0; i < 4; i++) {
@@ -219,7 +228,7 @@ class CropBox extends Element {
                     a.set(Math.cos(t) * rx, h, Math.sin(t) * rz);
                     b.set(Math.cos(t) * rx, -h, Math.sin(t) * rz);
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                 }
             } else {
                 // ellipsoid: 3 orthogonal great ellipses (XY / XZ / YZ planes)
@@ -238,15 +247,15 @@ class CropBox extends Element {
                     // XY ellipse (rx, ry)
                     a.set(c0 * rx, s0 * ry, 0); b.set(c1 * rx, s1 * ry, 0);
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                     // XZ ellipse (rx, rz)
                     a.set(c0 * rx, 0, s0 * rz); b.set(c1 * rx, 0, s1 * rz);
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                     // YZ ellipse (ry, rz)
                     a.set(0, c0 * ry, s0 * rz); b.set(0, c1 * ry, s1 * rz);
                     wt.transformPoint(a, aw); wt.transformPoint(b, bw);
-                    this.scene.app.drawLine(aw, bw, wireColor, true, this.scene.worldLayer);
+                    this.scene.app.drawLine(aw, bw, wireColor, wireDepthTest, this.scene.worldLayer);
                 }
             }
         }
