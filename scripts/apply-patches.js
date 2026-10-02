@@ -421,14 +421,17 @@ if (!patch7Enabled) {
         ].join('\n');
         const cnt = (s, n) => s.split(n).length - 1;
         // 7d: **深复用** —— 连 compaction（O(可见点数)，20M 上是每帧的大头）也跳过。
-        //     实测：只跳 projector.dispatch + sortIndirect 时，20M 的光标延迟仍 ~47ms，
-        //     而诊断探针显示复用**确实在命中**（projector.dispatch 调用数 = 0）⇒ 剩余开销在
-        //     uploadIntervals + dispatchCompact（对 2×10^7 个条目做压缩）里。
-        //     复用帧里 numSplatsBuffer / sortElementCountBuffer 保持上一帧的值即可（场景没变），
-        //     所以绘制参数依旧正确；槽位仍每帧重新获取（这是 patch 5 的教训）。
-        const deepFrom = '\t\tthis._ensureGpuPipeline();';
+        //     ⚠️ 注入点必须是 `const projector = this.projector;` **之后**：第一版放在
+        //     `_ensureGpuPipeline()` 之后、两个 const 之前 ⇒ 每帧 TDZ ReferenceError ⇒
+        //     渲染被中断（表现为"又快又稳"，其实是没画东西，四个套件全红）。这是本轮的关键教训。
+        //     绘制参数的来源已读清（compute-gsplat-projector-write-indirect-args.js）：
+        //       count = renderCounter[0] → instanceCount = ceil(count / INSTANCE_SIZE)
+        //       numSplatsBuf[0] = sortElementCountBuf[0] = count
+        //     跳过 projector.dispatch() 时 renderCounter 不再被 clear ⇒ 保留上一帧的 count ✓，
+        //     所以复用帧的绘制参数依然正确；槽位仍每帧重新获取（patch 5 的教训）。
+        const deepFrom = '\t\tconst projector = this.projector;';
         const deepTo = [
-            '\t\tthis._ensureGpuPipeline();',
+            '\t\tconst projector = this.projector;',
             '\t\tif (srReuse && this.intervalCompaction && this._srSortedIndices) {',
             '\t\t\t// ' + perfMarker + ' (deep): 跳过 uploadIntervals / frustum culling / dispatchCompact /',
             '\t\t\t// projector.dispatch / sortIndirect —— 只保留每帧必须的槽位获取与绘制参数写入。',
