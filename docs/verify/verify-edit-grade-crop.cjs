@@ -97,6 +97,9 @@ const settle = async (page) => {
         const restored = await stats(page);
 
         // 3. crop box: enable clipping with a small shape -> splats outside are removed
+        // ⚠️ 2026-10-02：**必须先显式把「显示外部（预览）」关掉**。该项现在是默认开（盒外以 25% 淡显
+        // 保留，见 crop-box.ts 的 _preview 注释），此时"亮像素"不会大幅下降（实测 ratio 0.88），
+        // 这条断言测的就不再是"裁切把盒外删掉"而是"淡显"。显式关闭后它测回原本的语义（discard 路径）。
         const cropState = await page.evaluate(async () => {
             const scene = window.scene;
             // the crop box is built from the selection bound, so select first
@@ -112,21 +115,28 @@ const settle = async (page) => {
                 if (ext && ext.set) ext.set(0.3, 0.3, 0.3);
                 scene.events.fire('cropBox.changed');
             }
+            scene.events.fire('cropBox.setPreview', false);
             scene.events.fire('cropBox.setClipping', true);
             await new Promise(r => setTimeout(r, 800));
             const state = scene.events.invoke('cropBox.getState');
-            return state ? { enabled: state.enabled, clipping: state.clipping, shape: state.shape } : null;
+            return state ? { enabled: state.enabled, clipping: state.clipping, shape: state.shape, preview: state.preview } : null;
         });
         await settle(page);
         const cropped = await stats(page);
+
+        // 3b. 预览（盒外淡显）必须让模型**仍然可见** —— 这是"用户能看出裁到哪"的那条通路
+        await page.evaluate(() => { window.scene.events.fire('cropBox.setPreview', true); });
+        await settle(page);
+        const previewed = await stats(page);
 
         const checks = [
             { name: 'model visible at baseline', pass: baseline.colourfulPct > 20, detail: `${baseline.colourfulPct}% colourful` },
             { name: 'saturation 0 removes the colour', pass: desaturated.colourfulPct < baseline.colourfulPct * 0.3, detail: `${baseline.colourfulPct}% -> ${desaturated.colourfulPct}%` },
             { name: 'saturation 1 restores it', pass: restored.colourfulPct > baseline.colourfulPct * 0.8, detail: `${restored.colourfulPct}%` },
-            { name: 'crop box clipping removes splats', pass: cropped.litPct < baseline.litPct * 0.85, detail: `lit ${baseline.litPct}% -> ${cropped.litPct}% (ratio ${(cropped.litPct / baseline.litPct).toFixed(2)})` }
+            { name: 'crop box clipping removes splats (preview off)', pass: cropped.litPct < baseline.litPct * 0.85, detail: `lit ${baseline.litPct}% -> ${cropped.litPct}% (ratio ${(cropped.litPct / baseline.litPct).toFixed(2)})` },
+            { name: 'crop preview keeps the model visible (box-outside reference)', pass: previewed.litPct > cropped.litPct * 1.25, detail: `lit preview-off ${cropped.litPct}% -> preview-on ${previewed.litPct}%（盒外淡显保留参照）` }
         ];
-        console.log(JSON.stringify({ backend, baseline, desaturated, restored, cropped, cropState, checks, failed: checks.filter(c => !c.pass).length, errors }, null, 2));
+        console.log(JSON.stringify({ backend, baseline, desaturated, restored, cropped, previewed, cropState, checks, failed: checks.filter(c => !c.pass).length, errors }, null, 2));
         if (checks.some(c => !c.pass) || errors.length) process.exitCode = 1;
     } catch (e) {
         console.log(JSON.stringify({ fatal: String(e).slice(0, 400), errors }, null, 2));

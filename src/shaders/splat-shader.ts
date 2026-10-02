@@ -626,7 +626,9 @@ void main(void) {
                 discard;
             #else
                 if (uCropBoxPreview > 0.5) {
-                    cropFade = 0.035;
+                    // 盒外淡显强度：0.035 → 0.25（原值肉眼几乎不可见，用户"不知道盒子裁到哪"；
+                    // 见 unified-shaders.ts 里同处的说明）。三处着色器必须一致。
+                    cropFade = 0.25;
                 } else {
                     // 切面（cap plane）：形状外紧贴表面的片元组成切面；保留被切
                     // 高斯本色走颜色分级管线（finalColor 不覆盖）。只有椭球穿过

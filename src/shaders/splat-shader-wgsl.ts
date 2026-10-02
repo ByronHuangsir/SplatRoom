@@ -660,7 +660,8 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
                 discard;
             #else
                 if (uniform.uCropBoxPreview > 0.5) {
-                    cropFade = 0.035;
+                    // 盒外淡显强度：0.035 → 0.25（与 splat-shader.ts / unified-shaders.ts 保持一致）
+                    cropFade = 0.25;
                 } else {
                     // cap plane: fragments just outside the shape form the section and
                     // keep the splat's own colour (no repaint)

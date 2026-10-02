@@ -974,7 +974,11 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
                 if (dist < 0.0) {
                     if (uniform.srCropPreview > 0.5) {
-                        a = a * 0.035;
+                        // 盒外淡显强度。原来是 0.035 —— 实测肉眼基本不可见（典型模型色亮度 ~100 ⇒
+                        // 淡显后只有 3.5 级，落在"看着就是黑的"区间），于是用户打开预览也仍然
+                        // "不知道盒子裁到哪里"（2026-10-02 现场反馈）。0.25 让盒外作为**清晰可见的
+                        // 参照**保留下来，同时与盒内的全亮度形成明确边界。
+                        a = a * 0.25;
                     } else {
                         // 切面环带：刚出形状的那一圈保留本来的颜色（不重绘），更外面直接丢
                         let capW: f32 = max(uniform.srCropCapWidth, 0.0);
