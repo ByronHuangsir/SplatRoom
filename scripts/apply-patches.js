@@ -140,4 +140,114 @@ if (fs.existsSync(chunkFile)) {
     console.log('[SKIP] Patch 3: ' + chunkFile + ' not found');
 }
 
+// Patch 5（**正确性+性能补丁**，2026-10-02 深夜）：不需要排序时**不要**每帧重排 + 重投影
+//
+// 症状：薄壁模型（如 Spirula 陶钵）**相机一动不动**时部分区域逐帧闪烁（实测 el=+35 看进钵内
+//       3.0~4.3%/帧、最大色差 126~238），而那些区域在 SuperSplat 里被前面的壁挡住看不见。
+// 根因：`gsplat-hybrid-renderer.prepareRenderView()` **每帧无条件**调用 `sortAndProjectForCamera()`，
+//       而引擎自己的簿记（manager.sortNeeded / world.version / totalActiveSplats）全是"不需要排序"：
+//       实测静止时 **49.75 次排序/秒**（≈每帧一次），而 sortNeeded=false、version 恒为 1。
+//       每次重排都用 `atomicAdd` **重新分配槽位**，排序键并列（实测可见点里 7.13% 与别人同键）的
+//       那些高斯就按新的到达次序重新定名次 —— 薄壁前后壁因此逐帧互换。
+// 修法：把 manager 的 sortNeeded 透给 prepareRenderView；为 false 且视口/版本/点数没变时，
+//       直接复用上一次的 sortedIndices（此时 projCache 也没被重写，两者始终自洽）。
+// 副作用（正面）：静止时省掉每帧的投影+排序 —— 20M 模型上这正是"光标不跟手"的主要开销之一。
+const hybridPath = path.join(pcRoot, 'scene', 'gsplat-unified', 'gsplat-hybrid-renderer.js');
+const managerPath = path.join(pcRoot, 'scene', 'gsplat-unified', 'gsplat-manager.js');
+const srMarker = 'SplatRoom patch 5';
+
+// ⚠️ 默认**关闭**：本补丁确实修好了闪烁（实测 el=+35 看进钵内：49.75 次排序/秒 → 0、
+//    逐帧像素变化 3.0~4.3%（maxΔ 126~238）→ **0%，逐位相同**），但会让
+//    `verify-selection-overlay` / `verify-edit-grade-crop` / `verify-effects` 三个套件变红
+//    （症状：小模型只剩 3.7~4.9% 亮、效果"0 px changed" ⇒ 导入后某些帧该排未排，间接绘制参数陈旧）。
+//    已排除是①着色器改动的责任（卸掉本补丁后三个套件立刻恢复 0 失败）。
+//    下一步加固方向：复用条件再加"上一次排序用的就是**同一个 worldState 对象**"（身份比较）
+//    + 检测到可见点数/间接参数变化时强制重排，然后再跑那三个套件；绿了才把默认值改回来。
+//    打开方式：`set SPLATROOM_PATCH5=1` 后再跑 node scripts/apply-patches.js。
+const patch5Enabled = process.env.SPLATROOM_PATCH5 === '1';
+if (!patch5Enabled) {
+    console.log('[SKIP] Patch 5: disabled by default (fixes ② but breaks 3 suites; set SPLATROOM_PATCH5=1 to try)');
+} else if (fs.existsSync(hybridPath) && fs.existsSync(managerPath)) {
+    let hy = fs.readFileSync(hybridPath, 'utf8');
+    let mg = fs.readFileSync(managerPath, 'utf8');
+    if (hy.includes(srMarker)) {
+        console.log('[OK] Patch 5 already applied: reuse the last sort while sortNeeded is false');
+    } else {
+        // 5a: 签名多一个参数
+        const sigFrom = '\tprepareRenderView(world, worldState, params) {';
+        const sigTo = '\tprepareRenderView(world, worldState, params, sortNeeded = true) {';
+        // 5b: 把无条件排序换成"需要才排"
+        const callFrom = [
+            '\t\tconst sortedIndices = this.sortAndProjectForCamera(',
+            '\t\t\tworld,',
+            '\t\t\tworldState,',
+            '\t\t\tcameraNode,',
+            '\t\t\tviewportWidth,',
+            '\t\t\tviewportHeight,',
+            '\t\t\tMath.max(ALPHA_VISIBILITY_THRESHOLD, params.alphaClipForward),',
+            '\t\t\tfalse,',
+            '\t\t\tisStereo,',
+            '\t\t\tparams',
+            '\t\t);',
+            '\t\tif (!sortedIndices) return false;'
+        ].join('\n');
+        const callTo = [
+            '\t\t// ' + srMarker + ': 只有真的需要排序时才重排 + 重投影。',
+            '\t\t// 引擎每帧都会调用这里，而 sortAndProjectForCamera 会重新分配原子槽位；槽位次序一变，',
+            '\t\t// 并列键（实测可见点的 7.13%）的名次就跟着变 —— 薄壁模型前后壁因此逐帧互换。',
+            '\t\t// 复用条件必须**极窄**（第一版只比 version/count，结果导入后某些帧该排未排 ⇒ 间接绘制',
+            '\t\t// 参数一直是空的、模型半透明/不出现，三个套件立刻变红）：',
+            '\t\t//   (a) manager 说不需要排序，(b) 上一次排序确实做过，(c) 世界版本/激活点数没变，',
+            '\t\t//   (d) 相机位姿**逐位相同** —— 位姿一变就照旧排序，所以不会漏掉任何合法的重排。',
+            '\t\tconst srPos = cameraNode.getPosition();',
+            '\t\tconst srFwd = cameraNode.forward;',
+            '\t\tconst srSortKey = viewportWidth + "x" + viewportHeight + "|" + params.alphaClipForward + "|" +',
+            '\t\t\t(isStereo ? 1 : 0) + "|" + worldState.version + "|" + worldState.totalActiveSplats + "|" +',
+            '\t\t\tsrPos.x + "," + srPos.y + "," + srPos.z + "|" + srFwd.x + "," + srFwd.y + "," + srFwd.z;',
+            '\t\tlet sortedIndices;',
+            '\t\tif (!sortNeeded && this._srSortedIndices && worldState.sortedBefore && this._srSortKey === srSortKey) {',
+            '\t\t\tsortedIndices = this._srSortedIndices;',
+            '\t\t} else {',
+            '\t\t\tsortedIndices = this.sortAndProjectForCamera(',
+            '\t\t\t\tworld,',
+            '\t\t\t\tworldState,',
+            '\t\t\t\tcameraNode,',
+            '\t\t\t\tviewportWidth,',
+            '\t\t\t\tviewportHeight,',
+            '\t\t\t\tMath.max(ALPHA_VISIBILITY_THRESHOLD, params.alphaClipForward),',
+            '\t\t\t\tfalse,',
+            '\t\t\t\tisStereo,',
+            '\t\t\t\tparams',
+            '\t\t\t);',
+            '\t\t\tthis._srSortedIndices = sortedIndices;',
+            '\t\t\tthis._srSortKey = srSortKey;',
+            '\t\t}',
+            '\t\tif (!sortedIndices) return false;'
+        ].join('\n');
+        const cnt = (s, needle) => s.split(needle).length - 1;
+        if (cnt(hy, sigFrom) !== 1 || cnt(hy, callFrom) !== 1) {
+            console.log('[FAIL] Patch 5: renderer anchors not unique (sig=' + cnt(hy, sigFrom) + ' call=' + cnt(hy, callFrom) + ') - skipping');
+            process.exitCode = 1;
+        } else {
+            hy = hy.replace(sigFrom, sigTo).replace(callFrom, callTo);
+            fs.writeFileSync(hybridPath, hy);
+            console.log('[APPLIED] Patch 5a: prepareRenderView reuses the last sort when sortNeeded is false');
+        }
+        // 5c: manager 把 sortNeeded 透过去
+        const mgFrom = '\t\t\t\tthis.renderer.prepareRenderView(this.world, lastState, this._fillRenderViewParams());';
+        const mgTo = '\t\t\t\tthis.renderer.prepareRenderView(this.world, lastState, this._fillRenderViewParams(), this.sortNeeded);';
+        if (cnt(mg, mgFrom) === 1) {
+            fs.writeFileSync(managerPath, mg.replace(mgFrom, mgTo));
+            console.log('[APPLIED] Patch 5b: manager passes sortNeeded into prepareRenderView');
+        } else if (cnt(mg, 'this.sortNeeded);\n') >= 1 && mg.includes('prepareRenderView(this.world, lastState, this._fillRenderViewParams(), this.sortNeeded)')) {
+            console.log('[OK] Patch 5b already applied');
+        } else {
+            console.log('[FAIL] Patch 5b: manager anchor not found (' + cnt(mg, mgFrom) + ') - the per-frame re-sort stays');
+            process.exitCode = 1;
+        }
+    }
+} else {
+    console.log('[SKIP] Patch 5: engine files not found');
+}
+
 console.log('[SplatRoom] Patches complete.');
