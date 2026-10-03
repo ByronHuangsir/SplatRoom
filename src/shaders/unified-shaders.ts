@@ -99,6 +99,12 @@ uniform srShowDeleted: f32;
 varying @interpolate(flat) srState: u32;
 // 该 splat 的**源行号**（= projCache[base + 8u]，补丁 3 写入）—— 拾取要用它当 id，见下面 srPickMode。
 varying @interpolate(flat) srSplatIndex: u32;
+// ===== 环模式：「Splat 模式 = 环」时把每个高斯画成**它自己的边界环** =====
+// 用户口径（2026-10-02）：「环模式是需要显示高斯球的边界」——所以内部整块丢弃、只留贴边一圈。
+// 带宽在这里换算成"归一化半径"（A 空间）带给片元：屏幕上至少 ~1.2px，否则细小高斯的环会退化成
+// 亚像素、随相机抖动而闪烁。归一化半径 1.0 = 该高斯的绘制外沿（四边形内接椭圆）。
+uniform srRingSize: f32;
+varying @interpolate(flat) srRingUV: f32;
 // ===== 二期：裁剪盒（per-pixel）=====
 // 主线是在片元里用 vScreenOffset/vViewCenter + 高斯椭圆**重建视空间位置**再判盒内外的；
 // unified 这条路没有那些 varying，所以这里由顶点把「clip → 盒局部」的合成矩阵乘一次
@@ -378,6 +384,14 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         let srAxis: f32 = max(max(length(v1), length(v2)), 1e-4);
         cornerClipped = cornerUV * clamp(uniform.srCentersSize * 0.5 / srAxis, 0.0, 1.0);
     }
+    // 环模式：环宽 = max(设定带宽, 1.2px ÷ 该高斯的屏幕半径)，转成归一化半径交给片元。
+    // srRingSize<=0（非环模式）时给 0，片元那边整段不生效。
+    let srRingAxisPx: f32 = max(max(length(v1), length(v2)), 1e-3);
+    output.srRingUV = select(
+        0.0,
+        clamp(max(uniform.srRingSize, 1.2 / srRingAxisPx), 0.0, 0.9),
+        uniform.srRingSize > 0.0
+    );
     // 特效改的是投影位置（见上面 srEffProj 的说明），四边形的缩放按它的 w 来
     let c = vec2f(srEffProj.w) * uniform.viewport_size.zw;
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
@@ -656,6 +670,8 @@ export function hashSource(text: string): string {
 const unifiedFragmentShader = /* wgsl */ `
 varying gaussianUV: half2;
 varying gaussianColor: half4;
+// 环模式：由顶点算好的环宽（归一化半径）。见 unifiedVertexShader 里 srRingUV 的说明。
+varying @interpolate(flat) srRingUV: f32;
 
 #ifdef PICK_PASS
     uniform alphaClip: f32;
@@ -1051,15 +1067,16 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             c = mix(c, vec3f(1.0, 0.25, 0.25), 0.6);
             a = a * 0.4;
         }
-        // ===== 环模式（与主线 splat-shader-wgsl.ts:715-722 逐字同义）=====
-        // 内圈压暗、外圈固定 0.6 ⇒ 看上去每个高斯成了一枚"环"。主线把这段放在 crop/effect 之后，
-        // 这里也放在最后（否则裁剪淡出会把环一起压掉，两条通路观感就不一致了）。
+        // ===== 环模式：**只画每个高斯球的边界** =====
+        // 用户口径（2026-10-02）：「环模式是需要显示高斯球的边界」。所以内部**整块丢弃**、
+        // 只留贴边的一圈；不是"内部压暗 + 外圈提亮"（那样在密集点云里仍然是一团雾，看不到边界）。
+        // 边界定义：归一化平方半径 A ∈ [1-带宽, 1] 的那一圈 —— A=1 就是该高斯的绘制外沿。
+        // 环给固定不透明度：高斯在 A→1 处本身 alpha→0，不覆盖的话细小高斯的环根本看不见。
         if (uniform.srRingSize > 0.0) {
-            if (A < half(1.0) - half(uniform.srRingSize)) {
-                a = max(0.05, a);
-            } else {
-                a = 0.6;
+            if (A < half(1.0) - half(srRingUV)) {
+                discard;
             }
+            a = 0.75;
         }
         output.color = vec4f(c * a, a);
         // ===== RT1：选区覆盖（描边 / 衬底后处理的输入）=====

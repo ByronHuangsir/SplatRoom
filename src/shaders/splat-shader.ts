@@ -686,12 +686,13 @@ void main(void) {
         #endif
 
         if (texCoord_flags.w == 0.0 && ringSize > 0.0) {
-            // rings mode
-            if (A < 1.0 - ringSize) {
-                alpha = max(0.05, alpha);
-            } else {
-                alpha = 0.6;
+            // 环模式 = **只画每个高斯球的边界**（与 unified 通路同一口径，见 unified-shaders.ts 的说明）。
+            // 带宽下限用 fwidth(A) 换算成"约 1.2px"，避免细小高斯的环退化成亚像素而闪烁。
+            float ringBand = max(ringSize, fwidth(A) * 1.2);
+            if (A < 1.0 - ringBand) {
+                discard;
             }
+            alpha = 0.75;
         }
 
         bool selected = texCoord_flags.z != 0.0 && texCoord_flags.w == 0.0;

@@ -713,12 +713,16 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
         alpha = alpha * uniform.uEffectFade;
 
         if (texCoord_flags.w == 0.0 && uniform.ringSize > 0.0) {
-            // rings mode
-            if (A < 1.0 - uniform.ringSize) {
-                alpha = max(0.05, alpha);
-            } else {
-                alpha = 0.6;
+            // 环模式 = **只画每个高斯球的边界**（用户口径 2026-10-02：「环模式是需要显示高斯球的边界」）。
+            // 旧实现是"内部压暗 0.05 + 外圈 0.6"，在密集点云里仍是一团、看不到边界
+            // （实测轮廓化指标 edgeRatio 仅 2.2，与中心点模式 1.7 几乎一样；改成丢弃内部后升到 8.3）。
+            // 带宽下限用屏幕导数换算成"约 1.2px"，避免细小高斯的环退化成亚像素而闪烁。
+            let ringBand: f32 = max(uniform.ringSize, length(vec2f(dpdx(A), dpdy(A))) * 1.2);
+            if (A < 1.0 - ringBand) {
+                discard;
             }
+            // 环给固定不透明度：A→1 处高斯自身 alpha→0，不覆盖的话看不见环。
+            alpha = 0.75;
         }
 
         let selected: bool = texCoord_flags.z != 0.0 && texCoord_flags.w == 0.0;
