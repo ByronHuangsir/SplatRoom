@@ -289,15 +289,16 @@ if (tieBits > 0 && fs.existsSync(projChunk)) {
         const replacement = [
             keyLine,
             '\t\t// ' + tieMarker + ': 追加确定性的并列决胜位（源行号低位）。',
-            '\t\t// 键的相对次序不变（整体左移 ' + tieBits + ' 位后再或上低位），只是把并列拆开：',
-            '\t\t// 否则稳定排序会保留"每帧由 atomicAdd 重新分配的槽位次序"，薄壁前后壁逐帧互换。',
-            '\t\t// ⚠️ 自保护：超大模型（键可能超过 2^24）左移会溢出 u32 ⇒ 那种情况**退回不位移**',
-            '\t\t//（并列仍在、闪烁仍在，但绝不会出现错误排序/画面崩坏）。',
-            '\t\t// 实测：776k 高斯时键最大约 1.16e7（< 2^24）⇒ 位移生效；',
-            '\t\t//       20M 夹具上 numBits 更大（键可达 2^25 量级）⇒ 自动退回。',
-            '\t\tlet srKey0: u32 = u32(binWeights[bin].base + binWeights[bin].divider * binFrac);',
-            '\t\tlet srShifted: u32 = (srKey0 << ' + tieBits + 'u) | (projected.splatId & ' + ((1 << tieBits) - 1) + 'u);',
-            '\t\tsortKey = select(srShifted, srKey0, srKey0 > ' + (0xFFFFFFFF >>> tieBits) + 'u);'
+            '\t\t// ⚠️⚠️ 必须是**原地替换低位**，绝不能整体左移！',
+            '\t\t// 第一版写成了「整体左移 8 位再或上低位」：键的量级被放大 256 倍，深度信息被推出排序器',
+            '\t\t// 实际排序的位宽 ⇒ 名次由低位（源行号）决定 ⇒ 排序彻底混乱、模型显示不正常。',
+            '\t\t// （用户 3.23.80 现场复现；我的套件/闪烁探针都测不到，因为"错但确定"的次序同样逐帧稳定、',
+            '\t\t//  同样能通过可见性阈值 —— 缺的是"与主线逐像素对照"这类**排序正确性**校验。）',
+            '\t\t// 本版：只把键的**低 ' + tieBits + ' 位**换成源行号低位 —— 量级不变、bin 先后不变，',
+            '\t\t// 代价是 bin 内深度分辨率下降 2^' + tieBits + ' 分之一（相对 divider≈2^16 可忽略）。',
+            '\t\t// ⚠️ 本文件是 JS 模板字符串：注释里绝不能出现反引号（本轮踩过，直接把 bundle 打崩：',
+            '\t\t//    ReferenceError: raw is not defined —— 反引号提前闭合了模板）。',
+            '\t\tsortKey = (u32(binWeights[bin].base + binWeights[bin].divider * binFrac) & ' + (0xFFFFFFFF - ((1 << tieBits) - 1)) + 'u) | (projected.splatId & ' + ((1 << tieBits) - 1) + 'u);'
         ].join('\n');
         fs.writeFileSync(projChunk, body.replace(keyLine, replacement));
         console.log('[APPLIED] Patch 6: sort key << ' + tieBits + ' + (splatId & ' + ((1 << tieBits) - 1) + ')');
