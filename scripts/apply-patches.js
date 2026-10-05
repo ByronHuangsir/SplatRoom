@@ -271,9 +271,12 @@ if (!patch5EnabledRaw) {
 // ⚠️ 并列只被拆开 2^SR_TIE_BITS 分之一：4 位 ⇒ 约 93.75% 的并列被确定化（残余待实测）。
 // 备选路线（已试过、否决）：patch 5 跳过冗余重排虽然把闪烁打到 0，但**间接绘制的槽位是每帧顺序分配的**，
 // 跳过排序会让我们的槽位被同一帧里别的 pass 覆盖 ⇒ 模型直接不画（三个套件全红）。见 patch 5 的注释。
-// 默认 8 位（实测：8 位 + 自保护后，Spirula 看进钵内的逐帧变化 3.0~4.3% → **0%**，且四个套件全绿；
-// 4 位只能拆掉 93.75% 的并列，残余 0.16~0.85%/帧）。可用 SPLATROOM_TIE_BITS 覆盖。
-const tieBits = parseInt(process.env.SPLATROOM_TIE_BITS || '8', 10);
+// ⚠️ 默认**0 = 不打**（2026-10-02 用户现场："特定角度排序不正常，是碎的"）：
+//    任何"改排序键"的做法都不安全 —— 第一种写法（整体左移 8 位）把深度信息推出排序器位宽 ⇒
+//    排序彻底混乱；第二种写法（原地替换低 8 位）会把**远距离 bin** 里 `divider × binFrac < 256`
+//    的键归并成同一个键 ⇒ 那片区域退化成"槽位次序"⇒ 特定角度看起来是碎的。
+//    ⇒ ② 的闪烁改用**不碰键**的补丁 7（"没变化就不重排"）。本补丁保留仅用于 A/B 复现。
+const tieBits = parseInt(process.env.SPLATROOM_TIE_BITS || '0', 10);
 const tieMarker = 'SplatRoom patch 6';
 const projChunk = path.join(pcRoot, 'scene', 'shader-lib', 'wgsl', 'chunks', 'gsplat', 'compute-gsplat-projector.js');
 
@@ -322,16 +325,11 @@ if (tieBits > 0 && fs.existsSync(projChunk)) {
 const perfMarker = 'SplatRoom patch 7';
 const reuseMarker = 'SplatRoom patch 7 (reuse)';
 
-// ⚠️ 默认**关闭**（`SPLATROOM_PATCH7=1` 才打）：效果是真的（20M 模型光标事件延迟 p50
-//    49.1ms → **15.6ms**、120/120 次超 33ms → **1/120**、rAF 间隔 71.5ms → 16.6ms），
-//    但会让 verify-selection-overlay / verify-edit-grade-crop / verify-effects 各 3 失败
-//    （症状：导入后模型**完全不画**，只剩背景 mean 8）。
-//    原因（本轮查清，也是 patch 5 同样失败的原因）：**绘制参数是被"排序"那一步写进间接缓冲的** ——
-//    `projector.writeIndirectArgs()` 只写排序用的 dispatch 参数，真正给绘制用的
-//    `DrawIndexedIndirectArgs`（instanceCount/vertexCount…）由 sortIndirect 那条链路写；而
-//    `getIndirectDrawSlot()` 每帧重新分配槽位 ⇒ 跳过排序，本帧的新槽位就永远没有参数 ⇒ 不画。
-//    要落地必须再加一个"只写绘制参数"的小 compute pass（或把参数缓存到 CPU 侧重写），属下一轮工作。
-const patch7Enabled = process.env.SPLATROOM_PATCH7 === '1';
+// 默认**开启**（`SPLATROOM_PATCH7=0` 可关）：它**不碰排序键**，只是"世界与相机都没变时复用上一次的
+// 排序结果"，因此不存在"键被打乱/归并"这类风险；② 的闪烁正是靠它消除（不再重排 ⇒ 并列名次不再抖）。
+// 7d（连 compaction 一起跳过的深复用）已移除：实测对 20M 的每帧开销没有改善
+//（瓶颈是 GPU 渲染，不是 compute），却多一份风险。
+const patch7Enabled = process.env.SPLATROOM_PATCH7 !== '0';
 
 if (!patch7Enabled) {
     console.log('[SKIP] Patch 7: disabled by default (needs an args-only pass; set SPLATROOM_PATCH7=1 for A/B)');
@@ -430,27 +428,8 @@ if (!patch7Enabled) {
         //       numSplatsBuf[0] = sortElementCountBuf[0] = count
         //     跳过 projector.dispatch() 时 renderCounter 不再被 clear ⇒ 保留上一帧的 count ✓，
         //     所以复用帧的绘制参数依然正确；槽位仍每帧重新获取（patch 5 的教训）。
-        const deepFrom = '\t\tconst projector = this.projector;';
-        const deepTo = [
-            '\t\tconst projector = this.projector;',
-            '\t\tif (srReuse && this.intervalCompaction && this._srSortedIndices) {',
-            '\t\t\t// ' + perfMarker + ' (deep): 跳过 uploadIntervals / frustum culling / dispatchCompact /',
-            '\t\t\t// projector.dispatch / sortIndirect —— 只保留每帧必须的槽位获取与绘制参数写入。',
-            '\t\t\tthis.allocateAndWriteIntervalIndirectArgs(worldState.totalIntervals);',
-            '\t\t\tconst srIc = this.intervalCompaction;',
-            '\t\t\tconst srInfo = gpuSorter.prepareIndirect();',
-            '\t\t\tprojector.writeIndirectArgs(',
-            '\t\t\t\tthis.indirectDrawSlot,',
-            '\t\t\t\tthis.indirectDispatchSlot + 1,',
-            '\t\t\t\tsrIc.numSplatsBuffer,',
-            '\t\t\t\tsrIc.sortElementCountBuffer,',
-            '\t\t\t\tsrInfo',
-            '\t\t\t);',
-            '\t\t\treturn this._srSortedIndices;',
-            '\t\t}'
-        ].join('\n');
-        // 7b-2: 投影 compute 本身也要跳过 —— 它在 writeIndirectArgs **之前**执行，
-        // 只在后面短路的话，每帧最贵的那部分（对全部可见高斯的投影）照样在跑。
+        // 7d 已移除（见 patch 7 顶部说明）：深复用对 20M 无改善，只增加风险。
+        const deepFrom = null;
         const dispatchFrom = '\t\tprojector.dispatch({';
         const dispatchTo = '\t\tif (!srReuse) projector.dispatch({';
         const problems = [];
@@ -459,13 +438,12 @@ if (!patch7Enabled) {
         if (cnt(hy, fnFrom) !== 1) problems.push('fn=' + cnt(hy, fnFrom));
         if (cnt(hy, skipFrom) !== 1) problems.push('skip=' + cnt(hy, skipFrom));
         if (cnt(hy, dispatchFrom) !== 1) problems.push('dispatch=' + cnt(hy, dispatchFrom));
-        if (cnt(hy, deepFrom) !== 1) problems.push('deep=' + cnt(hy, deepFrom));
         if (problems.length) {
             console.log('[FAIL] Patch 7: renderer anchors not unique (' + problems.join(' ') + ') - skipping');
             process.exitCode = 1;
         } else {
             hy = hy.replace(sigFrom, sigTo).replace(callFrom, callTo).replace(fnFrom, fnTo)
-                .replace(deepFrom, deepTo).replace(dispatchFrom, dispatchTo).replace(skipFrom, skipTo);
+                .replace(dispatchFrom, dispatchTo).replace(skipFrom, skipTo);
             fs.writeFileSync(hybridPath, hy);
             console.log('[APPLIED] Patch 7a: prepareRenderView computes the reuse key and caches the order');
             console.log('[APPLIED] Patch 7b: projector.dispatch + radix sort are skipped on reuse');

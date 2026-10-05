@@ -384,12 +384,12 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         let srAxis: f32 = max(max(length(v1), length(v2)), 1e-4);
         cornerClipped = cornerUV * clamp(uniform.srCentersSize * 0.5 / srAxis, 0.0, 1.0);
     }
-    // 环模式：环宽 = max(设定带宽, 1.2px ÷ 该高斯的屏幕半径)，转成归一化半径交给片元。
+    // 环模式：环宽 = max(设定带宽, 1.6px ÷ 该高斯的屏幕半径)，转成归一化半径交给片元。
     // srRingSize<=0（非环模式）时给 0，片元那边整段不生效。
     let srRingAxisPx: f32 = max(max(length(v1), length(v2)), 1e-3);
     output.srRingUV = select(
         0.0,
-        clamp(max(uniform.srRingSize, 1.2 / srRingAxisPx), 0.0, 0.9),
+        clamp(max(uniform.srRingSize, 1.6 / srRingAxisPx), 0.02, 0.9),
         uniform.srRingSize > 0.0
     );
     // 特效改的是投影位置（见上面 srEffProj 的说明），四边形的缩放按它的 w 来
@@ -1076,7 +1076,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
             if (A < half(1.0) - half(srRingUV)) {
                 discard;
             }
-            a = 0.75;
+            a = 0.9;
         }
         output.color = vec4f(c * a, a);
         // ===== RT1：选区覆盖（描边 / 衬底后处理的输入）=====

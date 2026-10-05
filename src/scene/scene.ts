@@ -1038,9 +1038,11 @@ class Scene {
             // 缺这一项 = RT1 恒空 ⇒ 轮廓开着时两条高亮腿同时断（见 unified-material.ts 的说明）。
             outlineMode: outlineSelection ? 1 : 0,
             // 环模式 / 中心点模式（unified 侧由我们自己的着色器实现，原因见 unified-shaders.ts 里那段）：
-            // 条件与主线 splat.ts:1859-1880 逐字一致 —— 环要"当前元素是选中元素 + 覆盖层开着 + 模式是 rings"。
-            ringSize: (isSelectedElement && this.camera.renderOverlays &&
-                this.events.invoke('camera.overlay') && this.events.invoke('camera.mode') === 'rings') ? 0.04 : 0,
+            // ⚠️ 环**不再依赖「显示/隐藏 Splat」叠加层开关**（2026-10-02 用户反馈"环模式不显示边界"）：
+            // 「Splat 模式 = 环」本身就该画出每个高斯的边界，叠加层只负责中心点那套。
+            // 之前把两者绑在一起（照主线写法），只要叠加层是关的（持久化偏好/切过眼睛按钮），
+            // 环模式就什么都不显示。现在只要求"当前元素是选中元素 + 模式是 rings"。
+            ringSize: (isSelectedElement && this.events.invoke('camera.mode') === 'rings') ? 0.04 : 0,
             // 中心点模式 = 「显示/隐藏 Splat」开关打开且模式是中心；点直径取 Splat 尺寸（与主线覆盖层同一个值）。
             centersSize: (this.events.invoke('camera.overlay') && this.events.invoke('camera.mode') === 'centers') ?
                 (this.events.invoke('camera.splatSize') as number) : 0,
