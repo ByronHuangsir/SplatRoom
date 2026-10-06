@@ -2,7 +2,7 @@
 
 > 一份从「基于 PlayCanvas SuperSplat v2.31.10 二次开发」到当前版本（v2.1.8 + V3 分支）的完整可读记录。
 > 作者：摄影师黄Sir <1924705842@qq.com>
-> 存档日期：2026-08-14
+> 存档日期：2026-08-14（2026-10-06 补记第七节）
 > 工作目录：`C:\Users\Byon Huang\WorkBuddy\SplatRoom`（2026-08-04 由旧工作空间迁移而来）
 
 ---
@@ -115,7 +115,7 @@ SplatRoom 是一款面向 3D 高斯喷溅（3DGS）的桌面级编辑/查看工�
 7. **产物校验**：无 `xxd` 时用 python 读首 2 字节应为 `MZ`，再在前 ~2MB 搜 7z 签名 `37 7A BC AF 27 1C`。两者都在即有效。
 8. **无头复现渲染 bug 工作流**：puppeteer-core + Edge + SwiftShader（`--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`）；`npx serve dist -l 3000`；截图文件大小比像素探针可靠；200k 高斯单帧 ~5s，`page.screenshot()` 须带 timeout + `.catch`。
 9. **SOG WebP 纹理补丁**：`MAX_STRIPE_BYTES` 8MB→**128MB**（`@playcanvas/splat-transform/dist/index.mjs` L1730），但 `npm install` 会丢失，需手动重打。
-10. **Git 大文件**：GitHub 拒 >50MB（GH001），需 git-lfs 或排除；git push 在本环境需 `dangerouslyDisableSandbox`（沙箱网络重置）。
+10. **Git 大文件**：GitHub 拒 >50MB（GH001），需 git-lfs 或排除；git push 在本环境需 `dangerouslyDisableSandbox`（沙箱网络重置）。**推送 GitHub 另有两个必踩点**：① **PAT 必须带 `workflow` scope** —— 仓库含 `.github/workflows/`，缺权限时 GitHub 在**推送末尾**才拒绝（`refusing to allow a Personal Access Token to create or update workflow`），此时大数据量已传完，极易误判为网络故障；② 用 `-c credential.helper=<内联helper>` 之前**必须先 `-c credential.helper=` 清空 helper 列表** —— 否则全局 `credential.helper=manager` 会被一并调用，而 git 在认证成功后会对*所有*已配置 helper 调 `store`，把 token 持久化写进 Windows 凭据管理器。详见第七节。
 
 ---
 
@@ -130,7 +130,7 @@ SplatRoom 是一款面向 3D 高斯喷溅（3DGS）的桌面级编辑/查看工�
 **线上资料库 / 网盘**
 - 公开分享链接（HTML 报告）：`https://workbuddy.link/p/TveWWr86WxuSAGohdlHK2S`
 - 网盘（PDF）：`https://www.workbuddy.cn/space/d/6miAFppdfgVghMkMIkPZZc`
-- GitHub 仓库：`https://github.com/ByronHuangsir/SplatRoom`（v2.1.8，529 文件）
+- GitHub 仓库：`https://github.com/ByronHuangsir/SplatRoom` —— 2026-08-12 首传 v2.1.8 快照（`main` 分支，529 文件）；2026-10-06 补推完整历史（`master` 分支，353 提交），详见第七节
 
 **历史版本备份库**
 - `release/`（各版本 exe/zip）+ `release-backups/`（带时间戳备份，如 `SplatRoom-2.1.8-20260812-122956.exe`）
@@ -157,6 +157,35 @@ SplatRoom 是一款面向 3D 高斯喷溅（3DGS）的桌面级编辑/查看工�
 | v2.1.6 / v2.1.7 | 08-11 | 合并工具完善、V3 副本 |
 | v2.1.8 | 08-12 | 「近小远大」根本修复 + 引擎级 AABB/epsilon 修复 + GitHub 上传 |
 | SplatRoom V3 | 08-11 起 | L2 距离 LOD、legacy 线 10M+ 性能优化 |
+| 3.23.84 / 3.23.85 | 10-06 | 当前 V3 线（顶端提交 `5f4c2cb`）；完整 353 提交历史补推 GitHub 的 `master` 分支 |
+
+---
+
+## 七、补记 · GitHub 完整历史推送（2026-10-06）
+
+第二节阶段 6 记录的 2026-08-12 首次上传，是在原 `.git` 已损坏的情况下 `git init` 重建后推的一份 **v2.1.8 单提交快照**（`main` 分支，529 文件）——**353 个提交的历史当时全部丢失**。本次把从本地交接包 `.bundle` 恢复出来的完整历史补推上去。
+
+**执行摘要**
+
+| 项目 | 值 |
+|------|-----|
+| 本地仓库 | `SplatRoomV3-0`，分支 `master`，353 提交 / 811 文件，顶端 `5f4c2cb`（3.23.85） |
+| 推送目标 | `https://github.com/ByronHuangsir/SplatRoom.git` |
+| 远程配置 | 新增远程名 `github`；原 `origin` **未改动**，仍指向交接包 `SplatRoomV3-0-完整Git历史.bundle` |
+| 分支策略 | **推成新分支 `master`，`main` 保持不动** |
+| 结果 | `master` → `5f4c2cb9ddbd21f7ebfb3f7a4831f686234cd5f6`；`main` 仍为 `b7c7d4fd...` 未改动 |
+| 传输量 | 4867 对象 / 21.65 MiB / 10.4s |
+
+**为什么必须新建分支而不能直接推 `main`**：`git merge-base master <远端 main>` 返回空 —— 两条历史**完全无关**（远端那份是 `git init` 重建的），无法快进，只能新建分支或强推。选择新建分支以保旧快照可回溯。
+
+**踩坑（两条都值得记住）**
+
+1. **PAT 必须带 `workflow` scope**。历史里含 `.github/workflows/ci.yml`，缺该权限时 GitHub 会拒绝推送，且报错发生在**推送末尾**：`refusing to allow a Personal Access Token to create or update workflow ... without 'workflow' scope`。此时 20+ MB 已经传完，极易误判成网络问题。
+2. **`credential.helper` 必须显式清空再挂内联 helper**。全局配置里有 `credential.helper=manager`，若只用 `-c credential.helper=<内联>` 追加而不先 `-c credential.helper=` 重置，GCM 会被一并调用；而 git 在认证成功后会对**所有**已配置 helper 调 `store`，导致 token 被写进 Windows 凭据管理器持久化。本次已发现该残留并 `cmdkey /delete:"git:https://github.com"` 清除，复验通过。
+
+**凭据卫生**：推送用的 PAT 未写入 `.git/config`、`~/.gitconfig`、远程 URL 或 `.git-credentials`（均已扫描确认）；推送后已建议吊销该 token。
+
+**遗留待办**：仓库默认分支仍是 `main`，即访客打开仓库首页看到的**还是旧的 v2.1.8 快照**（README 版本徽章仍写着 1.0.0）。如需以当前代码为门面，需手动到 *Settings → Branches* 把默认分支切换为 `master`。
 
 ---
 
