@@ -299,9 +299,9 @@ class MeasureTool {
 
         events.on('pivot.moved', () => {
             if (active && splat && splat.measureSelection >= 0 && splat.measureSelection < splat.measurePoints.length) {
-                const p = events.invoke('pivot').transform.position;
+                const pivotPos = events.invoke('pivot').transform.position;
                 mat.invert(splat.worldTransform);
-                mat.transformPoint(p, splat.measurePoints[splat.measureSelection]);
+                mat.transformPoint(pivotPos, splat.measurePoints[splat.measureSelection]);
             }
             scene.forceRender = true;
         });

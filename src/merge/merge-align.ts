@@ -526,7 +526,7 @@ export function bestTransformAlign(srcPts: Float32Array, dstPts: Float32Array): 
         const ax = new Vec3(rr * Math.cos(th), y, rr * Math.sin(th));
         for (let k = 0; k < 4; k++) {
             const angDeg = k * 90;
-            q.setFromAxisAngle(ax, (angDeg * Math.PI) / 180);
+            q.setFromAxisAngle(ax, angDeg);
             const Rm = rotationMatrix(q);
             const tx = c2.x - (Rm[0][0] * c1.x + Rm[0][1] * c1.y + Rm[0][2] * c1.z);
             const ty = c2.y - (Rm[1][0] * c1.x + Rm[1][1] * c1.y + Rm[1][2] * c1.z);
@@ -640,7 +640,7 @@ export async function autoAlign(
             r[8], r[9], r[10], 0,
             t.x, t.y, t.z, 1
         ]);
-        total = total.clone().mul(T);
+        total = T.clone().mul(total);
         // 更新 cur（全量）作为下一次迭代的源位置
         for (let i = 0; i < n1; i++) {
             tmp.set(cur[i * 3], cur[i * 3 + 1], cur[i * 3 + 2]);
@@ -1223,7 +1223,7 @@ function perturbTransform(base: Mat4, angDeg: number, frac: number, diag: number
     const a2 = rnd(seed * 7 + 2) * 2 - 1;
     const a3 = rnd(seed * 7 + 3) * 2 - 1;
     const axis = new Vec3(Math.cos(a1) * Math.sqrt(1 - a2 * a2), a2, Math.sin(a1) * Math.sqrt(1 - a2 * a2)).normalize();
-    const ang = (rnd(seed * 7 + 4) * 2 - 1) * (angDeg * Math.PI) / 180;
+    const ang = (rnd(seed * 7 + 4) * 2 - 1) * angDeg;
     const q = new Quat().setFromAxisAngle(axis, ang);
     const sc = scaleBase * (1 + (rnd(seed * 7 + 5) * 2 - 1) * frac);
     const tx = (rnd(seed * 7 + 6) * 2 - 1) * frac * diag;

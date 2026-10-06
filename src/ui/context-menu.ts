@@ -111,6 +111,17 @@ class ContextMenu {
             onSelect: () => events.fire('camera.viewBottom')
         }]);
 
+        const semanticSubmenu = new MenuPanel([{
+            text: () => i18n.t('context.semantic.selectGround'),
+            onSelect: () => events.fire('semantic.select', 'ground', 'set')
+        }, {
+            text: () => i18n.t('context.semantic.selectWater'),
+            onSelect: () => events.fire('semantic.select', 'water', 'set')
+        }, {
+            text: () => i18n.t('context.semantic.flattenGround'),
+            onSelect: () => events.fire('semantic.flatten')
+        }]);
+
         // ---- main menu items ----
 
         const items: MenuItem[] = [
@@ -152,16 +163,7 @@ class ContextMenu {
             },
             {
                 text: () => i18n.t('context.semantic'),
-                subMenu: new MenuPanel([{
-                    text: () => i18n.t('context.semantic.selectGround'),
-                    onSelect: () => events.fire('semantic.select', 'ground', 'set')
-                }, {
-                    text: () => i18n.t('context.semantic.selectWater'),
-                    onSelect: () => events.fire('semantic.select', 'water', 'set')
-                }, {
-                    text: () => i18n.t('context.semantic.flattenGround'),
-                    onSelect: () => events.fire('semantic.flatten')
-                }])
+                subMenu: semanticSubmenu
             },
             {}, // separator
             {
@@ -199,6 +201,7 @@ class ContextMenu {
         this.wrapper.appendChild(selectSubmenu.dom);
         this.wrapper.appendChild(transformSubmenu.dom);
         this.wrapper.appendChild(viewSubmenu.dom);
+        this.wrapper.appendChild(semanticSubmenu.dom);
         document.body.appendChild(this.wrapper);
 
         // ---- right-button drag tracking (distinguish click vs drag) ----

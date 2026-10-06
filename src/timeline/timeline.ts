@@ -185,7 +185,7 @@ const registerTimelineEvents = (events: Events) => {
     };
 
     const stop = () => {
-        animHandle.off();
+        animHandle?.off();
         animHandle = null;
     };
 

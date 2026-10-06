@@ -28,7 +28,7 @@ class LassoSelection {
         };
 
         const isClosed = () => {
-            return points.length > 1 && dist(currentPoint, points[0]) < 8;
+            return points.length > 1 && currentPoint && dist(currentPoint, points[0]) < 8;
         };
 
         const paint = () => {

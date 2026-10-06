@@ -193,7 +193,12 @@ const saveSnapshot = async (dataUrl: string, defaultName: string) => {
             await writable.close();
             return;
         } catch (e) {
-            // User cancelled
+            // 用户取消保存对话框（AbortError）：不再落到下面的 downloadFile，否则"取消"也会被下载。
+            if (e instanceof DOMException && e.name === 'AbortError') {
+                return;
+            }
+            // 其它错误（写入/权限失败）：记录后回退到简单下载，避免静默吞掉真实失败。
+            console.error('[snapshot] 保存对话框写入失败，回退到下载', e);
         }
     }
     // Fallback: simple download

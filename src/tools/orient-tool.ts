@@ -206,9 +206,9 @@ class OrientTool {
 
         events.on('pivot.moved', () => {
             if (active && splat && splat.orientSelection >= 0 && splat.orientSelection < splat.orientPoints.length) {
-                const p = events.invoke('pivot').transform.position;
+                const pivotPos = events.invoke('pivot').transform.position;
                 mat.invert(splat.worldTransform);
-                mat.transformPoint(p, splat.orientPoints[splat.orientSelection]);
+                mat.transformPoint(pivotPos, splat.orientPoints[splat.orientSelection]);
             }
             scene.forceRender = true;
         });

@@ -873,10 +873,11 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     const runSelectIntersect = (splat: Splat, op: 'add'|'remove'|'set'|'intersect', options: any) => {
         return scene.commandQueue.enqueue(async () => {
             const data = await scene.dataProcessor.intersect(options, splat);
-            // SelectOp consumes `data` synchronously in its constructor
-            // (IndexRanges.fromPredicate iterates immediately), so we can
-            // return the buffer to the pool as soon as the op is constructed.
-            events.fire('edit.add', new SelectOp(splat, op, data));
+            // SelectOp 只存 `data` 的引用、在 do() 的 captureRanges() 里才读取
+            // （op 经 CommandQueue 排队异步执行），所以这里必须拷贝一份交给 SelectOp
+            // 自持，池缓冲才能立刻还回；否则下一次同尺寸 intersect 会复用并覆写它，
+            // 导致选中"另一次手势"的行。
+            events.fire('edit.add', new SelectOp(splat, op, data.slice()));
             scene.dataProcessor.releaseMask(data);
         });
     };
@@ -997,8 +998,8 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
                             viewDir
                         }
                     }, splat);
-                    // SelectOp consumes `data` synchronously in its constructor
-                    events.fire('edit.add', new SelectOp(splat, op, data));
+                    // SelectOp 在 do() 时才读取 `data`，这里拷贝一份自持，池缓冲立刻还回。
+                    events.fire('edit.add', new SelectOp(splat, op, data.slice()));
                     scene.dataProcessor.releaseMask(data);
                 }
             });

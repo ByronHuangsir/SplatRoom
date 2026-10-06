@@ -679,8 +679,10 @@ class MultiOp {
     }
 
     async undo() {
-        for (const op of this.ops) {
-            await op.undo();
+        // 组合算子撤销必须逆序（先 apply 的 op 后撤销），否则去浮云/分离/愈合
+        // 这类 [SelectNone, Select+add, DeleteSelection] 序列会把"操作前已选中"的高斯还原错。
+        for (let i = this.ops.length - 1; i >= 0; i--) {
+            await this.ops[i].undo();
         }
     }
 

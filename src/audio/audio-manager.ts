@@ -170,6 +170,7 @@ class AudioManager {
             if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
             else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
             const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+            this.mediaRecorder = recorder;
             this.mediaStream = stream;
             this.recChunks = [];
             recorder.ondataavailable = (e) => {

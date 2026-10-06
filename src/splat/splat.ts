@@ -258,8 +258,10 @@ class Splat extends Element {
      */
     _lodBuildRequested = false;
     // 一次性告警标记：主相机引用缺失（排序兜底无法取相机姿态）只提示一次。
-    // 避免每帧刷屏。见 onPreRender??
+    // 避免每帧刷屏。见 onPreRender() 里的主相机缺失兜底分支。
     _warnedNoMainCam = false;
+    // 一次性告警标记：instance 缺失（unified 默认通路每帧命中，只提示一次）。
+    _warnedNoInstance = false;
     stateTexture: Texture;
     // encapsulates per-splat state mirror (cpu Uint8Array + gpu Texture).
     // all writes go through state.setBits/clearBits/toggleBits, then flush().
@@ -1740,7 +1742,10 @@ class Splat extends Element {
         this.onPreRenderOverlay();
 
         if (!this.entity?.gsplat?.instance) {
-            console.warn(`[Splat.onPreRender] skipped: entity=${!!this.entity}, gsplat=${!!this.entity?.gsplat}, instance=${!!this.entity?.gsplat?.instance}, name=${this.name}, changedCounter=${this.changedCounter}`);
+            if (!this._warnedNoInstance) {
+                this._warnedNoInstance = true;
+                console.warn(`[Splat.onPreRender] skipped: entity=${!!this.entity}, gsplat=${!!this.entity?.gsplat}, instance=${!!this.entity?.gsplat?.instance}, name=${this.name}, changedCounter=${this.changedCounter}`);
+            }
             return;
         }
 
