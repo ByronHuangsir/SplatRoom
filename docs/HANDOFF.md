@@ -33,7 +33,90 @@
 
 ---
 
-## 1. 环境（必须照抄的路径与命令）
+## 0.5 最新交接（2026-10-06，版本 3.23.84，提交 `fe6cb72`）——**先读这一节**
+
+### 0.5.1 现在是什么状态
+
+| 项 | 状态 |
+| --- | --- |
+| 版本 / 提交 | `3.23.84` / `fe6cb72`（工作树干净） |
+| 引擎补丁（`scripts/apply-patches.js`，**幂等，`npm ci` 的 postinstall 会自动打**） | **补丁 3**（投影器写回真实源行号 + `CACHE_STRIDE 8→9`）**默认开**；**补丁 7**（世界与相机都没变时复用上次排序）**默认开**；**补丁 6**（给排序键加决胜位）**默认关且不要开** —— 见 0.5.3；补丁 5 **默认关**（被 7 取代） |
+| 交付产物 | `release-build16\SplatRoom-3.23.84.exe`（portable）+ `win-unpacked\AI-Diagnostic-Start.cmd`（开 CDP 9333） |
+| 回归 | `npm run check` 绿；`verify-selection-overlay` / `verify-effects` / `verify-edit-grade-crop` / `verify-rings-pick` / `verify-selection-toolbar` / `verify-model-renders`(主线) 全 **0 失败** |
+
+### 0.5.2 ⚠️ 唯一未修的**用户可见严重问题**：unified（WebGPU）在部分大模型上只画约一半
+
+**现象**（用户 2026-10-05 报："鼠标中键缩放模型会消失 / 旋转会出现排序错误、一部分反方向出来了"）。
+用**用户本人的模型** `C:\Users\admin\Desktop\zwzz-txl-q\output\splat_51000.ply`（500 万点 / 1.18GB）
+在同一机位（`dist=0.4456`、`fov=75`）实测：
+
+| 通路 | 覆盖 litPct（az=0 / az=225） | `totalActive` | intervals | awaitingLod |
+| --- | --- | --- | --- | --- |
+| **unified（WebGPU）** | **39.12% / 38.88%** | 5,000,000 | 1 | false |
+| **主线（WebGL2）** | **70.80% / 70.45%** | — | — | — |
+
+对照：Spirula 776k 上两条通路是 70.16% / 70.23%（**没有这个差异**）⇒ 与模型强相关。
+
+**已经做过的隔离（别再重复）**：
+- **与我们的引擎补丁无关**：把引擎**完全恢复原样**（补丁 3/6/7 全关，`_tmp/engine-backup/*.orig` 覆盖 +
+  `apply-patches` 不打）后，同一机位仍是 **39.12% / 38.88%**；
+- 不是 LOD/预算丢点：`totalActive` 恒为 5,000,000、`awaitingLod=false`、`pendingLoad=0`；
+- 不是取景差异：距离/fov/焦点已逐角度对齐（`_tmp/probe-order-sweep.cjs` 会照抄 unified 页的取景）；
+- 补丁 7 开/关对**真实鼠标手势**（中键拖拽缩放、左键拖拽旋转，`_tmp/probe-user-gesture.cjs`）
+  的影响逐位相同，拖拽过程中连续采样也没出现"消失"；
+- **剔除阈值 A/B 无效**：`minPixelSize` / `minContribution` 设 0 后画面**毫无变化**（39.12% 全程不变），
+  且读回值仍是 2 ⇒ **外部 setter 没生效**（与第 7 节"组件 setter 无效"的旧记录一致）。
+
+**下一步（按这个顺序）**：
+1. 找到**真正生效**的剔除参数通路：引擎 `GSplatParams._material`（`setParameter('minPixelSize'…)`）
+   与 projector dispatch 里的 `params.minPixelSize * 0.5` / `params.minContribution`
+   （`gsplat-hybrid-renderer.js` 的 `sortAndProjectForCamera` → `projector.dispatch`）。判据：
+   用 `_tmp/probe-cull-ab.cjs` 改值后 litPct 必须变化，否则就是没打到；
+2. 若阈值不是原因 ⇒ 查 unified 的**视锥剔除/包围盒**（`world.hasBounds` 的 bounds groups、
+   `_runFrustumCulling`）："特定角度整块少一半"最像 AABB 过小导致的整块误剔；
+3. 全程用同一判据验收：**用户模型 + 同一机位 + unified vs 主线 litPct**（目标 39% → ~70%）。
+
+**现场可用方案（先让用户能干活）**：设置里把 **GPU 后端切到 WebGL2**（= `?gpu=webgl2&unified=0`），
+主线在该模型上是完整的。
+
+### 0.5.3 排序键**绝对不要改**（补丁 6 的两次失败，别再犯）
+
+| 写法 | 后果 |
+| --- | --- |
+| `(raw << 8) \| (id & 255)` | 键量级放大 256 倍 ⇒ 深度信息被推出排序器位宽 ⇒ **排序彻底混乱**（用户 3.23.80 现场） |
+| `(raw & 0xFFFFFF00) \| (id & 255)` | 把**远距离 bin** 里 `divider×binFrac < 256` 的键**归并** ⇒ 那片区域退化成槽位次序 ⇒ **特定角度是碎的** |
+
+② 的闪烁（薄壁模型看内壁时逐帧抖）改用**不碰键**的补丁 7 解决（不再重排 ⇒ 并列名次不抖）。
+
+### 0.5.4 本仓最常用的探针（都在 `_tmp/`，不进 git，随交接包 zip 一起给）
+
+| 探针 | 回答什么问题 |
+| --- | --- |
+| `probe-startup.cjs` | **bundle 能不能起来**（`window.scene` + page/console 错误 + 画面亮比）—— 打包/改着色器后必跑 |
+| `probe-order-sweep.cjs` | **排序/渲染正确性**：同机位 unified vs 主线逐像素、多角度（分歧应 ≈0.1~0.4%） |
+| `probe-user-model.cjs` / `probe-user-gesture.cjs` / `probe-lod-angle.cjs` | 用真实手势复现"消失/反方向"，并记录激活点数/区间数（排除 LOD） |
+| `probe-cull-ab.cjs` | 剔除阈值 A/B（**改完必须看到 litPct 变化**，否则参数没生效） |
+| `probe-resort-census.cjs` / `probe-tie-census.cjs` | 每帧排序次数、并列键比例（② 的机理证据） |
+| `probe-rings-look.cjs` | 环模式观感（`edgeRatio`：轮廓化程度，中心点 ≈1.8 / 边界环 ≈8.5） |
+| `probe-cursor-lag.cjs` | 光标延迟口径（pointermove 事件延迟 + rAF + **可见性校验**） |
+| `probe-paint-lag.cjs` | 画笔涂抹场景（③ 的复现口径） |
+| `_tmp/analyze-compare.cjs` | 分析用户给的对照图（纯 Node，无需浏览器） |
+
+### 0.5.5 本轮踩过的坑（都写进了注释，务必别重犯）
+
+1. **着色器模板里不能出现反引号**（本仓第 6 次）：`unified-shaders.ts` / `splat-shader*.ts` /
+   引擎 chunk 全是 JS 模板字符串；反引号会提前闭合模板 ⇒ `ReferenceError: raw is not defined`
+   ⇒ **应用启动即崩**。改完**先跑 `npm run check`（audit 有静态护栏）再跑 `probe-startup.cjs`**。
+2. **不要手写正则/切片去回退引擎补丁**：正确做法是把 `_tmp/engine-backup/*.orig`
+   （投影器 chunk / hybrid renderer 的原始文件）**拷回**，再跑 `npm run patched` 重打。
+   （本轮有一次切片回退只删了第一个注入块，导致两轮测量数据被污染。）
+3. **给引擎注入代码要检查作用域**：把短路块插在 `const gpuSorter/projector` **声明之前** ⇒
+   每帧 TDZ `ReferenceError` ⇒ 渲染静默中断（表现为"又快又稳"，其实什么都没画，套件全红）。
+4. **改 `package.json` 一律用 node**：PowerShell 5.1 的 `Get-Content -Raw`/`Set-Content` 对无 BOM 的
+   UTF-8 文件按 ANSI 读，会把中文 author 写成乱码并混入控制字符 ⇒ electron-builder 直接拒绝打包。
+5. **探针结论要配"可见性校验"**：只看延迟/稳定性会把"空场景"误读成"又好又稳"。
+
+
 
 ```
 仓库            D:\DeepSeek\SplatRoomV2\SplatRoomV3-0        （git 仓库，master）
