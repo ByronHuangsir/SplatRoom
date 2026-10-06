@@ -389,7 +389,7 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
     let touched = 0;
     for (const material of materials) {
         // 只在**内容真的变了**时才写 chunk：`ShaderChunkMap.set()` 在值不同时会 markDirty，
-        // 鑰屽紩鎿庢覆鏌撳墠浼?`update()` 鈫?鍙戠幇 dirty 鈫?`clearVariants()` 鈬?姣忓抚閲嶇紪璇戙€?
+        // 而引擎渲染前会 `update()` → 发现 dirty → `clearVariants()` → 每帧重编译。
         // 所以这里必须用内容比较来保证幂等（每帧都会调进来）。
         const bakedModifyVS = bakeUnifiedModifyVS();
         const chunks = material.shaderChunks?.wgsl;
@@ -576,8 +576,8 @@ export function ensureUnifiedMaterial(scene: any, params: UnifiedMaterialParams 
     }
 
     // 探针/套件用的句柄：这条通路的材质不在组件上（引擎故意断开），
-    // 闄や簡娓叉煋寰幆閲岄偅涓€鍒伙紝澶栭潰**娌℃湁鍒殑鍔炴硶**鎷垮埌瀹冦€備笌浠撳簱閲屽叾瀹?
-    // `__SPLATROOM_*` 閫冪敓寮€鍏冲悓涓€绫伙紝鍙銆佹棤鍓綔鐢ㄣ€?
+    // 除了渲染循环里那一刻，外面**没有别的办法**拿到它。与仓库里其它
+    // `__SPLATROOM_*` 逃生开关同一类，只读、无副作用。
     (globalThis as any).__SPLATROOM_UNIFIED_MATERIAL__ = materials[0];
     return touched > 0;
 }

@@ -5,19 +5,19 @@
  * material from its **WGSL** sources. `shader-generator-shader.js` picks WGSL
  * whenever the material carries WGSL sources and `shaderChunks.useWGSL` is true,
  * and `GSplatResourceBase.configureMaterial()` always fills the *wgsl* chunk map
- * on a WebGPU device 閳?so overriding only the GLSL chunks (`shaderChunks.glsl`)
+ * on a WebGPU device —so overriding only the GLSL chunks (`shaderChunks.glsl`)
  * silently does nothing there: the engine's stock WGSL splat shader runs instead,
  * which ignores every SplatRoom feature (colour grading, hidden/deleted state,
  * crop box, particle effects, transform palette, selection overlay) and declares a
  * single fragment output, making our two-attachment splat pass an invalid pipeline
  * (Dawn: "Color target has no corresponding fragment stage output", targets[1]).
- * See docs/V3-WebGPU-閻滄壆濮?md.
+ * See docs/V3-WebGPU-现状.md.
  *
- * Chunk mapping 閳?the same four chunks the GLSL path overrides:
- *   `vertexShaderWGSL`  閳?`gsplatVS`        (vertex entry, replaces the engine's)
- *   `fragmentShaderWGSL`閳?`gsplatPS`        (fragment entry)
- *   `gsplatCenterWGSL`  閳?`gsplatCenterVS`  (`initCenter` + transform palette)
- *   `gsplatModifyWGSL`  閳?`gsplatModifyVS`  (`modifySplat*` hooks)
+ * Chunk mapping —the same four chunks the GLSL path overrides:
+ *   `vertexShaderWGSL`  —`gsplatVS`        (vertex entry, replaces the engine's)
+ *   `fragmentShaderWGSL`—`gsplatPS`        (fragment entry)
+ *   `gsplatCenterWGSL`  —`gsplatCenterVS`  (`initCenter` + transform palette)
+ *   `gsplatModifyWGSL`  —`gsplatModifyVS`  (`modifySplat*` hooks)
  *
  * WGSL dialect notes (these are PlayCanvas processor conventions, not plain WGSL):
  *   - `varying name: type;` declarations are collected into VertexOutput/FragmentInput;
@@ -411,7 +411,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 // Fragment stage: mirrors `fragmentShader` in splat-shader.ts. The forward path must
 // write BOTH `output.color` (scene colour) and `output.color1` (selection overlay
-// consumed by the outline/underlay passes) 閳?the two-attachment splat target needs a
+// consumed by the outline/underlay passes) —the two-attachment splat target needs a
 // fragment output for every colour attachment.
 const fragmentShaderWGSL = /* wgsl */`
 varying texCoord_flags: vec4f;

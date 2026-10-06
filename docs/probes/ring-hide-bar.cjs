@@ -1,4 +1,4 @@
-﻿const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer-core');
 const { BROWSER_PATH: EDGE , launchPatched: _launchPatched } = require('../verify/lib/browser.cjs');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 (async () => {

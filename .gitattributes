@@ -1,0 +1,19 @@
+# 统一文本行尾与编码策略：UTF-8 无 BOM、LF 行尾。
+# 注意：本文件只定义策略；历史里已有的 CRLF/混合行尾需单独执行
+#   git add --renormalize .
+# 一次性归一化（会产生一次较大的纯行尾 diff），见 docs/换机器-第二台机器适配记录.md。
+* text=auto eol=lf
+
+# 二进制文件不参与换行归一化
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.wasm binary
+*.pdf binary
+*.ply binary
+*.zip binary
+*.exe binary
+*.bundle binary

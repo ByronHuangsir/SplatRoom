@@ -675,7 +675,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         scene.camera.ortho = true;
 
         // Re-fit the model into the ortho view, centered on the CURRENT focal
-        // point (the point the user is orbiting around 鈥?their "focus"), not
+        // point (the point the user is orbiting around —their "focus"), not
         // the raw scene AABB center. Without this the perspective zoom distance
         // carries over into orthoHeight (model looks tiny / off-screen), and the
         // view centers on the wrong point. focus() preserves the axial view just
@@ -813,7 +813,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
             const asset = scene.assetLoader.createGSplatAsset(gsplatData, 'merged.ply');
             const newSplat = new Splat(asset, new Quat());
 
-            // Transform is identity 鈥?positions are already in world space
+            // Transform is identity —positions are already in world space
             newSplat.entity.setLocalPosition(0, 0, 0);
             newSplat.entity.setLocalRotation(0, 0, 0, 1);
             newSplat.entity.setLocalScale(1, 1, 1);
@@ -2254,7 +2254,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     events.on('camera.pitchDecrease', () => scene.camera.adjustPitch(-15));
     events.on('camera.pitchIncrease', () => scene.camera.adjustPitch(15));
 
-    // NumPad 5 鈫?reset camera (in addition to Shift+F)
+    // NumPad 5 →reset camera (in addition to Shift+F)
     events.on('camera.resetNumpad', () => events.fire('camera.reset'));
 
     // ---- camera axis adjustments (heading / pitch) ----
@@ -2381,7 +2381,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     events.function('camera.getPose', () => {
         // Always return the viewport camera's actual orbit state. The virtual
-        // animation camera is a completely separate entity 鈥?if the user wants
+        // animation camera is a completely separate entity —if the user wants
         // to capture keyframes from the animation camera's perspective, they
         // enter Camera View Mode (Numpad 0) and the viewport position/focalPoint
         // will match the animation camera's actual pose.
@@ -2414,7 +2414,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
 
     // Virtual animation camera update: drives the animCameraEntity directly
     // with setLocalPosition + lookAt, bypassing the orbit state machine entirely.
-    // This is the output side of the spline 鈫?camera pipeline.
+    // This is the output side of the spline →camera pipeline.
     events.on('animCamera.update', (pose: { position: Vec3, target: Vec3, fov?: number }) => {
         const animEntity = scene.animCameraEntity;
         if (!animEntity) return;
@@ -2450,7 +2450,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
         }
     });
 
-    // Toggle Camera View Mode 鈥?syncs the viewport to the animation camera
+    // Toggle Camera View Mode —syncs the viewport to the animation camera
     // (like Blender's Numpad 0). Exits on user interaction in controllers.ts.
     events.on('camera.toggleViewMode', () => {
         scene.camera.cameraViewMode = !scene.camera.cameraViewMode;
